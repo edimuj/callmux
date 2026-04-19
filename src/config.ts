@@ -1,0 +1,79 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { CallmuxConfig, ServerConfig } from "./types.js";
+
+/**
+ * Load callmux config from a JSON file or inline MCP server definitions.
+ *
+ * Accepts two formats:
+ *
+ * 1. Full callmux config:
+ * {
+ *   "servers": { "github": { "command": "...", "args": [...] } },
+ *   "cacheTtlSeconds": 60
+ * }
+ *
+ * 2. MCP-compatible mcpServers format (from .mcp.json / Claude Code settings):
+ * {
+ *   "mcpServers": { "github": { "command": "...", "args": [...] } }
+ * }
+ */
+export async function loadConfig(configPath: string): Promise<CallmuxConfig> {
+  const raw = await readFile(resolve(configPath), "utf-8");
+  const parsed = JSON.parse(raw);
+
+  // Full callmux config
+  if (parsed.servers && typeof parsed.servers === "object") {
+    return {
+      servers: parsed.servers as Record<string, ServerConfig>,
+      cacheTtlSeconds: parsed.cacheTtlSeconds ?? 0,
+      maxConcurrency: parsed.maxConcurrency ?? 20,
+    };
+  }
+
+  // MCP-compatible format
+  if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+    return {
+      servers: parsed.mcpServers as Record<string, ServerConfig>,
+      cacheTtlSeconds: parsed.cacheTtlSeconds ?? 0,
+      maxConcurrency: parsed.maxConcurrency ?? 20,
+    };
+  }
+
+  throw new Error(
+    "Invalid config: expected { servers: {...} } or { mcpServers: {...} }"
+  );
+}
+
+/**
+ * Build config from CLI arguments for single-server mode.
+ * callmux -- command arg1 arg2
+ */
+export function configFromArgs(args: string[]): CallmuxConfig {
+  const dashDash = args.indexOf("--");
+  if (dashDash === -1 || dashDash === args.length - 1) {
+    throw new Error("Usage: callmux [options] -- command [args...]");
+  }
+
+  const command = args[dashDash + 1];
+  const commandArgs = args.slice(dashDash + 2);
+
+  let cacheTtl = 0;
+  let maxConcurrency = 20;
+
+  for (let i = 0; i < dashDash; i++) {
+    if (args[i] === "--cache" && i + 1 < dashDash) {
+      cacheTtl = parseInt(args[++i], 10) || 0;
+    } else if (args[i] === "--concurrency" && i + 1 < dashDash) {
+      maxConcurrency = parseInt(args[++i], 10) || 20;
+    }
+  }
+
+  return {
+    servers: {
+      default: { command, args: commandArgs },
+    },
+    cacheTtlSeconds: cacheTtl,
+    maxConcurrency,
+  };
+}

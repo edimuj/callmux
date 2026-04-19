@@ -1,0 +1,58 @@
+{
+  "name": "callmux",
+  "version": "0.1.0",
+  "description": "Multiplexer for MCP tool calls — parallel execution, batching, caching, and pipelining for any MCP server",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "callmux": "dist/bin/callmux.mjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edimuj/callmux.git"
+  },
+  "homepage": "https://github.com/edimuj/callmux#readme",
+  "bugs": {
+    "url": "https://github.com/edimuj/callmux/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "tsc --noEmit && node --test dist/**/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "multiplexer",
+    "parallel",
+    "batch",
+    "proxy",
+    "ai",
+    "agents",
+    "tool-calls"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.0.0"
+  },
+  "author": "Edin Mujkanovic",
+  "license": "MIT"
+}
