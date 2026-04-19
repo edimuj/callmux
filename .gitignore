@@ -3,4 +3,7 @@ dist/
 *.tgz
 .DS_Store
 test-config.json
+test-config-filtered.json
 test-drive.mjs
+test-filter.mjs
+share/

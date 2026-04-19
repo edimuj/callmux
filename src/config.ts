@@ -60,18 +60,21 @@ export function configFromArgs(args: string[]): CallmuxConfig {
 
   let cacheTtl = 0;
   let maxConcurrency = 20;
+  let tools: string[] | undefined;
 
   for (let i = 0; i < dashDash; i++) {
     if (args[i] === "--cache" && i + 1 < dashDash) {
       cacheTtl = parseInt(args[++i], 10) || 0;
     } else if (args[i] === "--concurrency" && i + 1 < dashDash) {
       maxConcurrency = parseInt(args[++i], 10) || 20;
+    } else if (args[i] === "--tools" && i + 1 < dashDash) {
+      tools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
     }
   }
 
   return {
     servers: {
-      default: { command, args: commandArgs },
+      default: { command, args: commandArgs, tools },
     },
     cacheTtlSeconds: cacheTtl,
     maxConcurrency,

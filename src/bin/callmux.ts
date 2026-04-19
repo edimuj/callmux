@@ -17,6 +17,7 @@ Usage:
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
+  --tools <list>        Comma-separated tool whitelist (single-server mode)
   --cache <seconds>     Cache TTL for read operations (default: 0 = off)
   --concurrency <n>     Max parallel calls (default: 20)
   --help, -h            Show this help
@@ -24,7 +25,7 @@ Options:
 Config file format:
   {
     "servers": {
-      "github": { "command": "gh-mcp", "args": ["--token", "..."] },
+      "github": { "command": "gh-mcp", "args": ["--token", "..."], "tools": ["create_issue", "search"] },
       "jira":   { "command": "jira-mcp" }
     },
     "cacheTtlSeconds": 60,
@@ -38,6 +39,7 @@ Examples:
   callmux --config callmux.json
   callmux --cache 60 -- node my-mcp-server.js
   callmux -- npx -y @modelcontextprotocol/server-github
+  callmux --tools create_issue,search -- npx -y @modelcontextprotocol/server-github
 
 Meta-tools exposed:
   callmux_parallel      Execute N tool calls concurrently

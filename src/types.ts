@@ -7,6 +7,8 @@ export interface ServerConfig {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  /** Whitelist of tool names to expose (omit to expose all) */
+  tools?: string[];
 }
 
 export interface CallmuxConfig {

@@ -39,6 +39,9 @@ npm install -g callmux
 # Wrap any MCP server — callmux proxies all its tools and adds meta-tools
 callmux -- npx -y @modelcontextprotocol/server-github
 
+# Only expose specific tools
+callmux --tools create_issue,search_issues -- npx -y @modelcontextprotocol/server-github
+
 # With caching (60s TTL for read operations)
 callmux --cache 60 -- node my-mcp-server.js
 ```
@@ -48,7 +51,11 @@ callmux --cache 60 -- node my-mcp-server.js
 ```json
 {
   "servers": {
-    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "tools": ["create_issue", "search_issues", "get_issue"]
+    },
     "jira": { "command": "node", "args": ["jira-mcp.js"] }
   },
   "cacheTtlSeconds": 60,

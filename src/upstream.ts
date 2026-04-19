@@ -31,7 +31,12 @@ export class UpstreamManager {
 
       await client.connect(transport);
 
-      const { tools } = await client.listTools();
+      const { tools: allTools } = await client.listTools();
+
+      const allowSet = config.tools ? new Set(config.tools) : null;
+      const tools = allowSet
+        ? allTools.filter((t) => allowSet.has(t.name))
+        : allTools;
 
       for (const tool of tools) {
         const qualifiedName = Object.keys(servers).length > 1
@@ -44,7 +49,8 @@ export class UpstreamManager {
       this.transports.set(name, transport);
       connections.push({ name, config, tools });
 
-      process.stderr.write(`[callmux] Connected to "${name}": ${tools.length} tools\n`);
+      const filtered = allowSet ? ` (filtered from ${allTools.length})` : "";
+      process.stderr.write(`[callmux] Connected to "${name}": ${tools.length} tools${filtered}\n`);
     }
 
     return connections;
