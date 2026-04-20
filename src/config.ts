@@ -89,8 +89,38 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     throw new Error(`servers.${serverName} must be an object`);
   }
 
-  if (typeof value.command !== "string" || value.command.length === 0) {
-    throw new Error(`servers.${serverName}.command must be a non-empty string`);
+  const hasUrl = typeof value.url === "string" && value.url.length > 0;
+  const hasCommand = typeof value.command === "string" && value.command.length > 0;
+
+  if (!hasUrl && !hasCommand) {
+    throw new Error(`servers.${serverName} must have either "command" (stdio) or "url" (http/sse)`);
+  }
+
+  if (hasUrl && hasCommand) {
+    throw new Error(`servers.${serverName} cannot have both "command" and "url"`);
+  }
+
+  const tools = parseStringArray(value.tools, `servers.${serverName}.tools`);
+  const cachePolicy = parseCachePolicy(
+    value.cachePolicy,
+    `servers.${serverName}.cachePolicy`
+  );
+
+  if (hasUrl) {
+    const transport = value.transport === undefined
+      ? undefined
+      : (["streamable-http", "sse"].includes(value.transport as string)
+        ? value.transport as "streamable-http" | "sse"
+        : (() => { throw new Error(`servers.${serverName}.transport must be "streamable-http" or "sse"`); })());
+    const headers = parseStringRecord(value.headers, `servers.${serverName}.headers`);
+
+    return {
+      url: value.url as string,
+      ...(transport ? { transport } : {}),
+      ...(headers ? { headers } : {}),
+      ...(tools ? { tools } : {}),
+      ...(cachePolicy ? { cachePolicy } : {}),
+    };
   }
 
   if (value.args !== undefined && !Array.isArray(value.args)) {
@@ -99,11 +129,6 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
 
   const args = parseStringArray(value.args, `servers.${serverName}.args`);
   const env = parseStringRecord(value.env, `servers.${serverName}.env`);
-  const tools = parseStringArray(value.tools, `servers.${serverName}.tools`);
-  const cachePolicy = parseCachePolicy(
-    value.cachePolicy,
-    `servers.${serverName}.cachePolicy`
-  );
   const cwd =
     value.cwd === undefined
       ? undefined
@@ -114,7 +139,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
           })();
 
   return {
-    command: value.command,
+    command: value.command as string,
     ...(args ? { args } : {}),
     ...(env ? { env } : {}),
     ...(cwd ? { cwd } : {}),
@@ -277,45 +302,93 @@ export async function saveManagedConfig(
 /**
  * Build config from CLI arguments for single-server mode.
  * callmux -- command arg1 arg2
+ * callmux --url https://mcp.example.com/sse
  */
 export function configFromArgs(args: string[]): CallmuxConfig {
-  const dashDash = args.indexOf("--");
-  if (dashDash === -1 || dashDash === args.length - 1) {
-    throw new Error("Usage: callmux [options] -- command [args...]");
-  }
-
-  const command = args[dashDash + 1];
-  const commandArgs = args.slice(dashDash + 2);
-
   let cacheTtl = 0;
   let maxConcurrency = 20;
   let tools: string[] | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
+  let url: string | undefined;
+  let transport: "streamable-http" | "sse" | undefined;
+  const headers: Record<string, string> = {};
   const env: Record<string, string> = {};
 
-  for (let i = 0; i < dashDash; i++) {
-    if (args[i] === "--cache" && i + 1 < dashDash) {
+  const dashDash = args.indexOf("--");
+  const optionsLimit = dashDash === -1 ? args.length : dashDash;
+
+  for (let i = 0; i < optionsLimit; i++) {
+    if (args[i] === "--cache" && i + 1 < optionsLimit) {
       const value = Number.parseInt(args[++i], 10);
       cacheTtl = parseNonNegativeInteger(value, "--cache");
-    } else if (args[i] === "--concurrency" && i + 1 < dashDash) {
+    } else if (args[i] === "--concurrency" && i + 1 < optionsLimit) {
       const value = Number.parseInt(args[++i], 10);
       maxConcurrency = parsePositiveInteger(value, "--concurrency");
-    } else if (args[i] === "--tools" && i + 1 < dashDash) {
+    } else if (args[i] === "--tools" && i + 1 < optionsLimit) {
       tools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--cache-allow" && i + 1 < dashDash) {
+    } else if (args[i] === "--cache-allow" && i + 1 < optionsLimit) {
       cacheAllowTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--cache-deny" && i + 1 < dashDash) {
+    } else if (args[i] === "--cache-deny" && i + 1 < optionsLimit) {
       cacheDenyTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--env" && i + 1 < dashDash) {
+    } else if (args[i] === "--env" && i + 1 < optionsLimit) {
       const pair = args[++i];
       const eqIdx = pair.indexOf("=");
       if (eqIdx === -1) {
         throw new Error(`Invalid --env value "${pair}": must be KEY=VALUE`);
       }
       env[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
+    } else if (args[i] === "--url" && i + 1 < optionsLimit) {
+      url = args[++i];
+    } else if (args[i] === "--transport" && i + 1 < optionsLimit) {
+      const t = args[++i];
+      if (t !== "streamable-http" && t !== "sse") {
+        throw new Error(`--transport must be "streamable-http" or "sse"`);
+      }
+      transport = t;
+    } else if (args[i] === "--header" && i + 1 < optionsLimit) {
+      const pair = args[++i];
+      const colonIdx = pair.indexOf(":");
+      if (colonIdx === -1) {
+        throw new Error(`Invalid --header value "${pair}": must be Name:Value`);
+      }
+      headers[pair.slice(0, colonIdx).trim()] = pair.slice(colonIdx + 1).trim();
     }
   }
+
+  const cachePolicy =
+    cacheAllowTools?.length || cacheDenyTools?.length
+      ? {
+          ...(cacheAllowTools?.length ? { allowTools: cacheAllowTools } : {}),
+          ...(cacheDenyTools?.length ? { denyTools: cacheDenyTools } : {}),
+        }
+      : undefined;
+
+  if (url) {
+    if (dashDash !== -1) {
+      throw new Error("Cannot use both --url and -- command");
+    }
+    return {
+      servers: {
+        default: {
+          url,
+          ...(transport ? { transport } : {}),
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+          ...(tools ? { tools } : {}),
+          ...(cachePolicy ? { cachePolicy } : {}),
+        },
+      },
+      cacheTtlSeconds: cacheTtl,
+      maxConcurrency,
+    };
+  }
+
+  if (dashDash === -1 || dashDash === args.length - 1) {
+    throw new Error("Usage: callmux [options] -- command [args...] OR callmux --url <url>");
+  }
+
+  const command = args[dashDash + 1];
+  const commandArgs = args.slice(dashDash + 2);
 
   return {
     servers: {
@@ -324,17 +397,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
         args: commandArgs,
         tools,
         ...(Object.keys(env).length > 0 ? { env } : {}),
-        cachePolicy:
-          cacheAllowTools?.length || cacheDenyTools?.length
-            ? {
-                ...(cacheAllowTools?.length
-                  ? { allowTools: cacheAllowTools }
-                  : {}),
-                ...(cacheDenyTools?.length
-                  ? { denyTools: cacheDenyTools }
-                  : {}),
-              }
-            : undefined,
+        ...(cachePolicy ? { cachePolicy } : {}),
       },
     },
     cacheTtlSeconds: cacheTtl,

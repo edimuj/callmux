@@ -7,9 +7,11 @@ import {
   getDefaultClientConfigPath,
   type ClientKind,
 } from "./client-config.js";
+import { detectExistingConfigs, type DetectedServer } from "./detect.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SERVER_REGISTRY, type RegistryEntry } from "./registry.js";
+import { isHttpServerConfig } from "./types.js";
 import type { CallmuxConfig, ServerConfig } from "./types.js";
 
 interface DiscoveredServer {
@@ -45,13 +47,15 @@ export async function runSetup(configPath?: string): Promise<void> {
     }
   }
 
+  const imported = await detectAndImport();
   const servers = await selectServers();
-  if (servers.length === 0) {
+
+  if (imported.length === 0 && servers.length === 0) {
     p.cancel("No servers selected.");
     process.exit(0);
   }
 
-  const discovered = await discoverTools(servers);
+  const discovered = await discoverTools(servers, imported);
 
   const cacheChoice = await p.confirm({
     message: "Enable caching for read-only tools? (recommended)",
@@ -75,7 +79,49 @@ export async function runSetup(configPath?: string): Promise<void> {
   p.outro("Setup complete! Your agent now has access to callmux meta-tools.");
 }
 
-async function selectServers(): Promise<Array<{ entry?: RegistryEntry; custom?: { name: string; command: string } }>> {
+async function detectAndImport(): Promise<DiscoveredServer[]> {
+  const detection = await detectExistingConfigs();
+
+  if (detection.servers.length === 0) return [];
+
+  const grouped = new Map<string, DetectedServer[]>();
+  for (const server of detection.servers) {
+    const list = grouped.get(server.source) ?? [];
+    list.push(server);
+    grouped.set(server.source, list);
+  }
+
+  p.log.info(
+    `Found ${detection.servers.length} existing MCP server(s) in: ${[...grouped.keys()].join(", ")}`
+  );
+
+  const options = detection.servers.map((s) => {
+    const hint = isHttpServerConfig(s.config) ? s.config.url : `${(s.config as { command: string }).command}`;
+    return {
+      value: s.name,
+      label: `${s.name} (${s.source})`,
+      hint,
+    };
+  });
+
+  const selected = await p.multiselect({
+    message: "Import existing servers into callmux?",
+    options,
+    required: false,
+  });
+
+  if (p.isCancel(selected) || selected.length === 0) return [];
+
+  const imported: DiscoveredServer[] = [];
+  for (const name of selected) {
+    const server = detection.servers.find((s) => s.name === name)!;
+    imported.push({ name: server.name, config: server.config, tools: [] });
+  }
+
+  return imported;
+}
+
+async function selectServers(): Promise<Array<{ entry?: RegistryEntry; custom?: { name: string; command: string; url?: string } }>> {
   const registryOptions = SERVER_REGISTRY.map((entry) => ({
     value: entry.name,
     label: entry.label,
@@ -96,7 +142,7 @@ async function selectServers(): Promise<Array<{ entry?: RegistryEntry; custom?: 
     process.exit(0);
   }
 
-  const results: Array<{ entry?: RegistryEntry; custom?: { name: string; command: string } }> = [];
+  const results: Array<{ entry?: RegistryEntry; custom?: { name: string; command: string; url?: string } }> = [];
 
   for (const name of selected) {
     if (name === "__custom__") {
@@ -114,20 +160,51 @@ async function selectServers(): Promise<Array<{ entry?: RegistryEntry; custom?: 
         process.exit(0);
       }
 
-      const customCommand = await p.text({
-        message: "Command to start the server:",
-        placeholder: "npx -y @modelcontextprotocol/server-something",
-        validate: (v = "") => {
-          if (!v.trim()) return "Command is required";
-        },
+      const connectionType = await p.select({
+        message: "How does this server connect?",
+        options: [
+          { value: "stdio", label: "Local command (stdio)", hint: "npx, node, python, etc." },
+          { value: "url", label: "Remote URL (HTTP/SSE)", hint: "https://..." },
+        ],
       });
 
-      if (p.isCancel(customCommand)) {
+      if (p.isCancel(connectionType)) {
         p.cancel("Setup cancelled.");
         process.exit(0);
       }
 
-      results.push({ custom: { name: customName, command: customCommand } });
+      if (connectionType === "url") {
+        const customUrl = await p.text({
+          message: "Server URL:",
+          placeholder: "https://mcp.example.com/sse",
+          validate: (v = "") => {
+            if (!v.trim()) return "URL is required";
+            try { new URL(v); } catch { return "Must be a valid URL"; }
+          },
+        });
+
+        if (p.isCancel(customUrl)) {
+          p.cancel("Setup cancelled.");
+          process.exit(0);
+        }
+
+        results.push({ custom: { name: customName, command: "", url: customUrl } });
+      } else {
+        const customCommand = await p.text({
+          message: "Command to start the server:",
+          placeholder: "npx -y @modelcontextprotocol/server-something",
+          validate: (v = "") => {
+            if (!v.trim()) return "Command is required";
+          },
+        });
+
+        if (p.isCancel(customCommand)) {
+          p.cancel("Setup cancelled.");
+          process.exit(0);
+        }
+
+        results.push({ custom: { name: customName, command: customCommand } });
+      }
     } else {
       results.push({ entry: SERVER_REGISTRY.find((e) => e.name === name)! });
     }
@@ -162,9 +239,10 @@ async function promptEnvVars(entry: RegistryEntry): Promise<Record<string, strin
 }
 
 async function discoverTools(
-  servers: Array<{ entry?: RegistryEntry; custom?: { name: string; command: string } }>
+  servers: Array<{ entry?: RegistryEntry; custom?: { name: string; command: string; url?: string } }>,
+  preImported: DiscoveredServer[] = []
 ): Promise<DiscoveredServer[]> {
-  const discovered: DiscoveredServer[] = [];
+  const discovered: DiscoveredServer[] = [...preImported];
 
   for (const server of servers) {
     const name = server.entry?.name ?? server.custom!.name;
@@ -175,23 +253,24 @@ async function discoverTools(
       env = await promptEnvVars(server.entry);
     }
 
-    let command: string;
-    let args: string[];
+    let config: ServerConfig;
 
-    if (server.entry) {
-      command = server.entry.command;
-      args = [...server.entry.args];
+    if (server.custom?.url) {
+      config = { url: server.custom.url };
+    } else if (server.entry) {
+      config = {
+        command: server.entry.command,
+        args: [...server.entry.args],
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      };
     } else {
       const parts = server.custom!.command.split(/\s+/);
-      command = parts[0];
-      args = parts.slice(1);
+      config = {
+        command: parts[0],
+        args: parts.slice(1),
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+      };
     }
-
-    const config: ServerConfig = {
-      command,
-      args,
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-    };
 
     const s = p.spinner();
     s.start(`Connecting to ${label}...`);

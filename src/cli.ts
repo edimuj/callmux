@@ -1,6 +1,7 @@
 import { buildClaudeEntry, buildCodexSnippet, type ClientKind } from "./client-config.js";
 import { getDefaultConfigPath } from "./config.js";
-import type { CachePolicyConfig, CallmuxConfig, ServerConfig } from "./types.js";
+import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
+import type { CachePolicyConfig, CallmuxConfig, ServerConfig, StdioServerConfig } from "./types.js";
 
 interface ServerMutation {
   command?: string;
@@ -36,6 +37,9 @@ function buildCachePolicy(
 }
 
 function formatCommand(server: ServerConfig): string {
+  if (isHttpServerConfig(server)) {
+    return server.url;
+  }
   return [server.command, ...(server.args ?? [])].join(" ");
 }
 
@@ -206,21 +210,6 @@ export function applyServerMutation(
     }
   }
 
-  let env = mutation.clearEnv
-    ? undefined
-    : server.env
-      ? { ...server.env }
-      : undefined;
-  if (mutation.setEnv) {
-    env = { ...(env ?? {}), ...mutation.setEnv };
-  }
-  if (mutation.removeEnv?.length && env) {
-    for (const key of mutation.removeEnv) {
-      delete env[key];
-    }
-    if (Object.keys(env).length === 0) env = undefined;
-  }
-
   let cachePolicy = mutation.clearCachePolicy
     ? undefined
     : server.cachePolicy
@@ -256,6 +245,31 @@ export function applyServerMutation(
     cachePolicy = undefined;
   }
 
+  if (isHttpServerConfig(server)) {
+    return {
+      url: server.url,
+      ...(server.transport ? { transport: server.transport } : {}),
+      ...(server.headers ? { headers: server.headers } : {}),
+      ...(tools ? { tools } : {}),
+      ...(cachePolicy ? { cachePolicy } : {}),
+    };
+  }
+
+  let env = mutation.clearEnv
+    ? undefined
+    : server.env
+      ? { ...server.env }
+      : undefined;
+  if (mutation.setEnv) {
+    env = { ...(env ?? {}), ...mutation.setEnv };
+  }
+  if (mutation.removeEnv?.length && env) {
+    for (const key of mutation.removeEnv) {
+      delete env[key];
+    }
+    if (Object.keys(env).length === 0) env = undefined;
+  }
+
   return {
     command: mutation.command ?? server.command,
     ...(mutation.command
@@ -276,22 +290,35 @@ export function applyServerMutation(
 
 export function serializeServers(config: CallmuxConfig): Array<{
   name: string;
-  command: string;
+  command?: string;
+  url?: string;
+  transport?: string;
   args?: string[];
   cwd?: string;
   tools?: string[];
   envKeys?: string[];
   cachePolicy?: CachePolicyConfig;
 }> {
-  return Object.entries(config.servers).map(([name, server]) => ({
-    name,
-    command: server.command,
-    ...(server.args ? { args: server.args } : {}),
-    ...(server.cwd ? { cwd: server.cwd } : {}),
-    ...(server.tools ? { tools: server.tools } : {}),
-    ...(server.env ? { envKeys: Object.keys(server.env).sort() } : {}),
-    ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
-  }));
+  return Object.entries(config.servers).map(([name, server]) => {
+    if (isHttpServerConfig(server)) {
+      return {
+        name,
+        url: server.url,
+        ...(server.transport ? { transport: server.transport } : {}),
+        ...(server.tools ? { tools: server.tools } : {}),
+        ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+      };
+    }
+    return {
+      name,
+      command: server.command,
+      ...(server.args ? { args: server.args } : {}),
+      ...(server.cwd ? { cwd: server.cwd } : {}),
+      ...(server.tools ? { tools: server.tools } : {}),
+      ...(server.env ? { envKeys: Object.keys(server.env).sort() } : {}),
+      ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+    };
+  });
 }
 
 export function formatServerList(config: CallmuxConfig): string {
@@ -302,15 +329,23 @@ export function formatServerList(config: CallmuxConfig): string {
 
   return entries
     .map(([name, server]) => {
-      const lines = [name, `  command: ${formatCommand(server)}`];
+      const lines: string[] = [name];
+
+      if (isHttpServerConfig(server)) {
+        lines.push(`  url: ${server.url}`);
+        if (server.transport) lines.push(`  transport: ${server.transport}`);
+      } else {
+        lines.push(`  command: ${formatCommand(server)}`);
+        if (server.cwd) lines.push(`  cwd: ${server.cwd}`);
+        const envKeys = formatValueList(server.env ? Object.keys(server.env).sort() : undefined);
+        if (envKeys) lines.push(`  env keys: ${envKeys}`);
+      }
+
       const tools = formatValueList(server.tools);
-      const envKeys = formatValueList(server.env ? Object.keys(server.env).sort() : undefined);
       const cacheAllow = formatValueList(server.cachePolicy?.allowTools);
       const cacheDeny = formatValueList(server.cachePolicy?.denyTools);
 
-      if (server.cwd) lines.push(`  cwd: ${server.cwd}`);
       if (tools) lines.push(`  tools: ${tools}`);
-      if (envKeys) lines.push(`  env keys: ${envKeys}`);
       if (cacheAllow) lines.push(`  cache allow: ${cacheAllow}`);
       if (cacheDeny) lines.push(`  cache deny: ${cacheDeny}`);
 

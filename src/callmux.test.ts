@@ -42,6 +42,7 @@ import { handleBatch, handleCacheClear, handleParallel, handlePipeline } from ".
 import { CallmuxProxy } from "./proxy.js";
 import { UpstreamManager } from "./upstream.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { StdioServerConfig } from "./types.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -296,7 +297,7 @@ test("configFromArgs parses --env KEY=VALUE pairs", () => {
     "server.js",
   ]);
 
-  assert.deepEqual(config.servers.default.env, {
+  assert.deepEqual((config.servers.default as StdioServerConfig).env, {
     GITHUB_TOKEN: "abc123",
     OTHER_KEY: "val=with=equals",
   });
@@ -936,4 +937,166 @@ test("tool lookup failures return structured error payloads", async () => {
       details: { tool: "missing_tool" },
     },
   });
+});
+
+// ─── HTTP/SSE transport config tests ──────────────────────────
+
+test("configFromArgs parses --url for HTTP transport", () => {
+  const config = configFromArgs(["--url", "https://mcp.example.com/mcp", "--cache", "30"]);
+
+  assert.deepEqual(config.servers.default, { url: "https://mcp.example.com/mcp" });
+  assert.equal(config.cacheTtlSeconds, 30);
+});
+
+test("configFromArgs parses --url with --transport and --header", () => {
+  const config = configFromArgs([
+    "--url", "https://mcp.example.com/sse",
+    "--transport", "sse",
+    "--header", "Authorization:Bearer token123",
+    "--tools", "read,write",
+  ]);
+
+  assert.deepEqual(config.servers.default, {
+    url: "https://mcp.example.com/sse",
+    transport: "sse",
+    headers: { Authorization: "Bearer token123" },
+    tools: ["read", "write"],
+  });
+});
+
+test("configFromArgs rejects --url combined with -- command", () => {
+  assert.throws(
+    () => configFromArgs(["--url", "https://example.com", "--", "node", "server.js"]),
+    /Cannot use both --url and -- command/
+  );
+});
+
+test("configFromArgs rejects invalid --transport value", () => {
+  assert.throws(
+    () => configFromArgs(["--url", "https://example.com", "--transport", "websocket"]),
+    /must be "streamable-http" or "sse"/
+  );
+});
+
+test("loadConfig parses HTTP server config from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-http-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          remote: {
+            url: "https://mcp.example.com/mcp",
+            transport: "streamable-http",
+            headers: { "X-Api-Key": "secret" },
+            tools: ["search"],
+          },
+        },
+        cacheTtlSeconds: 60,
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.servers.remote, {
+      url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
+      headers: { "X-Api-Key": "secret" },
+      tools: ["search"],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects server with both command and url", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-both-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          bad: { command: "node", url: "https://example.com" },
+        },
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /cannot have both/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects server with neither command nor url", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-none-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          bad: { args: ["--flag"] },
+        },
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /must have either/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("formatServerList handles mixed stdio and http servers", () => {
+  const config: import("./types.js").CallmuxConfig = {
+    servers: {
+      local: { command: "node", args: ["server.js"], env: { TOKEN: "x" } },
+      remote: { url: "https://mcp.example.com/sse", transport: "sse" },
+    },
+  };
+
+  const output = formatServerList(config);
+  assert.match(output, /local/);
+  assert.match(output, /command: node server\.js/);
+  assert.match(output, /remote/);
+  assert.match(output, /url: https:\/\/mcp\.example\.com\/sse/);
+  assert.match(output, /transport: sse/);
+});
+
+// ─── Config detection tests ───────────────────────────────────
+
+test("detectExistingConfigs finds servers from .mcp.json in cwd", async () => {
+  const { detectExistingConfigs: detect } = await import("./detect.js");
+  const dir = await mkdtemp(join(tmpdir(), "callmux-detect-"));
+  const originalCwd = process.cwd();
+
+  try {
+    process.chdir(dir);
+    await writeFile(
+      join(dir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] },
+          remote: { url: "https://api.example.com/mcp" },
+        },
+      })
+    );
+
+    const result = await detect();
+    const names = result.servers.map((s) => s.name);
+    assert.ok(names.includes("github"));
+    assert.ok(names.includes("remote"));
+
+    const github = result.servers.find((s) => s.name === "github")!;
+    assert.equal((github.config as StdioServerConfig).command, "npx");
+
+    const remote = result.servers.find((s) => s.name === "remote")!;
+    assert.equal((remote.config as import("./types.js").HttpServerConfig).url, "https://api.example.com/mcp");
+  } finally {
+    process.chdir(originalCwd);
+    await rm(dir, { recursive: true, force: true });
+  }
 });

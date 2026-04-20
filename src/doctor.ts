@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { UpstreamManager } from "./upstream.js";
+import { isHttpServerConfig } from "./types.js";
 import type { CallmuxConfig, ConfigFormat, ServerConfig } from "./types.js";
 
 type DoctorReportFormat = ConfigFormat | "missing" | "invalid";
@@ -101,9 +102,28 @@ async function inspectServer(
   name: string,
   config: ServerConfig
 ): Promise<ServerInspectionReport> {
-  const executablePath = await resolveExecutable(config.command);
   const issues: string[] = [];
   let tools: string[] = [];
+  let executablePath: string | undefined;
+
+  if (isHttpServerConfig(config)) {
+    const probe = await probeServer(name, config);
+    if (probe.issue) {
+      issues.push(`connect failed: ${probe.issue}`);
+    } else {
+      tools = probe.tools ?? [];
+    }
+
+    return {
+      name,
+      command: config.url,
+      status: issues.length > 0 ? "error" : "ok",
+      tools,
+      issues,
+    };
+  }
+
+  executablePath = await resolveExecutable(config.command);
 
   if (!executablePath) {
     issues.push(`command "${config.command}" was not found on PATH`);
@@ -269,6 +289,24 @@ export function formatServerTestReport(report: ServerTestReport): string {
   if (report.issues.length > 0) {
     lines.push("", ...report.issues.map((issue) => `Issue: ${issue}`));
   }
+
+  return lines.join("\n");
+}
+
+export function formatServerTestReports(reports: ServerTestReport[]): string {
+  if (reports.length === 0) {
+    return "No downstream servers configured.";
+  }
+
+  const okCount = reports.filter((report) => report.status === "ok").length;
+  const lines = [
+    `Status: ${okCount === reports.length ? "ok" : "issues found"}`,
+    `Servers tested: ${reports.length}`,
+    `Passed: ${okCount}`,
+    `Failed: ${reports.length - okCount}`,
+    "",
+    reports.map((report) => formatServerTestReport(report)).join("\n\n"),
+  ];
 
   return lines.join("\n");
 }

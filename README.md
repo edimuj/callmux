@@ -29,10 +29,12 @@ Agent (Claude, Codex, etc.)          callmux adds:
         │  stdio                     │ callmux_parallel    │
         ▼                            │ callmux_batch       │
    ┌─────────┐                       │ callmux_pipeline    │
-   │ callmux │──── stdio ───▶ MCP    │ callmux_cache_clear │
-   └─────────┘              Server   │ callmux_status      │
-        │                            └─────────────────────┘
-        └──── stdio ───▶ MCP Server 2 (optional)
+   │ callmux │──── stdio ───▶ Local  │ callmux_cache_clear │
+   └─────────┤              Server   │ callmux_status      │
+        │    │                       └─────────────────────┘
+        │    └──── http/sse ──▶ Remote Server
+        │
+        └──── stdio ───▶ Local Server 2 (optional)
 ```
 
 ## Install
@@ -218,10 +220,11 @@ npx -y callmux setup
 ```
 
 The wizard walks you through:
-1. **Pick servers** from a curated list (GitHub, Linear, Slack, Filesystem, etc.) or add custom
-2. **Auto-discovers tools** by probing each server, then lets you pick which to expose
-3. **Configures caching** with sensible defaults
-4. **Attaches to your client** (Claude Code, Codex) automatically
+1. **Detects existing MCP servers** from `.mcp.json`, `~/.claude.json`, and Claude Desktop config, then offers to import them
+2. **Pick servers** from a curated list (GitHub, Linear, Slack, Filesystem, etc.) or add custom (local command or remote URL)
+3. **Auto-discovers tools** by probing each server, then lets you pick which to expose
+4. **Configures caching** with sensible defaults
+5. **Attaches to your client** (Claude Code, Codex) automatically
 
 ---
 
@@ -301,6 +304,35 @@ Wrap multiple MCP servers through a single callmux instance. Tools are automatic
 }
 ```
 
+## Remote Servers (HTTP/SSE)
+
+callmux can connect to remote MCP servers over HTTP, not just local stdio processes. Use `url` instead of `command`:
+
+```json
+{
+  "servers": {
+    "local-github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "remote-api": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer sk-..." }
+    }
+  }
+}
+```
+
+Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
+
+**Inline mode** for a single remote server:
+
+```bash
+npx -y callmux --url https://mcp.example.com/mcp --header "Authorization:Bearer sk-..."
+```
+
+---
+
 ## Caching
 
 Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never cached.
@@ -366,6 +398,9 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--cache-allow <list>` | Cacheable tool patterns |
 | `--cache-deny <list>` | Non-cacheable tool patterns |
 | `--concurrency <n>` | Max parallel calls (default: 20) |
+| `--url <url>` | Connect to remote server (instead of `-- command`) |
+| `--transport <type>` | Force `streamable-http` or `sse` |
+| `--header Name:Value` | HTTP header (repeatable) |
 
 </details>
 
@@ -384,7 +419,7 @@ Works on Linux, macOS, and Windows.
 ```json
 {
   "servers": {
-    "<name>": {
+    "<stdio-server>": {
       "command": "...",
       "args": ["..."],
       "env": { "KEY": "value" },
@@ -394,6 +429,13 @@ Works on Linux, macOS, and Windows.
         "allowTools": ["get_*"],
         "denyTools": ["get_secret"]
       }
+    },
+    "<http-server>": {
+      "url": "https://...",
+      "transport": "streamable-http | sse",
+      "headers": { "Authorization": "Bearer ..." },
+      "tools": ["tool_a"],
+      "cachePolicy": { "allowTools": ["*"] }
     }
   },
   "cacheTtlSeconds": 60,
@@ -404,7 +446,7 @@ Works on Linux, macOS, and Windows.
 
 Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 
-All fields except `command` are optional. `tools` filters which downstream tools are exposed. Omit to expose everything.
+Each server needs either `command` (local stdio) or `url` (remote HTTP/SSE). All other fields are optional. `tools` filters which downstream tools are exposed. Omit to expose everything.
 
 </details>
 

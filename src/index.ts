@@ -8,7 +8,10 @@ export {
   attachCodexConfig,
   detachClaudeConfig,
   detachCodexConfig,
+  formatClientStatus,
   getDefaultClientConfigPath,
+  getClaudeConfigStatus,
+  getCodexConfigStatus,
 } from "./client-config.js";
 export {
   createEmptyConfig,
@@ -22,8 +25,10 @@ export {
 export {
   createDoctorFailureReport,
   formatDoctorReport,
+  formatServerTestReports,
   formatServerTestReport,
   runDoctor,
   runServerTest,
 } from "./doctor.js";
+export { detectExistingConfigs } from "./detect.js";
 export type * from "./types.js";

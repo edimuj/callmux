@@ -1,8 +1,12 @@
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
+// ─── Transport types ──────────────────────────────────────────
+
+export type TransportType = "stdio" | "streamable-http" | "sse";
+
 // ─── Downstream server configuration ───────────────────────────
 
-export interface ServerConfig {
+export interface StdioServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
@@ -11,6 +15,26 @@ export interface ServerConfig {
   tools?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
+}
+
+export interface HttpServerConfig {
+  url: string;
+  transport?: "streamable-http" | "sse";
+  headers?: Record<string, string>;
+  /** Whitelist of tool names to expose (omit to expose all) */
+  tools?: string[];
+  /** Optional per-server cache policy; supports exact names or "*" wildcards */
+  cachePolicy?: CachePolicyConfig;
+}
+
+export type ServerConfig = StdioServerConfig | HttpServerConfig;
+
+export function isHttpServerConfig(config: ServerConfig): config is HttpServerConfig {
+  return "url" in config;
+}
+
+export function isStdioServerConfig(config: ServerConfig): config is StdioServerConfig {
+  return "command" in config;
 }
 
 export interface CachePolicyConfig {

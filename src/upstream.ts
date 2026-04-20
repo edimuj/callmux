@@ -1,8 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
-import type { ServerConfig, UpstreamConnection } from "./types.js";
+import { isHttpServerConfig } from "./types.js";
+import type { ServerConfig, StdioServerConfig, HttpServerConfig, UpstreamConnection } from "./types.js";
 
 /**
  * Manages connections to downstream MCP servers.
@@ -10,28 +14,76 @@ import type { ServerConfig, UpstreamConnection } from "./types.js";
  */
 export class UpstreamManager {
   private clients = new Map<string, Client>();
-  private transports = new Map<string, StdioClientTransport>();
+  private transports = new Map<string, Transport>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
   private exposedToolsByServer = new Map<string, Set<string>>();
+
+  private createStdioTransport(config: StdioServerConfig): Transport {
+    return new StdioClientTransport({
+      command: config.command,
+      args: config.args,
+      env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
+      cwd: config.cwd,
+      stderr: "pipe",
+    });
+  }
+
+  private createHttpTransport(config: HttpServerConfig): Transport {
+    const url = new URL(config.url);
+    const opts = config.headers
+      ? { requestInit: { headers: config.headers } }
+      : undefined;
+
+    if (config.transport === "sse") {
+      return new SSEClientTransport(url, opts);
+    }
+
+    return new StreamableHTTPClientTransport(url, opts);
+  }
+
+  private async connectWithFallback(name: string, config: HttpServerConfig): Promise<{ transport: Transport; client: Client }> {
+    if (config.transport) {
+      const transport = this.createHttpTransport(config);
+      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      await client.connect(transport);
+      return { transport, client };
+    }
+
+    // Try streamable-http first, fall back to SSE
+    try {
+      const transport = new StreamableHTTPClientTransport(
+        new URL(config.url),
+        config.headers ? { requestInit: { headers: config.headers } } : undefined
+      );
+      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      await client.connect(transport);
+      return { transport, client };
+    } catch {
+      process.stderr.write(`[callmux] "${name}": streamable-http failed, trying SSE fallback\n`);
+      const transport = new SSEClientTransport(
+        new URL(config.url),
+        config.headers ? { requestInit: { headers: config.headers } } : undefined
+      );
+      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      await client.connect(transport);
+      return { transport, client };
+    }
+  }
 
   async connect(servers: Record<string, ServerConfig>): Promise<UpstreamConnection[]> {
     const connections: UpstreamConnection[] = [];
 
     for (const [name, config] of Object.entries(servers)) {
-      const transport = new StdioClientTransport({
-        command: config.command,
-        args: config.args,
-        env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
-        cwd: config.cwd,
-        stderr: "pipe",
-      });
+      let transport: Transport;
+      let client: Client;
 
-      const client = new Client(
-        { name: "callmux", version: "0.1.0" },
-        { capabilities: {} }
-      );
-
-      await client.connect(transport);
+      if (isHttpServerConfig(config)) {
+        ({ transport, client } = await this.connectWithFallback(name, config));
+      } else {
+        transport = this.createStdioTransport(config);
+        client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+        await client.connect(transport);
+      }
 
       const { tools: allTools } = await client.listTools();
 
@@ -57,7 +109,8 @@ export class UpstreamManager {
       connections.push({ name, config, tools });
 
       const filtered = allowSet ? ` (filtered from ${allTools.length})` : "";
-      process.stderr.write(`[callmux] Connected to "${name}": ${tools.length} tools${filtered}\n`);
+      const transportLabel = isHttpServerConfig(config) ? ` [${config.transport ?? "http"}]` : "";
+      process.stderr.write(`[callmux] Connected to "${name}"${transportLabel}: ${tools.length} tools${filtered}\n`);
     }
 
     return connections;
