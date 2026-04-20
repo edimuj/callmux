@@ -2,7 +2,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallmuxProxy } from "../proxy.js";
-import { loadConfig, configFromArgs } from "../config.js";
+import { loadConfig, configFromArgs, findDefaultConfig } from "../config.js";
 
 const HELP = `
 callmux — Multiplexer for MCP tool calls
@@ -12,7 +12,8 @@ and pipelining. Claude (or any MCP client) connects to callmux, which
 proxies to downstream servers and exposes meta-tools alongside them.
 
 Usage:
-  callmux --config <path>                    Config file mode
+  callmux                                    Auto-detect config file
+  callmux --config <path>                    Explicit config file
   callmux [options] -- <command> [args...]   Single-server mode
 
 Options:
@@ -21,6 +22,10 @@ Options:
   --cache <seconds>     Cache TTL for read operations (default: 0 = off)
   --concurrency <n>     Max parallel calls (default: 20)
   --help, -h            Show this help
+
+Config auto-discovery (checked in order):
+  1. $CALLMUX_CONFIG environment variable
+  2. ~/.config/callmux/config.json
 
 Config file format:
   {
@@ -66,9 +71,15 @@ async function main(): Promise<void> {
   } else if (args.includes("--")) {
     config = configFromArgs(args);
   } else {
-    console.error("Error: specify --config <path> or -- <command> [args...]");
-    console.error("Run callmux --help for usage.");
-    process.exit(1);
+    const defaultPath = await findDefaultConfig();
+    if (defaultPath) {
+      config = await loadConfig(defaultPath);
+    } else {
+      console.error("Error: specify --config <path> or -- <command> [args...]");
+      console.error("Or create ~/.config/callmux/config.json");
+      console.error("Run callmux --help for usage.");
+      process.exit(1);
+    }
   }
 
   const proxy = new CallmuxProxy(config);

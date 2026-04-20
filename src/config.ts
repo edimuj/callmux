@@ -1,6 +1,32 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, access } from "node:fs/promises";
+import { resolve, join } from "node:path";
+import { homedir } from "node:os";
 import type { CallmuxConfig, ServerConfig } from "./types.js";
+
+/**
+ * Resolve the default config file path, checking in order:
+ * 1. $CALLMUX_CONFIG env var
+ * 2. ~/.config/callmux/config.json (cross-platform)
+ *
+ * Returns the path if the file exists, undefined otherwise.
+ */
+export async function findDefaultConfig(): Promise<string | undefined> {
+  const candidates: string[] = [];
+
+  if (process.env.CALLMUX_CONFIG) {
+    candidates.push(resolve(process.env.CALLMUX_CONFIG));
+  }
+
+  candidates.push(join(homedir(), ".config", "callmux", "config.json"));
+
+  for (const p of candidates) {
+    try {
+      await access(p);
+      return p;
+    } catch {}
+  }
+  return undefined;
+}
 
 /**
  * Load callmux config from a JSON file or inline MCP server definitions.
