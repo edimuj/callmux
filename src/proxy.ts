@@ -25,7 +25,16 @@ export class CallmuxProxy {
 
   constructor(private config: CallmuxConfig) {
     this.upstream = new UpstreamManager();
-    this.cache = new CallCache(config.cacheTtlSeconds ?? 0);
+    this.cache = new CallCache(
+      config.cacheTtlSeconds ?? 0,
+      config.cachePolicy,
+      Object.fromEntries(
+        Object.entries(config.servers).map(([name, server]) => [
+          name,
+          server.cachePolicy,
+        ])
+      )
+    );
     this.maxConcurrency = config.maxConcurrency ?? 20;
 
     this.server = new Server(
@@ -75,7 +84,7 @@ export class CallmuxProxy {
         return handleParallel(
           this.upstream,
           this.cache,
-          args as { calls: Array<{ server?: string; tool: string; arguments?: Record<string, unknown> }> },
+          args,
           this.maxConcurrency
         );
 
@@ -83,7 +92,7 @@ export class CallmuxProxy {
         return handleBatch(
           this.upstream,
           this.cache,
-          args as { server?: string; tool: string; items: Array<{ arguments: Record<string, unknown> }> },
+          args,
           this.maxConcurrency
         );
 
@@ -91,11 +100,14 @@ export class CallmuxProxy {
         return handlePipeline(
           this.upstream,
           this.cache,
-          args as { steps: Array<{ server?: string; tool: string; arguments?: Record<string, unknown>; inputMapping?: Record<string, string> }> }
+          args
         );
 
       case "callmux_cache_clear":
-        return handleCacheClear(this.cache, (args ?? {}) as { tool?: string });
+        return handleCacheClear(
+          this.cache,
+          args
+        );
     }
 
     // Proxied tool — check cache first

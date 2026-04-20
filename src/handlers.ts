@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
+import { errorResult, jsonResult } from "./results.js";
 import type {
   ParallelCall,
   ParallelResult,
@@ -10,8 +11,16 @@ import type {
   PipelineResult,
 } from "./types.js";
 
-function textResult(text: string): CallToolResult {
-  return { content: [{ type: "text", text }] };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isToolErrorResult(value: unknown): value is CallToolResult {
+  return isRecord(value) && Array.isArray(value.content);
+}
+
+function successResult(payload: Record<string, unknown>): CallToolResult {
+  return jsonResult(payload);
 }
 
 function extractText(result: CallToolResult): string {
@@ -46,14 +55,241 @@ function resolveMapping(text: string, expr: string): unknown {
   return expr;
 }
 
+function validateConcurrency(maxConcurrency: number): CallToolResult | null {
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    return errorResult(
+      "invalid_arguments",
+      "maxConcurrency must be a positive integer",
+      { maxConcurrency }
+    );
+  }
+
+  return null;
+}
+
+function validateToolName(
+  value: unknown,
+  field: string
+): string | CallToolResult {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return errorResult("invalid_arguments", `${field} must be a non-empty string`, {
+      field,
+    });
+  }
+
+  return value;
+}
+
+function validateArgumentsObject(
+  value: unknown,
+  field: string
+): Record<string, unknown> | undefined | CallToolResult {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    return errorResult("invalid_arguments", `${field} must be an object`, {
+      field,
+    });
+  }
+
+  return value;
+}
+
+function validateParallelArgs(
+  args: unknown
+): { calls: ParallelCall[] } | CallToolResult {
+  if (!isRecord(args) || !Array.isArray(args.calls)) {
+    return errorResult("invalid_arguments", `"calls" must be an array`, {
+      field: "calls",
+    });
+  }
+
+  const calls: ParallelCall[] = [];
+  for (let index = 0; index < args.calls.length; index++) {
+    const call = args.calls[index];
+    if (!isRecord(call)) {
+      return errorResult("invalid_arguments", `calls[${index}] must be an object`, {
+        field: `calls[${index}]`,
+      });
+    }
+
+    const tool = validateToolName(call.tool, `calls[${index}].tool`);
+    if (typeof tool !== "string") return tool;
+
+    const server =
+      call.server === undefined
+        ? undefined
+        : validateToolName(call.server, `calls[${index}].server`);
+    if (server !== undefined && typeof server !== "string") return server;
+
+    const parsedArgs = validateArgumentsObject(
+      call.arguments,
+      `calls[${index}].arguments`
+    );
+    if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+
+    calls.push({
+      tool,
+      ...(typeof server === "string" ? { server } : {}),
+      ...(parsedArgs ? { arguments: parsedArgs } : {}),
+    });
+  }
+
+  return { calls };
+}
+
+function validateBatchArgs(
+  args: unknown
+): { server?: string; tool: string; items: BatchItem[] } | CallToolResult {
+  if (!isRecord(args) || !Array.isArray(args.items)) {
+    return errorResult("invalid_arguments", `"items" must be an array`, {
+      field: "items",
+    });
+  }
+
+  const tool = validateToolName(args.tool, "tool");
+  if (typeof tool !== "string") return tool;
+
+  const server =
+    args.server === undefined ? undefined : validateToolName(args.server, "server");
+  if (server !== undefined && typeof server !== "string") return server;
+
+  const items: BatchItem[] = [];
+  for (let index = 0; index < args.items.length; index++) {
+    const item = args.items[index];
+    if (!isRecord(item)) {
+      return errorResult("invalid_arguments", `items[${index}] must be an object`, {
+        field: `items[${index}]`,
+      });
+    }
+
+    const parsedArgs = validateArgumentsObject(item.arguments, `items[${index}].arguments`);
+    if (!parsedArgs || !isRecord(parsedArgs)) {
+      return parsedArgs ?? errorResult(
+        "invalid_arguments",
+        `items[${index}].arguments must be an object`,
+        { field: `items[${index}].arguments` }
+      );
+    }
+
+    items.push({ arguments: parsedArgs });
+  }
+
+  return {
+    tool,
+    items,
+    ...(typeof server === "string" ? { server } : {}),
+  };
+}
+
+function validatePipelineArgs(
+  args: unknown
+): { steps: PipelineStep[] } | CallToolResult {
+  if (!isRecord(args) || !Array.isArray(args.steps)) {
+    return errorResult("invalid_arguments", `"steps" must be an array`, {
+      field: "steps",
+    });
+  }
+
+  if (args.steps.length === 0) {
+    return errorResult("invalid_arguments", `"steps" must contain at least one step`, {
+      field: "steps",
+    });
+  }
+
+  const steps: PipelineStep[] = [];
+  for (let index = 0; index < args.steps.length; index++) {
+    const step = args.steps[index];
+    if (!isRecord(step)) {
+      return errorResult("invalid_arguments", `steps[${index}] must be an object`, {
+        field: `steps[${index}]`,
+      });
+    }
+
+    const tool = validateToolName(step.tool, `steps[${index}].tool`);
+    if (typeof tool !== "string") return tool;
+
+    const server =
+      step.server === undefined
+        ? undefined
+        : validateToolName(step.server, `steps[${index}].server`);
+    if (server !== undefined && typeof server !== "string") return server;
+
+    const parsedArgs = validateArgumentsObject(
+      step.arguments,
+      `steps[${index}].arguments`
+    );
+    if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+
+    let inputMapping: Record<string, string> | undefined;
+    if (step.inputMapping !== undefined) {
+      if (!isRecord(step.inputMapping)) {
+        return errorResult(
+          "invalid_arguments",
+          `steps[${index}].inputMapping must be an object of string expressions`,
+          { field: `steps[${index}].inputMapping` }
+        );
+      }
+
+      const entries = Object.entries(step.inputMapping);
+      if (!entries.every(([, value]) => typeof value === "string")) {
+        return errorResult(
+          "invalid_arguments",
+          `steps[${index}].inputMapping must be an object of string expressions`,
+          { field: `steps[${index}].inputMapping` }
+        );
+      }
+
+      inputMapping = Object.fromEntries(entries) as Record<string, string>;
+    }
+
+    steps.push({
+      tool,
+      ...(typeof server === "string" ? { server } : {}),
+      ...(parsedArgs ? { arguments: parsedArgs } : {}),
+      ...(inputMapping ? { inputMapping } : {}),
+    });
+  }
+
+  return { steps };
+}
+
+function validateCacheClearArgs(
+  args: unknown
+): { tool?: string; server?: string } | CallToolResult {
+  if (args === undefined) return {};
+  if (!isRecord(args)) {
+    return errorResult("invalid_arguments", "cache clear arguments must be an object", {
+      field: "arguments",
+    });
+  }
+
+  const tool = args.tool === undefined ? undefined : validateToolName(args.tool, "tool");
+  if (tool !== undefined && typeof tool !== "string") return tool;
+
+  const server =
+    args.server === undefined ? undefined : validateToolName(args.server, "server");
+  if (server !== undefined && typeof server !== "string") return server;
+
+  return {
+    ...(typeof tool === "string" ? { tool } : {}),
+    ...(typeof server === "string" ? { server } : {}),
+  };
+}
+
 export async function handleParallel(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: { calls: ParallelCall[] },
+  args: unknown,
   maxConcurrency: number
 ): Promise<CallToolResult> {
+  const concurrencyError = validateConcurrency(maxConcurrency);
+  if (concurrencyError) return concurrencyError;
+
+  const parsedArgs = validateParallelArgs(args);
+  if (isToolErrorResult(parsedArgs)) return parsedArgs;
+
   const startTime = Date.now();
-  const { calls } = args;
+  const { calls } = parsedArgs;
 
   const semaphore = new Semaphore(maxConcurrency);
 
@@ -61,13 +297,13 @@ export async function handleParallel(
     await semaphore.acquire();
     const callStart = Date.now();
     try {
-      const cached = cache.get(call.tool, call.arguments);
+      const cached = cache.get(call.tool, call.arguments, call.server);
       if (cached) {
         return { call, result: cached, durationMs: Date.now() - callStart };
       }
 
       const result = await upstream.callTool(call.tool, call.arguments, call.server);
-      cache.set(call.tool, call.arguments, result);
+      cache.set(call.tool, call.arguments, result, call.server);
       return { call, result, durationMs: Date.now() - callStart };
     } catch (err) {
       return {
@@ -86,17 +322,23 @@ export async function handleParallel(
     totalDurationMs: Date.now() - startTime,
   };
 
-  return textResult(JSON.stringify(output, null, 2));
+  return successResult(output as unknown as Record<string, unknown>);
 }
 
 export async function handleBatch(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: { server?: string; tool: string; items: BatchItem[] },
+  args: unknown,
   maxConcurrency: number
 ): Promise<CallToolResult> {
+  const concurrencyError = validateConcurrency(maxConcurrency);
+  if (concurrencyError) return concurrencyError;
+
+  const parsedArgs = validateBatchArgs(args);
+  if (isToolErrorResult(parsedArgs)) return parsedArgs;
+
   const startTime = Date.now();
-  const { server, tool, items } = args;
+  const { server, tool, items } = parsedArgs;
 
   const semaphore = new Semaphore(maxConcurrency);
   let succeeded = 0;
@@ -106,14 +348,14 @@ export async function handleBatch(
     await semaphore.acquire();
     const callStart = Date.now();
     try {
-      const cached = cache.get(tool, item.arguments);
+      const cached = cache.get(tool, item.arguments, server);
       if (cached) {
         succeeded++;
         return { index, result: cached, durationMs: Date.now() - callStart };
       }
 
       const result = await upstream.callTool(tool, item.arguments, server);
-      cache.set(tool, item.arguments, result);
+      cache.set(tool, item.arguments, result, server);
       if (result.isError) failed++;
       else succeeded++;
       return { index, result, durationMs: Date.now() - callStart };
@@ -137,16 +379,19 @@ export async function handleBatch(
     failed,
   };
 
-  return textResult(JSON.stringify(output, null, 2));
+  return successResult(output as unknown as Record<string, unknown>);
 }
 
 export async function handlePipeline(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: { steps: PipelineStep[] }
+  args: unknown
 ): Promise<CallToolResult> {
+  const parsedArgs = validatePipelineArgs(args);
+  if (isToolErrorResult(parsedArgs)) return parsedArgs;
+
   const startTime = Date.now();
-  const { steps } = args;
+  const { steps } = parsedArgs;
   const stepResults: PipelineResult["steps"] = [];
   let previousText = "";
 
@@ -166,7 +411,13 @@ export async function handlePipeline(
     }
 
     try {
-      const result = await upstream.callTool(step.tool, mergedArgs, step.server);
+      const cached = cache.get(step.tool, mergedArgs, step.server);
+      const result = cached ?? await upstream.callTool(step.tool, mergedArgs, step.server);
+
+      if (!cached) {
+        cache.set(step.tool, mergedArgs, result, step.server);
+      }
+
       const durationMs = Date.now() - callStart;
       stepResults.push({ step: i, tool: step.tool, result, durationMs });
 
@@ -175,7 +426,7 @@ export async function handlePipeline(
           steps: stepResults,
           totalDurationMs: Date.now() - startTime,
         };
-        return textResult(JSON.stringify(output, null, 2));
+        return successResult(output as unknown as Record<string, unknown>);
       }
 
       previousText = extractText(result);
@@ -191,7 +442,7 @@ export async function handlePipeline(
         steps: stepResults,
         totalDurationMs: Date.now() - startTime,
       };
-      return textResult(JSON.stringify(output, null, 2));
+      return successResult(output as unknown as Record<string, unknown>);
     }
   }
 
@@ -201,21 +452,50 @@ export async function handlePipeline(
     totalDurationMs: Date.now() - startTime,
   };
 
-  return textResult(JSON.stringify(output, null, 2));
+  return successResult(output as unknown as Record<string, unknown>);
 }
 
 export function handleCacheClear(
   cache: CallCache,
-  args: { tool?: string }
+  args: unknown
 ): CallToolResult {
+  const parsedArgs = validateCacheClearArgs(args);
+  if (isToolErrorResult(parsedArgs)) return parsedArgs;
+
   const before = cache.size;
-  cache.invalidate(args.tool);
+  cache.invalidate(parsedArgs.tool, parsedArgs.server);
   const cleared = before - cache.size;
-  return textResult(
-    args.tool
-      ? `Cleared ${cleared} cached entries for "${args.tool}"`
-      : `Cleared all ${before} cached entries`
-  );
+
+  if (parsedArgs.tool && parsedArgs.server) {
+    return jsonResult({
+      cleared,
+      tool: parsedArgs.tool,
+      server: parsedArgs.server,
+      scope: "tool-server",
+    });
+  }
+
+  if (parsedArgs.tool) {
+    return jsonResult({
+      cleared,
+      tool: parsedArgs.tool,
+      scope: "tool",
+    });
+  }
+
+  if (parsedArgs.server) {
+    return jsonResult({
+      cleared,
+      server: parsedArgs.server,
+      scope: "server",
+    });
+  }
+
+  return jsonResult({
+    cleared,
+    scope: "all",
+    previousSize: before,
+  });
 }
 
 // ─── Simple concurrency limiter ────────────────────────────────

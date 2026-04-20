@@ -9,6 +9,15 @@ export interface ServerConfig {
   cwd?: string;
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
+  /** Optional per-server cache policy; supports exact names or "*" wildcards */
+  cachePolicy?: CachePolicyConfig;
+}
+
+export interface CachePolicyConfig {
+  /** Cache only matching tools when provided; supports exact names or "*" wildcards */
+  allowTools?: string[];
+  /** Never cache matching tools; supports exact names or "*" wildcards */
+  denyTools?: string[];
 }
 
 export interface CallmuxConfig {
@@ -16,9 +25,13 @@ export interface CallmuxConfig {
   servers: Record<string, ServerConfig>;
   /** Cache TTL in seconds for read operations (0 = disabled) */
   cacheTtlSeconds?: number;
+  /** Optional global cache policy; supports exact names or "*" wildcards */
+  cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls for parallel() */
   maxConcurrency?: number;
 }
+
+export type ConfigFormat = "native" | "mcpCompatible";
 
 // ─── Meta-tool call shapes ─────────────────────────────────────
 
@@ -77,6 +90,8 @@ export interface PipelineResult {
 // ─── Cache ─────────────────────────────────────────────────────
 
 export interface CacheEntry {
+  tool: string;
+  server?: string;
   result: CallToolResult;
   expiresAt: number;
 }

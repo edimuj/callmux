@@ -29,10 +29,12 @@ export const META_TOOLS: Tool[] = [
               },
             },
             required: ["tool"],
+            additionalProperties: false,
           },
         },
       },
       required: ["calls"],
+      additionalProperties: false,
     },
   },
   {
@@ -60,10 +62,12 @@ export const META_TOOLS: Tool[] = [
               },
             },
             required: ["arguments"],
+            additionalProperties: false,
           },
         },
       },
       required: ["tool", "items"],
+      additionalProperties: false,
     },
   },
   {
@@ -92,15 +96,17 @@ export const META_TOOLS: Tool[] = [
               },
             },
             required: ["tool"],
+            additionalProperties: false,
           },
         },
       },
       required: ["steps"],
+      additionalProperties: false,
     },
   },
   {
     name: "callmux_cache_clear",
-    description: "Clear the callmux result cache. Optionally clear only a specific tool's cache.",
+    description: "Clear the callmux result cache. Optionally scope by tool name and/or server.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -108,7 +114,12 @@ export const META_TOOLS: Tool[] = [
           type: "string",
           description: "Tool name to clear cache for (omit to clear all)",
         },
+        server: {
+          type: "string",
+          description: "Server name to clear cache for (omit to clear all servers)",
+        },
       },
+      additionalProperties: false,
     },
   },
 ];

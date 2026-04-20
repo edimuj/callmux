@@ -7,3 +7,5 @@ test-config-filtered.json
 test-drive.mjs
 test-filter.mjs
 share/
+CLAUDE.md
+AGENTS.md

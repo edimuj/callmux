@@ -7,7 +7,7 @@
     "node": ">=18.0.0"
   },
   "bin": {
-    "callmux": "dist/bin/callmux.mjs"
+    "callmux": "dist/bin/callmux.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,7 +32,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "tsc --noEmit && node --test dist/**/*.test.js",
+    "test": "npm run build && node --test dist/**/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

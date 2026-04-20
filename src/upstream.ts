@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { errorResult } from "./results.js";
 import type { ServerConfig, UpstreamConnection } from "./types.js";
 
 /**
@@ -11,6 +12,7 @@ export class UpstreamManager {
   private clients = new Map<string, Client>();
   private transports = new Map<string, StdioClientTransport>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
+  private exposedToolsByServer = new Map<string, Set<string>>();
 
   async connect(servers: Record<string, ServerConfig>): Promise<UpstreamConnection[]> {
     const connections: UpstreamConnection[] = [];
@@ -38,6 +40,11 @@ export class UpstreamManager {
         ? allTools.filter((t) => allowSet.has(t.name))
         : allTools;
 
+      this.exposedToolsByServer.set(
+        name,
+        new Set(tools.map((tool) => tool.name))
+      );
+
       for (const tool of tools) {
         const qualifiedName = Object.keys(servers).length > 1
           ? `${name}__${tool.name}`
@@ -64,11 +71,43 @@ export class UpstreamManager {
     }));
   }
 
-  resolveServer(toolName: string, serverHint?: string): { client: Client; actualName: string } | null {
+  private toolNotFound(toolName: string): CallToolResult {
+    return errorResult("tool_not_found", `tool "${toolName}" not found`, {
+      tool: toolName,
+    });
+  }
+
+  private resolutionError(message: string): CallToolResult {
+    return errorResult("tool_resolution_failed", message);
+  }
+
+  resolveServer(
+    toolName: string,
+    serverHint?: string
+  ): { client: Client; actualName: string } | { error: CallToolResult } | null {
     if (serverHint) {
       const client = this.clients.get(serverHint);
-      if (!client) return null;
-      return { client, actualName: toolName };
+      if (!client) {
+        return {
+          error: this.resolutionError(`server "${serverHint}" not found`),
+        };
+      }
+
+      const exposedTools = this.exposedToolsByServer.get(serverHint);
+      const qualifiedPrefix = `${serverHint}__`;
+      const actualName = toolName.startsWith(qualifiedPrefix)
+        ? toolName.slice(qualifiedPrefix.length)
+        : toolName;
+
+      if (!exposedTools?.has(actualName)) {
+        return {
+          error: this.resolutionError(
+            `tool "${actualName}" is not exposed on server "${serverHint}"`
+          ),
+        };
+      }
+
+      return { client, actualName };
     }
 
     const entry = this.toolMap.get(toolName);
@@ -78,12 +117,24 @@ export class UpstreamManager {
       return { client, actualName: entry.tool.name };
     }
 
-    // Try unqualified match across all servers
-    for (const [, { server, tool }] of this.toolMap) {
-      if (tool.name === toolName) {
-        const client = this.clients.get(server);
-        if (client) return { client, actualName: tool.name };
+    const matches = Array.from(this.toolMap.values()).filter(
+      ({ tool }) => tool.name === toolName
+    );
+
+    if (matches.length === 1) {
+      const match = matches[0];
+      const client = this.clients.get(match.server);
+      if (client) {
+        return { client, actualName: match.tool.name };
       }
+    }
+
+    if (matches.length > 1) {
+      return {
+        error: this.resolutionError(
+          `tool "${toolName}" is ambiguous across multiple servers; specify "server" or use a qualified tool name`
+        ),
+      };
     }
 
     return null;
@@ -96,10 +147,11 @@ export class UpstreamManager {
   ): Promise<CallToolResult> {
     const resolved = this.resolveServer(toolName, serverHint);
     if (!resolved) {
-      return {
-        content: [{ type: "text", text: `Error: tool "${toolName}" not found` }],
-        isError: true,
-      };
+      return this.toolNotFound(toolName);
+    }
+
+    if ("error" in resolved) {
+      return resolved.error;
     }
 
     const result = await resolved.client.callTool({
@@ -121,5 +173,6 @@ export class UpstreamManager {
     this.clients.clear();
     this.transports.clear();
     this.toolMap.clear();
+    this.exposedToolsByServer.clear();
   }
 }
