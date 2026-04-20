@@ -162,6 +162,15 @@ export class UpstreamManager {
     return result as CallToolResult;
   }
 
+  getServerNames(): string[] {
+    return Array.from(this.clients.keys());
+  }
+
+  getServerTools(server: string): string[] {
+    const exposed = this.exposedToolsByServer.get(server);
+    return exposed ? Array.from(exposed).sort() : [];
+  }
+
   async close(): Promise<void> {
     for (const [name, client] of this.clients) {
       try {

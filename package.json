@@ -1,6 +1,6 @@
 {
   "name": "callmux",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multiplexer for MCP tool calls — parallel execution, batching, caching, and pipelining for any MCP server",
   "type": "module",
   "engines": {
@@ -32,7 +32,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "tsc --project tsconfig.test.json && node --test dist-test/**/*.test.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -47,11 +47,12 @@
     "tool-calls"
   ],
   "dependencies": {
+    "@clack/prompts": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
   },
   "author": "Edin Mujkanovic",
   "license": "MIT"

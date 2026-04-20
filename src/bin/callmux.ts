@@ -9,7 +9,11 @@ import {
   attachCodexConfig,
   detachClaudeConfig,
   detachCodexConfig,
+  formatClientStatus,
   getDefaultClientConfigPath,
+  getClaudeConfigStatus,
+  getCodexConfigStatus,
+  renderClientAttachPreview,
   type ClientKind,
 } from "../client-config.js";
 import {
@@ -33,10 +37,15 @@ import {
 import {
   createDoctorFailureReport,
   formatDoctorReport,
+  formatServerTestReports,
   formatServerTestReport,
   runDoctor,
   runServerTest,
 } from "../doctor.js";
+import { runSetup } from "../setup.js";
+import * as p from "@clack/prompts";
+import { UpstreamManager } from "../upstream.js";
+import type { ServerConfig } from "../types.js";
 
 const HELP = `
 callmux — Multiplexer for MCP tool calls
@@ -49,21 +58,25 @@ Usage:
   callmux                                    Auto-detect config file
   callmux --config <path>                    Explicit config file
   callmux [options] -- <command> [args...]   Single-server mode
+  callmux setup [--config <path>]            Interactive setup wizard
   callmux init [--config <path>] [--force]
   callmux doctor [--config <path>] [--json]
   callmux server add <name> [options] -- <command> [args...]
   callmux server set <name> [options] [-- <command> [args...]]
   callmux server edit <name> [options] [-- <command> [args...]]
   callmux server test <name> [--tool <tool>] [--json]
+  callmux server test --all [--tool <tool>] [--json]
   callmux server remove <name> [--config <path>]
   callmux server list [--config <path>] [--json]
   callmux client print <claude|codex> [--config <path>] [--name <id>]
   callmux client attach <claude|codex> [--config <path>] [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client detach <claude|codex> [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
+  callmux client status [claude|codex] [--config <path>] [--name <id>] [--file <path>] [--json]
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
   --tools <list>        Comma-separated tool whitelist (single-server mode)
+  --env KEY=VALUE       Environment variable for downstream server (repeatable)
   --cache <seconds>     Cache TTL for read operations (default: 0 = off)
   --cache-allow <list>  Comma-separated cache allowlist for single-server mode
   --cache-deny <list>   Comma-separated cache denylist for single-server mode
@@ -124,9 +137,11 @@ Examples:
   callmux server add github --tools get_issue,list_issues -- npx -y @modelcontextprotocol/server-github
   callmux server set github --add-tool search_repositories --cache-deny create_*
   callmux server list
+  callmux server test --all
   callmux server test github --tool get_issue
   callmux doctor
   callmux client print codex
+  callmux client status
   callmux client attach codex
   callmux client attach codex --yes
   callmux client print claude --name github
@@ -236,7 +251,16 @@ async function handleServerCommand(
 
     const extracted = extractFlag(args.slice(2), "--json");
     const config = await loadOrCreateManagedConfig(configPath);
-    config.servers[name] = parseServerDefinitionArgs(extracted.remainingArgs);
+    const serverDef = parseServerDefinitionArgs(extracted.remainingArgs);
+
+    if (!serverDef.tools && !extracted.present && process.stdout.isTTY) {
+      const discovered = await discoverServerTools(name, serverDef);
+      if (discovered) {
+        serverDef.tools = discovered;
+      }
+    }
+
+    config.servers[name] = serverDef;
     await saveManagedConfig(configPath, config);
     if (extracted.present) {
       console.log(
@@ -296,14 +320,22 @@ async function handleServerCommand(
   }
 
   if (action === "test") {
-    const name = args[1];
-    if (!name) {
-      throw new Error("Usage: callmux server test <name> [--tool <tool>] [--json]");
-    }
-
     let requestedTool: string | undefined;
     let json = false;
-    for (let i = 2; i < args.length; i++) {
+    let all = false;
+    let name: string | undefined;
+
+    if (args[1] === "--all") {
+      all = true;
+    } else {
+      name = args[1];
+    }
+
+    if (!all && !name) {
+      throw new Error("Usage: callmux server test <name>|--all [--tool <tool>] [--json]");
+    }
+
+    for (let i = all ? 2 : 2; i < args.length; i++) {
       if (args[i] === "--tool" && i + 1 < args.length) {
         requestedTool = args[++i];
       } else if (args[i] === "--json") {
@@ -314,17 +346,40 @@ async function handleServerCommand(
     }
 
     const config = await loadManagedConfig(configPath);
-    if (!config || !config.servers[name]) {
+    if (!config) {
+      throw new Error(`No native callmux config found at ${configPath}`);
+    }
+
+    if (!all && name && !config.servers[name]) {
       throw new Error(`Server "${name}" not found in ${configPath}`);
     }
 
-    const report = await runServerTest(name, config.servers[name], requestedTool);
+    const reports = all
+      ? await Promise.all(
+          Object.entries(config.servers).map(([serverName, server]) =>
+            runServerTest(serverName, server, requestedTool)
+          )
+        )
+      : [await runServerTest(name!, config.servers[name!], requestedTool)];
+
     if (json) {
-      console.log(JSON.stringify(report, null, 2));
+      console.log(
+        JSON.stringify(
+          all
+            ? {
+                ok: reports.every((report) => report.status === "ok"),
+                serverCount: reports.length,
+                reports,
+              }
+            : reports[0],
+          null,
+          2
+        )
+      );
     } else {
-      console.log(formatServerTestReport(report));
+      console.log(all ? formatServerTestReports(reports) : formatServerTestReport(reports[0]));
     }
-    if (report.status !== "ok") {
+    if (reports.some((report) => report.status !== "ok")) {
       process.exitCode = 1;
     }
     return;
@@ -403,6 +458,15 @@ async function handleClientMutation(
         ? attachCodexConfig({ source, configPath, serverName: name })
         : detachCodexConfig({ source, serverName: name });
   const shouldWrite = yes && !dryRun;
+  const preview =
+    action === "attach"
+      ? renderClientAttachPreview(client, {
+          configPath,
+          serverName: name,
+        })
+      : client === "claude"
+        ? `Remove mcpServers.${name}`
+        : `Remove CALLMUX-managed [mcp_servers.${name}] block`;
 
   if (shouldWrite) {
     await mkdir(dirname(filePath), { recursive: true });
@@ -417,7 +481,7 @@ async function handleClientMutation(
     changed: mutation.changed,
     wrote: shouldWrite,
     dryRun: !shouldWrite,
-    ...(mutation.changed ? { content: mutation.content } : {}),
+    ...(mutation.changed ? { preview } : {}),
   };
 
   if (json) {
@@ -433,7 +497,7 @@ async function handleClientMutation(
   if (!shouldWrite) {
     console.log(`Preview only for ${client} at ${filePath}. Re-run with --yes to write.`);
     console.log("");
-    console.log(mutation.content.length > 0 ? mutation.content : "(empty file)");
+    console.log(preview);
     return;
   }
 
@@ -451,8 +515,55 @@ async function handleClientCommand(
     return;
   }
 
+  if (action === "status") {
+    let client: ClientKind | undefined;
+    let name = "callmux";
+    let filePath: string | undefined;
+    let json = false;
+
+    if (args[1] === "claude" || args[1] === "codex") {
+      client = args[1];
+    }
+
+    for (let i = client ? 2 : 1; i < args.length; i++) {
+      if (args[i] === "--name" && i + 1 < args.length) {
+        name = args[++i];
+      } else if (args[i] === "--file" && i + 1 < args.length) {
+        filePath = args[++i];
+      } else if (args[i] === "--json") {
+        json = true;
+      } else {
+        throw new Error(`Unknown client status option "${args[i]}"`);
+      }
+    }
+
+    if (!client && filePath) {
+      throw new Error("Usage: callmux client status <claude|codex> [--file <path>] [--name <id>] [--json]");
+    }
+
+    const clients = client ? [client] : (["claude", "codex"] as ClientKind[]);
+    const statuses = await Promise.all(
+      clients.map(async (kind) => {
+        const path = filePath ?? getDefaultClientConfigPath(kind);
+        const source = await readTextFileIfExists(path);
+        const status =
+          kind === "claude"
+            ? getClaudeConfigStatus({ source, configPath, serverName: name })
+            : getCodexConfigStatus({ source, configPath, serverName: name });
+        return { ...status, path };
+      })
+    );
+
+    if (json) {
+      console.log(JSON.stringify(client ? statuses[0] : { statuses }, null, 2));
+    } else {
+      console.log(statuses.map((status) => formatClientStatus(status)).join("\n\n"));
+    }
+    return;
+  }
+
   if (action !== "print") {
-    throw new Error("Usage: callmux client <print|attach|detach> <claude|codex> [...]");
+    throw new Error("Usage: callmux client <print|attach|detach|status> <claude|codex> [...]");
   }
 
   const client = validateClientKind(args[1]);
@@ -515,6 +626,48 @@ async function handleDoctorCommand(
   }
 }
 
+async function discoverServerTools(
+  name: string,
+  config: ServerConfig
+): Promise<string[] | undefined> {
+  const s = p.spinner();
+  s.start(`Probing ${name} for available tools...`);
+
+  const upstream = new UpstreamManager();
+  try {
+    const [connection] = await upstream.connect({ [name]: config });
+    const tools = connection?.tools.map((t) => t.name).sort() ?? [];
+    s.stop(`${name}: found ${tools.length} tool${tools.length === 1 ? "" : "s"}`);
+
+    if (tools.length === 0) return undefined;
+
+    const choice = await p.select({
+      message: `Expose all ${tools.length} tools, or pick individually?`,
+      options: [
+        { value: "all", label: `All ${tools.length} tools`, hint: tools.slice(0, 5).join(", ") + (tools.length > 5 ? "..." : "") },
+        { value: "pick", label: "Pick individually" },
+      ],
+    });
+
+    if (p.isCancel(choice) || choice === "all") return undefined;
+
+    const picked = await p.multiselect({
+      message: `Select tools from ${name}:`,
+      options: tools.map((t) => ({ value: t, label: t })),
+      required: true,
+    });
+
+    if (p.isCancel(picked)) return undefined;
+    return picked;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    s.stop(`${name}: could not probe (${msg})`);
+    return undefined;
+  } finally {
+    await upstream.close();
+  }
+}
+
 async function main(): Promise<void> {
   const extracted = extractConfigPath(process.argv.slice(2));
   const args = extracted.remainingArgs;
@@ -523,6 +676,11 @@ async function main(): Promise<void> {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(HELP);
     process.exit(0);
+  }
+
+  if (args[0] === "setup") {
+    await runSetup(extracted.configPath);
+    return;
   }
 
   if (args[0] === "init") {

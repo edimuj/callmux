@@ -25,10 +25,15 @@ import {
   attachCodexConfig,
   detachClaudeConfig,
   detachCodexConfig,
+  formatClientStatus,
+  getClaudeConfigStatus,
+  getCodexConfigStatus,
+  renderClientAttachPreview,
 } from "./client-config.js";
 import {
   createDoctorFailureReport,
   formatDoctorReport,
+  formatServerTestReports,
   formatServerTestReport,
   runDoctor,
   runServerTest,
@@ -278,6 +283,30 @@ test("configFromArgs parses explicit cache allow and deny lists", () => {
     allowTools: ["get_*", "list_*"],
     denyTools: ["get_secret"],
   });
+});
+
+test("configFromArgs parses --env KEY=VALUE pairs", () => {
+  const config = configFromArgs([
+    "--env",
+    "GITHUB_TOKEN=abc123",
+    "--env",
+    "OTHER_KEY=val=with=equals",
+    "--",
+    "node",
+    "server.js",
+  ]);
+
+  assert.deepEqual(config.servers.default.env, {
+    GITHUB_TOKEN: "abc123",
+    OTHER_KEY: "val=with=equals",
+  });
+});
+
+test("configFromArgs rejects --env without equals sign", () => {
+  assert.throws(
+    () => configFromArgs(["--env", "NOEQUALS", "--", "node", "server.js"]),
+    /must be KEY=VALUE/
+  );
 });
 
 test("loadConfig rejects invalid maxConcurrency from file", async () => {
@@ -580,6 +609,82 @@ test("detachCodexConfig refuses to remove unmanaged entries", () => {
   );
 });
 
+test("getClaudeConfigStatus reports drifted entries", () => {
+  const status = getClaudeConfigStatus({
+    source: JSON.stringify({
+      mcpServers: {
+        callmux: {
+          command: "callmux",
+          args: ["--config", "/tmp/old.json"],
+        },
+      },
+    }),
+    configPath: "/tmp/new.json",
+    serverName: "callmux",
+  });
+
+  assert.equal(status.status, "different_entry");
+  assert.equal(status.configured, false);
+});
+
+test("getCodexConfigStatus distinguishes managed and unmanaged entries", () => {
+  const managed = getCodexConfigStatus({
+    source: [
+      "# BEGIN CALLMUX MANAGED callmux",
+      "[mcp_servers.callmux]",
+      'command = "callmux"',
+      'args = ["--config","/tmp/callmux.json"]',
+      "# END CALLMUX MANAGED callmux",
+    ].join("\n"),
+    configPath: "/tmp/callmux.json",
+    serverName: "callmux",
+  });
+  const unmanaged = getCodexConfigStatus({
+    source: [
+      "[mcp_servers.callmux]",
+      'command = "callmux"',
+      "args = []",
+    ].join("\n"),
+    serverName: "callmux",
+  });
+
+  assert.equal(managed.status, "configured_managed");
+  assert.equal(managed.configured, true);
+  assert.equal(unmanaged.status, "unmanaged_entry");
+  assert.equal(unmanaged.configured, false);
+});
+
+test("formatClientStatus renders a compact status block", () => {
+  const output = formatClientStatus({
+    client: "codex",
+    path: "/tmp/config.toml",
+    serverName: "callmux",
+    exists: true,
+    status: "configured_managed",
+    configured: true,
+    details: "CALLMUX-managed entry matches expected config",
+  });
+
+  assert.match(output, /^codex: configured_managed/m);
+  assert.match(output, /configured: yes/);
+});
+
+test("renderClientAttachPreview only includes the managed callmux snippet", () => {
+  const preview = renderClientAttachPreview("claude", {
+    configPath: "/tmp/callmux.json",
+    serverName: "callmux",
+  });
+
+  assert.deepEqual(JSON.parse(preview), {
+    mcpServers: {
+      callmux: {
+        command: "callmux",
+        args: ["--config", "/tmp/callmux.json"],
+      },
+    },
+  });
+});
+
 test("renderClientSnippet emits Claude snippet with default autodiscovery", () => {
   const snippet = JSON.parse(renderClientSnippet("claude"));
 
@@ -633,6 +738,29 @@ test("runServerTest reports missing executables cleanly", async () => {
   assert.equal(report.status, "error");
   assert.deepEqual(report.tools, []);
   assert.match(report.issues[0], /was not found on PATH/);
+});
+
+test("formatServerTestReports summarizes multiple server checks", () => {
+  const output = formatServerTestReports([
+    {
+      name: "github",
+      command: "node github.js",
+      status: "ok",
+      tools: ["get_issue"],
+      issues: [],
+    },
+    {
+      name: "linear",
+      command: "node linear.js",
+      status: "error",
+      tools: [],
+      issues: ["connect/list-tools failed: boom"],
+    },
+  ]);
+
+  assert.match(output, /Servers tested: 2/);
+  assert.match(output, /Failed: 1/);
+  assert.match(output, /linear/);
 });
 
 test("formatDoctorReport includes server issues and summary", () => {
@@ -694,7 +822,7 @@ test("package test script executes compiled test files", async () => {
 
   assert.equal(
     packageJson.scripts?.test,
-    "npm run build && node --test dist/**/*.test.js"
+    "tsc --project tsconfig.test.json && node --test dist-test/**/*.test.js"
   );
 });
 

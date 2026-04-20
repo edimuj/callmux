@@ -252,4 +252,17 @@ export class CallCache {
     this.pruneExpired();
     return this.entries.size;
   }
+
+  get ttlSeconds(): number {
+    return this.ttlMs / 1000;
+  }
+
+  stats(): { entries: number; ttlSeconds: number; enabled: boolean } {
+    this.pruneExpired();
+    return {
+      entries: this.entries.size,
+      ttlSeconds: this.ttlMs / 1000,
+      enabled: this.ttlMs > 0,
+    };
+  }
 }

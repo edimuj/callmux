@@ -292,6 +292,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
   let tools: string[] | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
+  const env: Record<string, string> = {};
 
   for (let i = 0; i < dashDash; i++) {
     if (args[i] === "--cache" && i + 1 < dashDash) {
@@ -306,6 +307,13 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       cacheAllowTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
     } else if (args[i] === "--cache-deny" && i + 1 < dashDash) {
       cacheDenyTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
+    } else if (args[i] === "--env" && i + 1 < dashDash) {
+      const pair = args[++i];
+      const eqIdx = pair.indexOf("=");
+      if (eqIdx === -1) {
+        throw new Error(`Invalid --env value "${pair}": must be KEY=VALUE`);
+      }
+      env[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
     }
   }
 
@@ -315,6 +323,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
         command,
         args: commandArgs,
         tools,
+        ...(Object.keys(env).length > 0 ? { env } : {}),
         cachePolicy:
           cacheAllowTools?.length || cacheDenyTools?.length
             ? {

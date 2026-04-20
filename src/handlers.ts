@@ -498,6 +498,41 @@ export function handleCacheClear(
   });
 }
 
+export function handleStatus(
+  upstream: UpstreamManager,
+  cache: CallCache,
+  maxConcurrency: number,
+  args: unknown
+): CallToolResult {
+  const parsed = isRecord(args) ? args : {};
+  const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
+
+  const serverNames = upstream.getServerNames();
+  const servers = serverNames
+    .filter((name) => !serverFilter || name === serverFilter)
+    .map((name) => ({
+      name,
+      tools: upstream.getServerTools(name),
+      toolCount: upstream.getServerTools(name).length,
+    }));
+
+  if (serverFilter && servers.length === 0) {
+    return errorResult(
+      "server_not_found",
+      `server "${serverFilter}" not found`,
+      { available: serverNames }
+    );
+  }
+
+  return jsonResult({
+    status: "ok",
+    servers,
+    totalTools: servers.reduce((sum, s) => sum + s.toolCount, 0),
+    cache: cache.stats(),
+    maxConcurrency,
+  });
+}
+
 // ─── Simple concurrency limiter ────────────────────────────────
 
 class Semaphore {

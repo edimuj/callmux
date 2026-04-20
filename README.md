@@ -1,31 +1,49 @@
-# callmux
+<p align="center">
+  <h1 align="center">callmux</h1>
+  <p align="center">
+    <strong>Add parallel execution, batching, caching, and pipelining to any MCP server.</strong>
+  </p>
+  <p align="center">
+    <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/npm/v/callmux?color=blue&label=npm" alt="npm version"></a>
+    <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
+    <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/node/v/callmux" alt="Node version"></a>
+  </p>
+</p>
 
-Multiplexer for MCP tool calls — parallel execution, batching, caching, and pipelining for any MCP server.
+---
 
-```
-Claude / Codex / any MCP client
-        ↓
-    callmux (proxy)
-        ↓
-  downstream MCP server(s)
-```
+AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 sequential round-trips. Fetching data from 3 different servers? 3 serial waits.
 
-callmux wraps any MCP server and adds capabilities the original doesn't have. Your agent gets the original tools *plus* meta-tools for combining them efficiently.
-
-## Why
-
-AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 sequential round-trips. Fetching data from 3 endpoints before making a decision? 3 serial calls.
-
-callmux fixes this:
+**callmux sits between your agent and any MCP server**, adding capabilities the original doesn't have:
 
 | Without callmux | With callmux |
-|-----------------|--------------|
+|:---|:---|
 | 10 sequential `create_issue` calls | 1 `callmux_batch` call |
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
-| Read → transform → write chain | 1 `callmux_pipeline` call |
-| Same data fetched 3 times | Cached after first call |
+| Read > transform > write chain | 1 `callmux_pipeline` call |
+| Same data fetched 3 times per session | Cached after first call |
+
+```
+Agent (Claude, Codex, etc.)          callmux adds:
+        │                            ┌─────────────────────┐
+        │  stdio                     │ callmux_parallel    │
+        ▼                            │ callmux_batch       │
+   ┌─────────┐                       │ callmux_pipeline    │
+   │ callmux │──── stdio ───▶ MCP    │ callmux_cache_clear │
+   └─────────┘              Server   │ callmux_status      │
+        │                            └─────────────────────┘
+        └──── stdio ───▶ MCP Server 2 (optional)
+```
 
 ## Install
+
+No install needed. Use `npx`:
+
+```bash
+npx -y callmux -- npx -y @modelcontextprotocol/server-github
+```
+
+Or install globally:
 
 ```bash
 npm install -g callmux
@@ -33,58 +51,37 @@ npm install -g callmux
 
 ## Quick Start
 
-The shape is the same in every client:
+### Claude Code
 
-1. Run `callmux` as the MCP server your agent connects to
-2. Pass the real downstream MCP server after `--`, or point callmux at a config file
-3. Use the downstream tools plus the `callmux_*` meta-tools from your agent
-
-You can manage callmux's own downstream server registry from the CLI:
-
-```bash
-callmux init
-callmux server add github --tools get_issue,list_issues -- npx -y @modelcontextprotocol/server-github
-callmux server test github
-callmux server set github --add-tool search_issues
-callmux server list --json
-callmux doctor
-callmux client attach codex
-callmux client attach codex --yes
-```
-
-`client attach` and `client detach` preview changes by default. Pass `--yes` to write the target client config file.
-
-The simplest direct wrapper looks like this:
-
-```bash
-callmux -- npx -y @modelcontextprotocol/server-github
-callmux --tools create_issue,search_issues -- npx -y @modelcontextprotocol/server-github
-callmux --cache 60 -- node my-mcp-server.js
-callmux --cache 60 --cache-allow get_*,list_* -- npx -y @modelcontextprotocol/server-github
-```
-
-With multiple downstream servers, tools are automatically namespaced like `github__create_issue` and `linear__list_issues`.
-
-<details>
-<summary>Claude Code</summary>
-
-Add callmux as an MCP server in Claude Code settings (`~/.claude.json` or project `.mcp.json`).
-
-If you already manage downstream servers in `~/.config/callmux/config.json`, you can print a ready-to-paste snippet with:
-
-```bash
-callmux client print claude
-```
-
-Single server:
+Add to `~/.claude.json` or project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "github": {
-      "command": "callmux",
+      "command": "npx",
+      "args": ["-y", "callmux", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
+```
+
+Done. Claude now sees all GitHub tools plus the `callmux_*` meta-tools.
+
+<details>
+<summary><strong>More:</strong> tool filtering, caching, env vars, multi-server</summary>
+
+**Filter tools and enable caching:**
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
       "args": [
-        "--tools", "create_issue,get_issue,list_issues,search_issues,search_code",
+        "-y", "callmux",
+        "--tools", "create_issue,get_issue,list_issues,search_issues",
+        "--env", "GITHUB_TOKEN=ghp_xxx",
         "--cache", "60",
         "--cache-allow", "get_*,list_*,search_*",
         "--", "npx", "-y", "@modelcontextprotocol/server-github"
@@ -94,11 +91,9 @@ Single server:
 }
 ```
 
-Claude sees the original tool names (`create_issue`, `search_issues`, etc.) plus the `callmux_*` meta-tools.
+**Multiple servers via config file:**
 
-Multiple servers via config file:
-
-When you want to wrap more than one MCP server through a single callmux instance, use a config file. Create `~/.config/callmux.json`:
+Create `~/.config/callmux/config.json` (or run `callmux setup`):
 
 ```json
 {
@@ -106,8 +101,8 @@ When you want to wrap more than one MCP server through a single callmux instance
     "github": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
-      "tools": ["create_issue", "get_issue", "list_issues", "search_issues"],
-      "cachePolicy": { "allowTools": ["get_*", "list_*", "search_*"] }
+      "env": { "GITHUB_TOKEN": "ghp_xxx" },
+      "tools": ["create_issue", "get_issue", "list_issues", "search_issues"]
     },
     "linear": {
       "command": "npx",
@@ -116,158 +111,123 @@ When you want to wrap more than one MCP server through a single callmux instance
     }
   },
   "cacheTtlSeconds": 60,
-  "cachePolicy": { "denyTools": ["*_issue"] },
   "maxConcurrency": 20
 }
 ```
 
-Then point Claude Code at it:
+Then in your MCP config:
 
 ```json
 {
   "mcpServers": {
     "callmux": {
-      "command": "callmux",
-      "args": ["--config", "~/.config/callmux/config.json"]
+      "command": "npx",
+      "args": ["-y", "callmux"]
     }
   }
 }
 ```
 
-Or let callmux auto-discover `~/.config/callmux/config.json`:
-
-```json
-{
-  "mcpServers": {
-    "callmux": {
-      "command": "callmux",
-      "args": []
-    }
-  }
-}
-```
+callmux auto-discovers `~/.config/callmux/config.json`. With multiple servers, tools are namespaced: `github__create_issue`, `linear__list_issues`.
 
 </details>
 
-<details>
-<summary>Codex</summary>
+---
 
-Codex stores MCP server configuration in `~/.codex/config.toml`, with optional project-scoped overrides in `.codex/config.toml`. The Codex macOS app, CLI, and IDE extension share this MCP configuration, so setting up callmux once makes it available in all three. Official Codex MCP docs: <https://developers.openai.com/codex/mcp>.
+### Codex
 
-If you already manage downstream servers in `~/.config/callmux/config.json`, you can print a ready-to-paste snippet with:
-
-```bash
-callmux client print codex
-```
-
-Single server:
+Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.github]
-command = "callmux"
+command = "npx"
+args = ["-y", "callmux", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+```
+
+Or use the Codex CLI:
+
+```bash
+codex mcp add github -- npx -y callmux -- npx -y @modelcontextprotocol/server-github
+```
+
+<details>
+<summary><strong>More:</strong> tool filtering, caching, env vars, multi-server</summary>
+
+```toml
+[mcp_servers.github]
+command = "npx"
 args = [
-  "--tools", "create_issue,get_issue,list_issues,search_issues,search_code",
+  "-y", "callmux",
+  "--tools", "create_issue,get_issue,list_issues,search_issues",
+  "--env", "GITHUB_TOKEN=ghp_xxx",
   "--cache", "60",
   "--cache-allow", "get_*,list_*,search_*",
   "--", "npx", "-y", "@modelcontextprotocol/server-github"
 ]
 ```
 
-Multi-server via callmux config file:
+**Multi-server:**
 
 ```toml
 [mcp_servers.callmux]
-command = "callmux"
-args = ["--config", "/Users/you/.config/callmux/config.json"]
+command = "npx"
+args = ["-y", "callmux", "--config", "/Users/you/.config/callmux/config.json"]
 ```
 
-Codex users can also add the server with the `codex mcp` CLI instead of editing `config.toml` by hand:
-
-```bash
-codex mcp add github -- callmux --cache 60 --cache-allow get_*,list_*,search_* -- npx -y @modelcontextprotocol/server-github
-```
+The Codex macOS app, CLI, and IDE extension all share `~/.codex/config.toml`. Project-scoped overrides go in `.codex/config.toml`.
 
 </details>
 
-### Config file format
+---
 
-When no `--config` or `--` arguments are given, callmux looks for a config file automatically:
+### Claude Desktop (Mac / Windows)
 
-1. `$CALLMUX_CONFIG` environment variable (if set)
-2. `~/.config/callmux/config.json`
+Add to your `claude_desktop_config.json`:
 
-This path works on Linux, macOS, and Windows (`~` resolves to the user's home directory on all platforms).
-
-The config file supports two formats:
-
-**Native callmux format:**
-
-```json
-{
-  "servers": {
-    "<name>": {
-      "command": "...",
-      "args": ["..."],
-      "env": { "KEY": "value" },
-      "cwd": "/path",
-      "tools": ["whitelist", "of", "tool", "names"],
-      "cachePolicy": {
-        "allowTools": ["get_*", "list_*"],
-        "denyTools": ["get_secret"]
-      }
-    }
-  },
-  "cacheTtlSeconds": 60,
-  "cachePolicy": {
-    "denyTools": ["create_*"]
-  },
-  "maxConcurrency": 20
-}
-```
-
-**MCP-compatible format** — if you already have an `mcpServers` block, callmux can read it directly:
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
-    "github": { "command": "...", "args": ["..."] }
+    "callmux": {
+      "command": "npx",
+      "args": ["-y", "callmux", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+    }
   }
 }
 ```
 
-All fields on a server entry except `command` are optional. `tools` filters which tools are exposed — omit it to expose everything.
+<details>
+<summary><strong>More:</strong> PATH issues, multi-server</summary>
 
-### Managing callmux from the CLI
+The Claude desktop app has a minimal PATH. If `npx` isn't found, use the full path (e.g., `/usr/local/bin/npx`). Find it with `which npx`. Or install globally and use `"command": "callmux"` directly.
 
-Use the built-in CLI to manage the native callmux config format:
+Multi-server works the same way as Claude Code. Point at a config file or let auto-discovery find it.
+
+</details>
+
+---
+
+## Interactive Setup
+
+The fastest way to go from zero to configured:
 
 ```bash
-callmux init
-callmux server add github --tools get_issue,list_issues -- npx -y @modelcontextprotocol/server-github
-callmux server add linear --env LINEAR_API_KEY=lin_api_... -- npx -y @linear/mcp-server
-callmux server test github
-callmux server set github --add-tool search_issues --cache-deny create_*
-callmux server list --json
-callmux doctor
-callmux client attach codex
-callmux client attach codex --yes
-callmux client detach codex --yes
-callmux server remove linear
+npx -y callmux setup
 ```
 
-Notes:
+The wizard walks you through:
+1. **Pick servers** from a curated list (GitHub, Linear, Slack, Filesystem, etc.) or add custom
+2. **Auto-discovers tools** by probing each server, then lets you pick which to expose
+3. **Configures caching** with sensible defaults
+4. **Attaches to your client** (Claude Code, Codex) automatically
 
-- `callmux init` creates `~/.config/callmux/config.json` by default
-- use `--config <path>` with any management command to target a different file
-- `callmux doctor` validates config, checks whether downstream commands are resolvable, and attempts a lightweight connect/list-tools probe for each configured server
-- `callmux server test <name>` is the focused smoke test for one downstream server, with optional `--tool <name>` verification
-- `callmux server set <name>` and `callmux server edit <name>` update an existing downstream entry without re-adding it
-- `callmux server list --json`, `callmux server test --json`, and `callmux doctor --json` are useful for scripts and agent workflows
-- `callmux client print claude` and `callmux client print codex` print host-client snippets for registering callmux itself
-- `callmux client attach` / `detach` target host client config files; they preview by default and only write with `--yes`
-- management commands operate on native callmux config with a top-level `servers` object; they do not rewrite external `.mcp.json` / `mcpServers` files
+---
 
 ## Meta-Tools
+
+These are exposed to your agent alongside the proxied tools:
 
 ### `callmux_parallel`
 
@@ -283,11 +243,9 @@ Execute multiple independent tool calls concurrently.
 }
 ```
 
-Validation failures are returned as tool results with `isError: true` and structured error payloads, so agents can inspect and self-correct.
-
 ### `callmux_batch`
 
-Apply the same tool across many items.
+Same tool, many items. The bulk operation pattern.
 
 ```json
 {
@@ -301,7 +259,7 @@ Apply the same tool across many items.
 
 ### `callmux_pipeline`
 
-Chain tool calls where output feeds into the next step.
+Chain tools where each step feeds into the next.
 
 ```json
 {
@@ -314,15 +272,25 @@ Chain tool calls where output feeds into the next step.
 
 ### `callmux_cache_clear`
 
-Clear the result cache.
+Invalidate cached results. Scope by tool, server, or clear everything.
 
 ```json
 { "tool": "get_issue", "server": "github" }
 ```
 
+### `callmux_status`
+
+Introspect callmux from inside your agent. Shows connected servers, tools, and cache state.
+
+```json
+{ "server": "github" }
+```
+
+---
+
 ## Multi-Server Mode
 
-With multiple servers, use the `server` field in meta-tool calls to target specific servers — enabling cross-server operations in a single call:
+Wrap multiple MCP servers through a single callmux instance. Tools are automatically namespaced (`github__create_issue`, `linear__list_issues`) and the `server` field in meta-tool calls lets you target specific servers:
 
 ```json
 {
@@ -333,52 +301,116 @@ With multiple servers, use the `server` field in meta-tool calls to target speci
 }
 ```
 
-## Use with Claude Desktop (Mac / Windows)
-
-callmux works the same way in the Claude desktop app. Add it to your `claude_desktop_config.json`:
-
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "callmux": {
-      "command": "callmux",
-      "args": []
-    }
-  }
-}
-```
-
-> **Note:** The Claude desktop app has a minimal PATH. If `callmux` isn't found, use the full path to the binary (e.g., `/usr/local/bin/callmux` or `C:\\Users\\you\\AppData\\Roaming\\npm\\callmux.cmd`). Find it with `which callmux` (macOS/Linux) or `where callmux` (Windows).
-
 ## Caching
 
-When `cacheTtlSeconds` is set, callmux can reuse cached results within the TTL window. Error results are never cached.
-
-By default, caching falls back to the built-in read-tool heuristic. To tighten that behavior, use explicit cache policy rules:
+Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never cached.
 
 ```json
 {
   "cacheTtlSeconds": 60,
   "cachePolicy": {
     "allowTools": ["get_*", "list_*", "search_*"],
-    "denyTools": ["get_secret", "search_private_*"]
+    "denyTools": ["get_secret"]
   }
 }
 ```
 
-- `allowTools`: if present, only matching tools are cacheable
-- `denyTools`: matching tools are never cacheable
-- Rules support exact names and `*` wildcards
-- Per-server `cachePolicy` rules are combined with the global policy
+- **`allowTools`**: only matching tools are cacheable (whitelist)
+- **`denyTools`**: matching tools are never cached (blacklist)
+- Supports exact names and `*` wildcards
+- Per-server policies combine with the global policy
+- `callmux_cache_clear` invalidates manually
 
-Use `callmux_cache_clear` to invalidate manually by tool, server, or both.
+## CLI Management
+
+Manage servers without editing JSON:
+
+```bash
+callmux setup                         # interactive wizard
+callmux init                          # create config manually
+callmux server add github -- npx -y @modelcontextprotocol/server-github
+callmux server set github --add-tool search_issues
+callmux server test --all
+callmux doctor
+callmux client status
+callmux client attach claude --yes
+```
+
+When adding a server without `--tools`, callmux probes it automatically and lets you pick which tools to expose interactively.
+
+<details>
+<summary><strong>Full CLI reference</strong></summary>
+
+| Command | Description |
+|:--------|:------------|
+| `callmux setup` | Interactive setup wizard |
+| `callmux init` | Create empty config file |
+| `callmux server add <name> [opts] -- <cmd>` | Add a downstream server |
+| `callmux server set <name> [opts]` | Modify an existing server |
+| `callmux server test <name>\|--all` | Smoke-test connectivity |
+| `callmux server list [--json]` | List configured servers |
+| `callmux server remove <name>` | Remove a server |
+| `callmux doctor [--json]` | Validate config + probe all servers |
+| `callmux client status [claude\|codex]` | Check client configuration state |
+| `callmux client attach <client> [--yes]` | Write callmux into client config |
+| `callmux client detach <client> [--yes]` | Remove callmux from client config |
+| `callmux client print <client>` | Output ready-to-paste snippet |
+
+**Inline flags** (single-server mode):
+
+| Flag | Description |
+|:-----|:------------|
+| `--tools <list>` | Comma-separated tool whitelist |
+| `--env KEY=VALUE` | Environment variable (repeatable) |
+| `--cache <seconds>` | Cache TTL |
+| `--cache-allow <list>` | Cacheable tool patterns |
+| `--cache-deny <list>` | Non-cacheable tool patterns |
+| `--concurrency <n>` | Max parallel calls (default: 20) |
+
+</details>
+
+## Config File
+
+Auto-discovery order:
+
+1. `$CALLMUX_CONFIG` environment variable
+2. `~/.config/callmux/config.json`
+
+Works on Linux, macOS, and Windows.
+
+<details>
+<summary><strong>Full config schema</strong></summary>
+
+```json
+{
+  "servers": {
+    "<name>": {
+      "command": "...",
+      "args": ["..."],
+      "env": { "KEY": "value" },
+      "cwd": "/path",
+      "tools": ["tool_a", "tool_b"],
+      "cachePolicy": {
+        "allowTools": ["get_*"],
+        "denyTools": ["get_secret"]
+      }
+    }
+  },
+  "cacheTtlSeconds": 60,
+  "cachePolicy": { "denyTools": ["create_*"] },
+  "maxConcurrency": 20
+}
+```
+
+Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
+
+All fields except `command` are optional. `tools` filters which downstream tools are exposed. Omit to expose everything.
+
+</details>
 
 ## Related
 
-- **[tokenlean](https://github.com/edimuj/tokenlean)** — CLI tools for AI agents, token-efficient code understanding. Same philosophy: make agents less wasteful.
+- **[tokenlean](https://github.com/edimuj/tokenlean)** - CLI tools for AI agents, token-efficient code understanding. Same philosophy: make agents less wasteful.
 
 ## License
 

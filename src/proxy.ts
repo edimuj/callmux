@@ -13,6 +13,7 @@ import {
   handleBatch,
   handlePipeline,
   handleCacheClear,
+  handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
 
@@ -106,6 +107,14 @@ export class CallmuxProxy {
       case "callmux_cache_clear":
         return handleCacheClear(
           this.cache,
+          args
+        );
+
+      case "callmux_status":
+        return handleStatus(
+          this.upstream,
+          this.cache,
+          this.maxConcurrency,
           args
         );
     }
