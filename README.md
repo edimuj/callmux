@@ -1,14 +1,14 @@
-<p align="center">
-  <h1 align="center">callmux</h1>
-  <p align="center">
+<div align="center">
+  <h1>callmux</h1>
+  <p>
     <strong>Add parallel execution, batching, caching, and pipelining to any MCP server.</strong>
   </p>
-  <p align="center">
+  <p>
     <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/npm/v/callmux?color=blue&label=npm" alt="npm version"></a>
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
     <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/node/v/callmux" alt="Node version"></a>
   </p>
-</p>
+</div>
 
 ---
 
