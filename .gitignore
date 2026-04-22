@@ -10,3 +10,5 @@ test-filter.mjs
 share/
 CLAUDE.md
 AGENTS.md
+.dev/
+.claude-rig
