@@ -22,7 +22,7 @@ export class UpstreamManager {
     return new StdioClientTransport({
       command: config.command,
       args: config.args,
-      env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
+      env: { ...process.env, ...config.env } as Record<string, string>,
       cwd: config.cwd,
       stderr: "pipe",
     });
