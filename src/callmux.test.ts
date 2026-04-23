@@ -133,6 +133,7 @@ test("parallel caching is scoped by server identity", async () => {
       calls++;
       return textResult(`${server}:${tool}:${JSON.stringify(args)}`);
     },
+    getServerConcurrency() { return undefined; },
   };
 
   await handleParallel(
@@ -149,6 +150,71 @@ test("parallel caching is scoped by server identity", async () => {
   );
 
   assert.equal(calls, 2);
+});
+
+test("per-server concurrency limits parallel calls to that server", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency(server: string) {
+      return server === "fragile" ? 1 : undefined;
+    },
+  };
+
+  await handleParallel(
+    upstream as never,
+    new CallCache(0),
+    {
+      calls: [
+        { server: "fragile", tool: "a", arguments: {} },
+        { server: "fragile", tool: "b", arguments: {} },
+        { server: "fragile", tool: "c", arguments: {} },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 1);
+});
+
+test("batch respects per-server concurrency limit", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency() { return 2; },
+  };
+
+  await handleBatch(
+    upstream as never,
+    new CallCache(0),
+    {
+      server: "limited",
+      tool: "process",
+      items: [
+        { arguments: { id: 1 } },
+        { arguments: { id: 2 } },
+        { arguments: { id: 3 } },
+        { arguments: { id: 4 } },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 2);
 });
 
 test("mutating proxied tools are never served from cache", async () => {
@@ -1441,16 +1507,22 @@ function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
     clients: Map<string, { callTool: (req: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
     toolMap: Map<string, { server: string; tool: Tool }>;
     exposedToolsByServer: Map<string, Set<string>>;
+    serverInfoMap: Map<string, { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number; error?: string }>;
+    serverConcurrency: Map<string, number>;
     callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
     resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string } | { error: CallToolResult } | null;
     getServerNames: () => string[];
     getServerTools: (server: string) => string[];
+    getServerInfo: (server: string) => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number } | undefined;
+    getServerConcurrency: (server: string) => number | undefined;
     getToolsWithDescriptions: (server: string) => Array<{ name: string; description?: string }>;
   };
 
   upstream.clients = new Map();
   upstream.toolMap = new Map();
   upstream.exposedToolsByServer = new Map();
+  upstream.serverInfoMap = new Map();
+  upstream.serverConcurrency = new Map();
 
   const servers = new Set(tools.map((t) => t.server));
   for (const server of servers) {
@@ -1464,6 +1536,13 @@ function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
       server,
       new Set(serverTools.map((t) => t.tool.name))
     );
+    upstream.serverInfoMap.set(server, {
+      transport: "stdio",
+      state: "connected",
+      connectDurationMs: 42,
+      totalTools: serverTools.length,
+      exposedTools: serverTools.length,
+    });
   }
 
   const multiServer = servers.size > 1;
@@ -1633,6 +1712,43 @@ test("handleStatus per-call descriptionMaxLength overrides config default", () =
   assert.equal(content.servers[0].tools[0].description, "Get a specific issue by number...");
 });
 
+test("handleStatus includes transport, state, and connectDurationMs per server", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const content = result.structuredContent as {
+    servers: Array<{ name: string; transport: string; state: string; connectDurationMs: number }>;
+  };
+
+  assert.equal(content.servers[0].transport, "stdio");
+  assert.equal(content.servers[0].state, "connected");
+  assert.equal(typeof content.servers[0].connectDurationMs, "number");
+});
+
+test("handleStatus includes toolFilter when tools are filtered", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+  upstream.serverInfoMap.set("github", {
+    transport: "stdio",
+    state: "connected",
+    connectDurationMs: 50,
+    totalTools: 5,
+    exposedTools: 1,
+    toolFilter: ["get_issue"],
+  });
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const content = result.structuredContent as {
+    servers: Array<{ name: string; toolFilter: string[]; totalTools: number }>;
+  };
+
+  assert.deepEqual(content.servers[0].toolFilter, ["get_issue"]);
+  assert.equal(content.servers[0].totalTools, 5);
+});
+
 test("handleStatus returns string array without descriptions flag", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue", "Get a specific issue") },
@@ -1647,22 +1763,33 @@ test("handleStatus returns string array without descriptions flag", () => {
   assert.deepEqual(content.servers[0].tools, ["get_issue"]);
 });
 
-test("handleStatus reports degraded startup failures", () => {
+test("handleStatus reports degraded startup failures with diagnostics", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
   ]) as unknown as ReturnType<typeof createMockUpstream> & {
     getFailedServers: () => Array<{ name: string; error: string }>;
   };
   upstream.getFailedServers = () => [{ name: "linear", error: "boom" }];
+  upstream.serverInfoMap.set("linear", {
+    transport: "stdio",
+    state: "failed",
+    connectDurationMs: 30000,
+    totalTools: 0,
+    exposedTools: 0,
+    error: "boom",
+  });
 
   const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
   const content = result.structuredContent as {
     status: string;
-    failedServers: Array<{ name: string; error: string }>;
+    failedServers: Array<{ name: string; error: string; transport: string; connectDurationMs: number }>;
   };
 
   assert.equal(content.status, "degraded");
-  assert.deepEqual(content.failedServers, [{ name: "linear", error: "boom" }]);
+  assert.equal(content.failedServers[0].name, "linear");
+  assert.equal(content.failedServers[0].error, "boom");
+  assert.equal(content.failedServers[0].transport, "stdio");
+  assert.equal(content.failedServers[0].connectDurationMs, 30000);
 });
 
 test("meta-only proxy exposes only meta-tools", async () => {
@@ -1994,6 +2121,7 @@ test("batch reports correct succeeded and failed counts", async () => {
       if (callIndex === 4) throw new Error("timeout");
       return textResult(`ok-${callIndex}`);
     },
+    getServerConcurrency() { return undefined; },
   };
 
   const result = await handleBatch(upstream as never, new CallCache(0), {
@@ -2026,6 +2154,7 @@ test("batch with all items succeeding reports zero failures", async () => {
     async callTool(_tool: string, args?: Record<string, unknown>) {
       return textResult(`done-${(args as { id: number }).id}`);
     },
+    getServerConcurrency() { return undefined; },
   };
 
   const result = await handleBatch(upstream as never, new CallCache(0), {
@@ -2158,10 +2287,14 @@ test("proxy routes callmux_parallel to handleParallel", async () => {
     servers: { default: { command: "ignored" } },
   });
 
-  (proxy as unknown as { upstream: { callTool: () => Promise<CallToolResult> } }).upstream = {
+  (proxy as unknown as { upstream: {
+    callTool: () => Promise<CallToolResult>;
+    getServerConcurrency: () => number | undefined;
+  } }).upstream = {
     async callTool() {
       return textResult("parallel-result");
     },
+    getServerConcurrency() { return undefined; },
   };
 
   const harness = proxy as unknown as {
@@ -2181,10 +2314,14 @@ test("proxy routes callmux_batch to handleBatch", async () => {
     servers: { default: { command: "ignored" } },
   });
 
-  (proxy as unknown as { upstream: { callTool: () => Promise<CallToolResult> } }).upstream = {
+  (proxy as unknown as { upstream: {
+    callTool: () => Promise<CallToolResult>;
+    getServerConcurrency: () => number | undefined;
+  } }).upstream = {
     async callTool() {
       return textResult("batch-result");
     },
+    getServerConcurrency() { return undefined; },
   };
 
   const harness = proxy as unknown as {
@@ -2209,11 +2346,13 @@ test("proxy routes callmux_status to handleStatus", async () => {
     upstream: {
       getServerNames: () => string[];
       getServerTools: () => string[];
+      getServerInfo: () => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number } | undefined;
       getFailedServers: () => [];
     }
   }).upstream = {
     getServerNames: () => ["default"],
     getServerTools: () => ["get_issue"],
+    getServerInfo: () => ({ transport: "stdio", state: "connected", connectDurationMs: 42, totalTools: 1, exposedTools: 1 }),
     getFailedServers: () => [],
   };
 

@@ -134,6 +134,15 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     value.cachePolicy,
     `servers.${serverName}.cachePolicy`
   );
+  const maxConcurrency = value.maxConcurrency !== undefined
+    ? parsePositiveInteger(value.maxConcurrency, `servers.${serverName}.maxConcurrency`)
+    : undefined;
+
+  const shared = {
+    ...(tools ? { tools } : {}),
+    ...(cachePolicy ? { cachePolicy } : {}),
+    ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+  };
 
   if (hasUrl) {
     const transport = value.transport === undefined
@@ -147,8 +156,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
       url: value.url as string,
       ...(transport ? { transport } : {}),
       ...(headers ? { headers } : {}),
-      ...(tools ? { tools } : {}),
-      ...(cachePolicy ? { cachePolicy } : {}),
+      ...shared,
     };
   }
 
@@ -172,8 +180,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     ...(args ? { args } : {}),
     ...(env ? { env } : {}),
     ...(cwd ? { cwd } : {}),
-    ...(tools ? { tools } : {}),
-    ...(cachePolicy ? { cachePolicy } : {}),
+    ...shared,
   };
 }
 
@@ -363,15 +370,19 @@ export async function loadManagedConfig(
   }
 }
 
+export const CONFIG_SCHEMA_URL =
+  "https://raw.githubusercontent.com/edimuj/callmux/main/schema.json";
+
 export async function saveManagedConfig(
   configPath: string,
   config: CallmuxConfig
 ): Promise<void> {
   const resolvedPath = resolve(configPath);
   await mkdir(dirname(resolvedPath), { recursive: true });
+  const withSchema = { $schema: CONFIG_SCHEMA_URL, ...config };
   await writeFile(
     resolvedPath,
-    `${JSON.stringify(config, null, 2)}\n`,
+    `${JSON.stringify(withSchema, null, 2)}\n`,
     "utf-8"
   );
 }

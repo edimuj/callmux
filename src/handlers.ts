@@ -291,10 +291,24 @@ export async function handleParallel(
   const startTime = Date.now();
   const { calls } = parsedArgs;
 
-  const semaphore = new Semaphore(maxConcurrency);
+  const globalSemaphore = new Semaphore(maxConcurrency);
+  const serverSemaphores = new Map<string, Semaphore>();
+
+  const getServerSemaphore = (server: string | undefined): Semaphore | undefined => {
+    if (!server) return undefined;
+    let sem = serverSemaphores.get(server);
+    if (sem) return sem;
+    const limit = upstream.getServerConcurrency(server);
+    if (limit === undefined) return undefined;
+    sem = new Semaphore(limit);
+    serverSemaphores.set(server, sem);
+    return sem;
+  };
 
   const promises = calls.map(async (call) => {
-    await semaphore.acquire();
+    const serverSem = getServerSemaphore(call.server);
+    await globalSemaphore.acquire();
+    if (serverSem) await serverSem.acquire();
     const callStart = Date.now();
     try {
       const cached = cache.get(call.tool, call.arguments, call.server);
@@ -312,7 +326,8 @@ export async function handleParallel(
         durationMs: Date.now() - callStart,
       };
     } finally {
-      semaphore.release();
+      if (serverSem) serverSem.release();
+      globalSemaphore.release();
     }
   });
 
@@ -340,7 +355,11 @@ export async function handleBatch(
   const startTime = Date.now();
   const { server, tool, items } = parsedArgs;
 
-  const semaphore = new Semaphore(maxConcurrency);
+  const serverLimit = server ? upstream.getServerConcurrency(server) : undefined;
+  const effectiveLimit = serverLimit !== undefined
+    ? Math.min(maxConcurrency, serverLimit)
+    : maxConcurrency;
+  const semaphore = new Semaphore(effectiveLimit);
   let succeeded = 0;
   let failed = 0;
 
@@ -569,6 +588,18 @@ export function handleStatus(
   const servers = serverNames
     .filter((name) => !serverFilter || name === serverFilter)
     .map((name) => {
+      const info = upstream.getServerInfo(name);
+      const base: Record<string, unknown> = { name };
+
+      if (info) {
+        base.transport = info.transport;
+        base.state = info.state;
+        base.connectDurationMs = info.connectDurationMs;
+        if (info.toolFilter) base.toolFilter = info.toolFilter;
+        if (info.totalTools !== info.exposedTools) base.totalTools = info.totalTools;
+        if (info.maxConcurrency) base.maxConcurrency = info.maxConcurrency;
+      }
+
       if (includeDescriptions) {
         const toolsWithDesc = upstream.getToolsWithDescriptions(name).map((t) => ({
           name: t.name,
@@ -576,22 +607,30 @@ export function handleStatus(
             ? { description: truncate(t.description) }
             : {}),
         }));
-        return {
-          name,
-          tools: toolsWithDesc,
-          toolCount: toolsWithDesc.length,
-        };
+        base.tools = toolsWithDesc;
+        base.toolCount = toolsWithDesc.length;
+      } else {
+        const tools = upstream.getServerTools(name);
+        base.tools = tools;
+        base.toolCount = tools.length;
       }
-      const tools = upstream.getServerTools(name);
-      return { name, tools, toolCount: tools.length };
+
+      return base;
     });
 
   const failed = failedServers
     .filter((failure) => !serverFilter || failure.name === serverFilter)
-    .map((failure) => ({
-      name: failure.name,
-      error: failure.error,
-    }));
+    .map((failure) => {
+      const info = upstream.getServerInfo(failure.name);
+      return {
+        name: failure.name,
+        error: failure.error,
+        ...(info ? {
+          transport: info.transport,
+          connectDurationMs: info.connectDurationMs,
+        } : {}),
+      };
+    });
 
   if (serverFilter && servers.length === 0 && failed.length === 0) {
     return errorResult(
@@ -606,7 +645,7 @@ export function handleStatus(
     mode: metaOnly ? "meta-only" : "standard",
     servers,
     failedServers: failed,
-    totalTools: servers.reduce((sum, s) => sum + s.toolCount, 0),
+    totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
     maxConcurrency,
   });

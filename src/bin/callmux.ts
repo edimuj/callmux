@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallmuxProxy } from "../proxy.js";
 import {
@@ -86,6 +87,7 @@ Options:
   --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --help, -h            Show this help
+  --version, -v         Show version
 
 Server Add Options:
   --tools <list>        Comma-separated downstream tool whitelist
@@ -114,6 +116,7 @@ Config auto-discovery (checked in order):
 
 Config file format:
   {
+    "$schema": "https://raw.githubusercontent.com/edimuj/callmux/main/schema.json",
     "servers": {
       "github": {
         "command": "gh-mcp",
@@ -683,6 +686,13 @@ async function main(): Promise<void> {
 
   if (args.includes("--help") || args.includes("-h")) {
     console.log(HELP);
+    process.exit(0);
+  }
+
+  if (args.includes("--version") || args.includes("-v")) {
+    const pkgPath = resolve(fileURLToPath(import.meta.url), "../../../package.json");
+    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+    console.log(pkg.version);
     process.exit(0);
   }
 

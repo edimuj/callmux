@@ -11,6 +11,8 @@ export interface StdioServerConfig {
   tools?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
+  /** Max concurrent calls to this server (omit to use global maxConcurrency) */
+  maxConcurrency?: number;
 }
 
 export interface HttpServerConfig {
@@ -21,6 +23,8 @@ export interface HttpServerConfig {
   tools?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
+  /** Max concurrent calls to this server (omit to use global maxConcurrency) */
+  maxConcurrency?: number;
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig;
@@ -140,4 +144,15 @@ export interface UpstreamConnectionFailure {
   name: string;
   config: ServerConfig;
   error: string;
+}
+
+export interface ServerInfo {
+  transport: "stdio" | "streamable-http" | "sse";
+  state: "connected" | "failed";
+  connectDurationMs: number;
+  totalTools: number;
+  exposedTools: number;
+  toolFilter?: string[];
+  maxConcurrency?: number;
+  error?: string;
 }

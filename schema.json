@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/edimuj/callmux/main/schema.json",
+  "title": "callmux configuration",
+  "description": "Configuration for the callmux MCP multiplexer proxy",
+  "type": "object",
+  "oneOf": [
+    {
+      "required": ["servers"],
+      "not": { "required": ["mcpServers"] }
+    },
+    {
+      "required": ["mcpServers"],
+      "not": { "required": ["servers"] }
+    }
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor autocomplete"
+    },
+    "servers": {
+      "type": "object",
+      "description": "Downstream MCP servers to proxy (native format)",
+      "additionalProperties": { "$ref": "#/$defs/serverConfig" }
+    },
+    "mcpServers": {
+      "type": "object",
+      "description": "Downstream MCP servers to proxy (MCP-compatible format)",
+      "additionalProperties": { "$ref": "#/$defs/serverConfig" }
+    },
+    "cacheTtlSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Cache TTL in seconds for read operations (0 = disabled)"
+    },
+    "cachePolicy": { "$ref": "#/$defs/cachePolicy" },
+    "maxConcurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 20,
+      "description": "Max concurrent calls for parallel/batch operations"
+    },
+    "connectTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30000,
+      "description": "Timeout in milliseconds for downstream startup connect/list-tools"
+    },
+    "callTimeoutMs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30000,
+      "description": "Timeout in milliseconds for downstream tool calls"
+    },
+    "strictStartup": {
+      "type": "boolean",
+      "default": false,
+      "description": "Fail startup if any downstream server fails to connect (default: degraded mode)"
+    },
+    "maxCacheEntries": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1000,
+      "description": "Maximum cached entries before oldest entries are evicted"
+    },
+    "metaOnly": {
+      "type": "boolean",
+      "default": false,
+      "description": "Hide proxied tools, expose only meta-tools (callmux_call, parallel, batch, etc.)"
+    },
+    "descriptionMaxLength": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Default max chars for tool descriptions in callmux_status (omit = no limit)"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "serverConfig": {
+      "type": "object",
+      "description": "Downstream MCP server configuration — either stdio (command) or HTTP (url)",
+      "oneOf": [
+        { "$ref": "#/$defs/stdioServerConfig" },
+        { "$ref": "#/$defs/httpServerConfig" }
+      ]
+    },
+    "stdioServerConfig": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Command to launch the MCP server process"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments passed to the command"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables for the server process"
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the server process"
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Whitelist of tool names to expose (omit to expose all)"
+        },
+        "cachePolicy": { "$ref": "#/$defs/cachePolicy" },
+        "maxConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
+        }
+      },
+      "not": { "required": ["url"] },
+      "additionalProperties": false
+    },
+    "httpServerConfig": {
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL of the remote MCP server"
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["streamable-http", "sse"],
+          "description": "Transport protocol (auto-detected with fallback if omitted)"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "HTTP headers sent with requests (e.g. authorization)"
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Whitelist of tool names to expose (omit to expose all)"
+        },
+        "cachePolicy": { "$ref": "#/$defs/cachePolicy" },
+        "maxConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
+        }
+      },
+      "not": { "required": ["command"] },
+      "additionalProperties": false
+    },
+    "cachePolicy": {
+      "type": "object",
+      "description": "Cache policy controlling which tools are cached. Supports exact names or trailing '*' wildcards.",
+      "properties": {
+        "allowTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Only cache matching tools (exact names or 'prefix*' wildcards)"
+        },
+        "denyTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Never cache matching tools (exact names or 'prefix*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
