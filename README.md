@@ -46,7 +46,11 @@ In practice, callmux reduces tool calls to ~15% of the original count. Sessions 
 - **Caching** -- TTL-based result cache with wildcard allow/deny policies, per-server overrides
 - **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 6 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
 - **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
+- **Tool scoping** -- whitelist which tools each server exposes. Gives any MCP client per-server tool filtering, even if the client doesn't support it natively (Codex, Cursor, Windsurf, etc.)
+- **Per-server concurrency** -- protect fragile downstreams with per-server call limits alongside the global concurrency cap
+- **Degraded startup** -- servers that fail to connect are skipped instead of blocking startup, with full diagnostics in `callmux_status`
 - **Multi-transport** -- local stdio, Streamable HTTP, and SSE with auto-fallback
+- **Config schema** -- JSON Schema for editor autocomplete and validation (`$schema` auto-injected)
 - **Zero config** -- wrap any server with one `npx` command, or use the interactive setup wizard
 
 ---
