@@ -1013,7 +1013,7 @@ test("package test script executes compiled test files", async () => {
 
   assert.equal(
     packageJson.scripts?.test,
-    "tsc --project tsconfig.test.json && node --test dist-test/**/*.test.js"
+    "tsc --project tsconfig.test.json && node --test dist-test/*.test.js"
   );
 });
 
