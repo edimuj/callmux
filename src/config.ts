@@ -177,6 +177,22 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
         parsed.maxConcurrency === undefined
           ? 20
           : parsePositiveInteger(parsed.maxConcurrency, "maxConcurrency"),
+      ...(parsed.metaOnly !== undefined
+        ? {
+            metaOnly:
+              typeof parsed.metaOnly === "boolean"
+                ? parsed.metaOnly
+                : (() => { throw new Error("metaOnly must be a boolean"); })(),
+          }
+        : {}),
+      ...(parsed.descriptionMaxLength !== undefined
+        ? {
+            descriptionMaxLength: parsePositiveInteger(
+              parsed.descriptionMaxLength,
+              "descriptionMaxLength"
+            ),
+          }
+        : {}),
     };
   };
 
@@ -307,6 +323,8 @@ export async function saveManagedConfig(
 export function configFromArgs(args: string[]): CallmuxConfig {
   let cacheTtl = 0;
   let maxConcurrency = 20;
+  let metaOnly = false;
+  let descriptionMaxLength: number | undefined;
   let tools: string[] | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
@@ -338,6 +356,11 @@ export function configFromArgs(args: string[]): CallmuxConfig {
         throw new Error(`Invalid --env value "${pair}": must be KEY=VALUE`);
       }
       env[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
+    } else if (args[i] === "--meta-only") {
+      metaOnly = true;
+    } else if (args[i] === "--description-max-length" && i + 1 < optionsLimit) {
+      const value = Number.parseInt(args[++i], 10);
+      descriptionMaxLength = parsePositiveInteger(value, "--description-max-length");
     } else if (args[i] === "--url" && i + 1 < optionsLimit) {
       url = args[++i];
     } else if (args[i] === "--transport" && i + 1 < optionsLimit) {
@@ -380,6 +403,8 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       },
       cacheTtlSeconds: cacheTtl,
       maxConcurrency,
+      ...(metaOnly ? { metaOnly } : {}),
+      ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
     };
   }
 
@@ -402,5 +427,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     },
     cacheTtlSeconds: cacheTtl,
     maxConcurrency,
+    ...(metaOnly ? { metaOnly } : {}),
+    ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
   };
 }

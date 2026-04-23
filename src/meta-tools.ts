@@ -105,6 +105,33 @@ export const META_TOOLS: Tool[] = [
     },
   },
   {
+    name: "callmux_call",
+    description:
+      "Call a single tool on a downstream server. Primary way to invoke tools in meta-only mode. " +
+      "Use callmux_status with descriptions:true to discover available tools.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        tool: {
+          type: "string",
+          description:
+            "Tool name to call. Use original name with server param, or qualified name " +
+            "(e.g. github__get_issue) without server param in multi-server setups.",
+        },
+        server: {
+          type: "string",
+          description: "Target server name (optional if only one server configured)",
+        },
+        arguments: {
+          type: "object",
+          description: "Arguments to pass to the tool",
+        },
+      },
+      required: ["tool"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "callmux_cache_clear",
     description: "Clear the callmux result cache. Optionally scope by tool name and/or server.",
     inputSchema: {
@@ -133,6 +160,16 @@ export const META_TOOLS: Tool[] = [
         server: {
           type: "string",
           description: "Check a specific server (omit to check all)",
+        },
+        descriptions: {
+          type: "boolean",
+          description: "Include tool descriptions in output (default false)",
+        },
+        descriptionMaxLength: {
+          type: "number",
+          description:
+            "Max chars per tool description. Truncated values end with '...'. " +
+            "0 or omit = no limit. Only applies when descriptions is true.",
         },
       },
       additionalProperties: false,

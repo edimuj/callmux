@@ -38,11 +38,12 @@ import {
   runDoctor,
   runServerTest,
 } from "./doctor.js";
-import { handleBatch, handleCacheClear, handleParallel, handlePipeline } from "./handlers.js";
+import { handleBatch, handleCall, handleCacheClear, handleParallel, handlePipeline, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
 import { UpstreamManager } from "./upstream.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { StdioServerConfig } from "./types.js";
+import { META_TOOLS } from "./meta-tools.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -1099,4 +1100,860 @@ test("detectExistingConfigs finds servers from .mcp.json in cwd", async () => {
     process.chdir(originalCwd);
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ─── Meta-only mode tests ────────────────────────────────────
+
+function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (req: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: Tool }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+    resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string } | { error: CallToolResult } | null;
+    getServerNames: () => string[];
+    getServerTools: (server: string) => string[];
+    getToolsWithDescriptions: (server: string) => Array<{ name: string; description?: string }>;
+  };
+
+  upstream.clients = new Map();
+  upstream.toolMap = new Map();
+  upstream.exposedToolsByServer = new Map();
+
+  const servers = new Set(tools.map((t) => t.server));
+  for (const server of servers) {
+    upstream.clients.set(server, {
+      async callTool(req) {
+        return textResult(`${server}:${req.name}:${JSON.stringify(req.arguments)}`);
+      },
+    });
+    const serverTools = tools.filter((t) => t.server === server);
+    upstream.exposedToolsByServer.set(
+      server,
+      new Set(serverTools.map((t) => t.tool.name))
+    );
+  }
+
+  const multiServer = servers.size > 1;
+  for (const { server, tool } of tools) {
+    const qualified = multiServer ? `${server}__${tool.name}` : tool.name;
+    upstream.toolMap.set(qualified, { server, tool });
+  }
+
+  return upstream;
+}
+
+function mockTool(name: string, description?: string): Tool {
+  return {
+    name,
+    ...(description ? { description } : {}),
+    inputSchema: { type: "object" as const },
+  };
+}
+
+test("handleCall passes through to upstream and caches result", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const cache = new CallCache(60);
+  const result = await handleCall(upstream as never, cache, {
+    tool: "get_issue",
+    arguments: { id: 1 },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(cache.size, 1);
+
+  const cached = await handleCall(upstream as never, cache, {
+    tool: "get_issue",
+    arguments: { id: 1 },
+  });
+  assert.deepEqual(cached, result);
+});
+
+test("handleCall returns tool_not_found with available tools", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "github", tool: mockTool("list_issues") },
+  ]);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "missing_tool",
+  });
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, {
+    error: {
+      code: "tool_not_found",
+      message: 'tool "missing_tool" not found',
+      details: {
+        tool: "missing_tool",
+        available: ["get_issue", "list_issues"],
+      },
+    },
+  });
+});
+
+test("handleCall validates missing tool name", async () => {
+  const upstream = createMockUpstream([]);
+  const result = await handleCall(upstream as never, new CallCache(0), {});
+
+  assert.equal(result.isError, true);
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /non-empty string/
+  );
+});
+
+test("handleStatus includes mode field", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+  const cache = new CallCache(0);
+
+  const standard = handleStatus(upstream as never, cache, 20, false, undefined, {});
+  assert.equal(
+    (standard.structuredContent as { mode: string }).mode,
+    "standard"
+  );
+
+  const metaOnly = handleStatus(upstream as never, cache, 20, true, undefined, {});
+  assert.equal(
+    (metaOnly.structuredContent as { mode: string }).mode,
+    "meta-only"
+  );
+});
+
+test("handleStatus returns descriptions when requested", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue by number") },
+    { server: "github", tool: mockTool("list_issues", "List issues in a repository") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {
+    descriptions: true,
+  });
+
+  const content = result.structuredContent as {
+    servers: Array<{
+      tools: Array<{ name: string; description: string }>;
+    }>;
+  };
+
+  assert.equal(content.servers[0].tools[0].name, "get_issue");
+  assert.equal(content.servers[0].tools[0].description, "Get a specific issue by number");
+});
+
+test("handleStatus truncates descriptions to maxLength", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {
+    descriptions: true,
+    descriptionMaxLength: 20,
+  });
+
+  const content = result.structuredContent as {
+    servers: Array<{
+      tools: Array<{ name: string; description: string }>;
+    }>;
+  };
+
+  assert.equal(content.servers[0].tools[0].description, "Get a specific issue...");
+});
+
+test("handleStatus uses config default for descriptionMaxLength", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, 15, {
+    descriptions: true,
+  });
+
+  const content = result.structuredContent as {
+    servers: Array<{
+      tools: Array<{ name: string; description: string }>;
+    }>;
+  };
+
+  assert.equal(content.servers[0].tools[0].description, "Get a specific ...");
+});
+
+test("handleStatus per-call descriptionMaxLength overrides config default", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, 15, {
+    descriptions: true,
+    descriptionMaxLength: 30,
+  });
+
+  const content = result.structuredContent as {
+    servers: Array<{
+      tools: Array<{ name: string; description: string }>;
+    }>;
+  };
+
+  assert.equal(content.servers[0].tools[0].description, "Get a specific issue by number...");
+});
+
+test("handleStatus returns string array without descriptions flag", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue") },
+  ]);
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+
+  const content = result.structuredContent as {
+    servers: Array<{ tools: string[] }>;
+  };
+
+  assert.deepEqual(content.servers[0].tools, ["get_issue"]);
+});
+
+test("meta-only proxy exposes only meta-tools", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+    metaOnly: true,
+  });
+
+  const allTools = (proxy as unknown as { allTools: Tool[] }).allTools;
+  // allTools is empty until start() is called, but META_TOOLS should be the reference
+  assert.equal(META_TOOLS.length, 6);
+  assert.ok(META_TOOLS.some((t) => t.name === "callmux_call"));
+});
+
+test("configFromArgs parses --meta-only flag", () => {
+  const config = configFromArgs(["--meta-only", "--", "node", "server.js"]);
+  assert.equal(config.metaOnly, true);
+});
+
+test("configFromArgs parses --description-max-length", () => {
+  const config = configFromArgs(["--description-max-length", "100", "--", "node", "server.js"]);
+  assert.equal(config.descriptionMaxLength, 100);
+});
+
+test("configFromArgs omits metaOnly when not specified", () => {
+  const config = configFromArgs(["--", "node", "server.js"]);
+  assert.equal(config.metaOnly, undefined);
+});
+
+test("loadConfig parses metaOnly and descriptionMaxLength from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-meta-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        metaOnly: true,
+        descriptionMaxLength: 80,
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.metaOnly, true);
+    assert.equal(config.descriptionMaxLength, 80);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid metaOnly type", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-meta-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        metaOnly: "yes",
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /metaOnly must be a boolean/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Pipeline inputMapping tests ─────────────────────────────
+
+test("pipeline $text mapping passes full text from previous step", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") return textResult("hello world");
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", inputMapping: { body: "$text" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.body, "hello world");
+});
+
+test("pipeline $json mapping parses JSON from previous step", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") return textResult(JSON.stringify({ id: 42, name: "test" }));
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", inputMapping: { data: "$json" } },
+    ],
+  });
+
+  assert.deepEqual(capturedArgs.data, { id: 42, name: "test" });
+});
+
+test("pipeline $json.field.path extracts nested values", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") {
+        return textResult(JSON.stringify({ user: { address: { city: "Stockholm" } } }));
+      }
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", inputMapping: { city: "$json.user.address.city" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.city, "Stockholm");
+});
+
+test("pipeline $json.path returns undefined for missing nested fields", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") return textResult(JSON.stringify({ user: { name: "Edin" } }));
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", arguments: { fallback: "default" }, inputMapping: { missing: "$json.user.address.city" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.missing, undefined);
+  assert.equal(capturedArgs.fallback, "default");
+});
+
+test("pipeline $json returns undefined for non-JSON text", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") return textResult("not json at all");
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", arguments: { keep: "this" }, inputMapping: { data: "$json" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.data, undefined);
+  assert.equal(capturedArgs.keep, "this");
+});
+
+test("pipeline literal string mapping passes expression as-is", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") return textResult("ignored");
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2", inputMapping: { mode: "override_value" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.mode, "override_value");
+});
+
+test("pipeline inputMapping on first step is ignored", async () => {
+  let capturedArgs: Record<string, unknown> = {};
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      capturedArgs = args ?? {};
+      return textResult("done");
+    },
+  };
+
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1", arguments: { id: 1 }, inputMapping: { data: "$text" } },
+    ],
+  });
+
+  assert.equal(capturedArgs.id, 1);
+  assert.equal(capturedArgs.data, undefined);
+});
+
+// ─── Pipeline error mid-chain tests ──────────────────────────
+
+test("pipeline stops on step error and returns partial results", async () => {
+  const upstream = {
+    async callTool(tool: string) {
+      if (tool === "step1") return textResult("ok");
+      if (tool === "step2") return { content: [{ type: "text" as const, text: "boom" }], isError: true };
+      return textResult("should not reach");
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2" },
+      { tool: "step3" },
+    ],
+  });
+
+  const content = result.structuredContent as {
+    steps: Array<{ step: number; tool: string; result?: CallToolResult; error?: string }>;
+    finalResult?: CallToolResult;
+  };
+
+  assert.equal(content.steps.length, 2);
+  assert.equal(content.steps[0].tool, "step1");
+  assert.equal(content.steps[1].tool, "step2");
+  assert.equal(content.steps[1].result?.isError, true);
+  assert.equal(content.finalResult, undefined);
+});
+
+test("pipeline stops on step exception and returns partial results", async () => {
+  const upstream = {
+    async callTool(tool: string) {
+      if (tool === "step1") return textResult("ok");
+      if (tool === "step2") throw new Error("connection refused");
+      return textResult("should not reach");
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2" },
+      { tool: "step3" },
+    ],
+  });
+
+  const content = result.structuredContent as {
+    steps: Array<{ step: number; tool: string; error?: string }>;
+  };
+
+  assert.equal(content.steps.length, 2);
+  assert.equal(content.steps[1].error, "connection refused");
+});
+
+test("pipeline returns finalResult on full success", async () => {
+  const upstream = {
+    async callTool(tool: string) {
+      return textResult(`result-from-${tool}`);
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      { tool: "step2" },
+    ],
+  });
+
+  const content = result.structuredContent as {
+    steps: Array<{ step: number; tool: string }>;
+    finalResult: CallToolResult;
+  };
+
+  assert.equal(content.steps.length, 2);
+  assert.ok(content.finalResult);
+});
+
+// ─── Batch mixed results tests ───────────────────────────────
+
+test("batch reports correct succeeded and failed counts", async () => {
+  let callIndex = 0;
+  const upstream = {
+    async callTool() {
+      callIndex++;
+      if (callIndex === 2) return { content: [{ type: "text" as const, text: "error" }], isError: true };
+      if (callIndex === 4) throw new Error("timeout");
+      return textResult(`ok-${callIndex}`);
+    },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "process_item",
+    items: [
+      { arguments: { id: 1 } },
+      { arguments: { id: 2 } },
+      { arguments: { id: 3 } },
+      { arguments: { id: 4 } },
+      { arguments: { id: 5 } },
+    ],
+  }, 1);
+
+  const content = result.structuredContent as {
+    succeeded: number;
+    failed: number;
+    results: Array<{ index: number; result?: CallToolResult; error?: string }>;
+  };
+
+  assert.equal(content.succeeded, 3);
+  assert.equal(content.failed, 2);
+  assert.equal(content.results.length, 5);
+
+  assert.ok(content.results[1].result?.isError);
+  assert.equal(content.results[3].error, "timeout");
+});
+
+test("batch with all items succeeding reports zero failures", async () => {
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      return textResult(`done-${(args as { id: number }).id}`);
+    },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "get_item",
+    items: [
+      { arguments: { id: 1 } },
+      { arguments: { id: 2 } },
+    ],
+  }, 4);
+
+  const content = result.structuredContent as { succeeded: number; failed: number };
+  assert.equal(content.succeeded, 2);
+  assert.equal(content.failed, 0);
+});
+
+// ─── handleCall with server hints and qualified names ─────────
+
+test("handleCall resolves tool with explicit server hint", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "linear", tool: mockTool("get_issue") },
+  ]);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "get_issue",
+    server: "github",
+    arguments: { id: 1 },
+  });
+
+  assert.equal(result.isError, undefined);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /^github:/);
+});
+
+test("handleCall resolves qualified tool name without server hint", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "linear", tool: mockTool("get_issue") },
+  ]);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "github__get_issue",
+    arguments: { id: 1 },
+  });
+
+  assert.equal(result.isError, undefined);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /^github:/);
+});
+
+test("handleCall returns error for ambiguous tool without server hint", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "linear", tool: mockTool("get_issue") },
+  ]);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "get_issue",
+    arguments: { id: 1 },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /ambiguous/
+  );
+});
+
+test("handleCall returns error for unknown server", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "get_issue",
+    server: "nonexistent",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /not found/
+  );
+});
+
+// ─── Proxy routing end-to-end tests ──────────────────────────
+
+test("proxy routes callmux_call to handleCall", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as {
+    upstream: {
+      callTool: () => Promise<CallToolResult>;
+      resolveServer: () => null;
+      getServerNames: () => string[];
+      getServerTools: (s: string) => string[];
+    }
+  }).upstream = {
+    async callTool() {
+      return textResult("proxied");
+    },
+    resolveServer() { return null; },
+    getServerNames() { return ["default"]; },
+    getServerTools() { return ["list_items"]; },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_call", { tool: "get_issue" });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "tool_not_found"
+  );
+  assert.deepEqual(
+    (result.structuredContent as { error: { details: { available: string[] } } }).error.details.available,
+    ["list_items"]
+  );
+});
+
+test("proxy routes callmux_parallel to handleParallel", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as { upstream: { callTool: () => Promise<CallToolResult> } }).upstream = {
+    async callTool() {
+      return textResult("parallel-result");
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_parallel", {
+    calls: [{ tool: "get_issue", arguments: { id: 1 } }],
+  });
+
+  const content = result.structuredContent as { results: Array<{ call: { tool: string } }> };
+  assert.equal(content.results[0].call.tool, "get_issue");
+});
+
+test("proxy routes callmux_batch to handleBatch", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as { upstream: { callTool: () => Promise<CallToolResult> } }).upstream = {
+    async callTool() {
+      return textResult("batch-result");
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_batch", {
+    tool: "get_issue",
+    items: [{ arguments: { id: 1 } }],
+  });
+
+  const content = result.structuredContent as { succeeded: number };
+  assert.equal(content.succeeded, 1);
+});
+
+test("proxy routes callmux_status to handleStatus", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as {
+    upstream: { getServerNames: () => string[]; getServerTools: () => string[] }
+  }).upstream = {
+    getServerNames: () => ["default"],
+    getServerTools: () => ["get_issue"],
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_status", {});
+  const content = result.structuredContent as { status: string; mode: string };
+  assert.equal(content.status, "ok");
+  assert.equal(content.mode, "standard");
+});
+
+test("proxy routes unrecognized names to proxied tool path", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  let proxiedTool = "";
+  (proxy as unknown as { upstream: { callTool: (name: string) => Promise<CallToolResult> } }).upstream = {
+    async callTool(name: string) {
+      proxiedTool = name;
+      return textResult("proxied-result");
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("get_issue", { id: 1 });
+  assert.equal(proxiedTool, "get_issue");
+  assert.equal(result.isError, undefined);
+});
+
+// ─── Cache wildcard policy tests ─────────────────────────────
+
+test("cache allowTools wildcard matches tool prefixes", () => {
+  const cache = new CallCache(60, { allowTools: ["get_*"] });
+
+  cache.set("get_issue", { id: 1 }, textResult("issue"));
+  cache.set("create_issue", { title: "x" }, textResult("created"));
+
+  assert.deepEqual(cache.get("get_issue", { id: 1 }), textResult("issue"));
+  assert.equal(cache.get("create_issue", { title: "x" }), null);
+});
+
+test("cache denyTools wildcard blocks matching tools", () => {
+  const cache = new CallCache(60, { denyTools: ["get_secret*"] });
+
+  cache.set("get_issue", { id: 1 }, textResult("issue"));
+  cache.set("get_secret_key", { id: 1 }, textResult("secret"));
+
+  assert.deepEqual(cache.get("get_issue", { id: 1 }), textResult("issue"));
+  assert.equal(cache.get("get_secret_key", { id: 1 }), null);
+});
+
+test("cache denyTools takes precedence over allowTools", () => {
+  const cache = new CallCache(60, {
+    allowTools: ["get_*"],
+    denyTools: ["get_secret"],
+  });
+
+  cache.set("get_issue", { id: 1 }, textResult("issue"));
+  cache.set("get_secret", { id: 1 }, textResult("secret"));
+
+  assert.deepEqual(cache.get("get_issue", { id: 1 }), textResult("issue"));
+  assert.equal(cache.get("get_secret", { id: 1 }), null);
+});
+
+test("per-server cache policy allows tools that would be skipped by default", () => {
+  const cache = new CallCache(
+    60,
+    undefined,
+    { github: { allowTools: ["submit_review"] } }
+  );
+
+  cache.set("submit_review", { body: "lgtm" }, textResult("submitted"), "github");
+  cache.set("submit_review", { body: "lgtm" }, textResult("submitted"));
+
+  assert.deepEqual(
+    cache.get("submit_review", { body: "lgtm" }, "github"),
+    textResult("submitted")
+  );
+  assert.equal(
+    cache.get("submit_review", { body: "lgtm" }),
+    null
+  );
+});
+
+test("cache skips mutating tools by default without policy", () => {
+  const cache = new CallCache(60);
+
+  cache.set("create_issue", { title: "x" }, textResult("created"));
+  cache.set("delete_issue", { id: 1 }, textResult("deleted"));
+  cache.set("get_issue", { id: 1 }, textResult("issue"));
+
+  assert.equal(cache.get("create_issue", { title: "x" }), null);
+  assert.equal(cache.get("delete_issue", { id: 1 }), null);
+  assert.deepEqual(cache.get("get_issue", { id: 1 }), textResult("issue"));
+});
+
+test("cache does not store error results", () => {
+  const cache = new CallCache(60);
+
+  cache.set("get_issue", { id: 1 }, {
+    content: [{ type: "text", text: "not found" }],
+    isError: true,
+  });
+
+  assert.equal(cache.get("get_issue", { id: 1 }), null);
+  assert.equal(cache.size, 0);
+});
+
+test("cache wildcard matches qualified tool names across servers", () => {
+  const cache = new CallCache(60, { allowTools: ["list_*"] });
+
+  cache.set("github__list_issues", { page: 1 }, textResult("issues"), "github");
+
+  assert.deepEqual(
+    cache.get("github__list_issues", { page: 1 }, "github"),
+    textResult("issues")
+  );
 });

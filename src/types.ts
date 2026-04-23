@@ -53,6 +53,10 @@ export interface CallmuxConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls for parallel() */
   maxConcurrency?: number;
+  /** Hide proxied tools, expose only meta-tools (callmux_call, parallel, batch, etc.) */
+  metaOnly?: boolean;
+  /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
+  descriptionMaxLength?: number;
 }
 
 export type ConfigFormat = "native" | "mcpCompatible";

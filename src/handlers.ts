@@ -455,6 +455,47 @@ export async function handlePipeline(
   return successResult(output as unknown as Record<string, unknown>);
 }
 
+export async function handleCall(
+  upstream: UpstreamManager,
+  cache: CallCache,
+  args: unknown
+): Promise<CallToolResult> {
+  if (!isRecord(args)) {
+    return errorResult("invalid_arguments", '"tool" must be a non-empty string', {
+      field: "tool",
+    });
+  }
+
+  const tool = validateToolName(args.tool, "tool");
+  if (typeof tool !== "string") return tool;
+
+  const server =
+    args.server === undefined ? undefined : validateToolName(args.server, "server");
+  if (server !== undefined && typeof server !== "string") return server;
+
+  const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
+  if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+
+  const resolved = upstream.resolveServer(tool, server);
+  if (!resolved) {
+    const available = server
+      ? upstream.getServerTools(server)
+      : upstream.getServerNames().flatMap((s) => upstream.getServerTools(s));
+    return errorResult("tool_not_found", `tool "${tool}" not found`, {
+      tool,
+      available,
+    });
+  }
+  if ("error" in resolved) return resolved.error;
+
+  const cached = cache.get(tool, parsedArgs, server);
+  if (cached) return cached;
+
+  const result = await upstream.callTool(tool, parsedArgs, server);
+  cache.set(tool, parsedArgs, result, server);
+  return result;
+}
+
 export function handleCacheClear(
   cache: CallCache,
   args: unknown
@@ -502,19 +543,47 @@ export function handleStatus(
   upstream: UpstreamManager,
   cache: CallCache,
   maxConcurrency: number,
+  metaOnly: boolean,
+  defaultDescriptionMaxLength: number | undefined,
   args: unknown
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
+  const includeDescriptions = parsed.descriptions === true;
+  const descriptionMaxLength =
+    typeof parsed.descriptionMaxLength === "number" && parsed.descriptionMaxLength > 0
+      ? parsed.descriptionMaxLength
+      : defaultDescriptionMaxLength && defaultDescriptionMaxLength > 0
+        ? defaultDescriptionMaxLength
+        : undefined;
 
   const serverNames = upstream.getServerNames();
+
+  const truncate = (desc: string | undefined): string | undefined => {
+    if (!desc) return desc;
+    if (!descriptionMaxLength || desc.length <= descriptionMaxLength) return desc;
+    return desc.slice(0, descriptionMaxLength) + "...";
+  };
+
   const servers = serverNames
     .filter((name) => !serverFilter || name === serverFilter)
-    .map((name) => ({
-      name,
-      tools: upstream.getServerTools(name),
-      toolCount: upstream.getServerTools(name).length,
-    }));
+    .map((name) => {
+      if (includeDescriptions) {
+        const toolsWithDesc = upstream.getToolsWithDescriptions(name).map((t) => ({
+          name: t.name,
+          ...(t.description !== undefined
+            ? { description: truncate(t.description) }
+            : {}),
+        }));
+        return {
+          name,
+          tools: toolsWithDesc,
+          toolCount: toolsWithDesc.length,
+        };
+      }
+      const tools = upstream.getServerTools(name);
+      return { name, tools, toolCount: tools.length };
+    });
 
   if (serverFilter && servers.length === 0) {
     return errorResult(
@@ -526,6 +595,7 @@ export function handleStatus(
 
   return jsonResult({
     status: "ok",
+    mode: metaOnly ? "meta-only" : "standard",
     servers,
     totalTools: servers.reduce((sum, s) => sum + s.toolCount, 0),
     cache: cache.stats(),

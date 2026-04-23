@@ -12,6 +12,7 @@ import {
   handleParallel,
   handleBatch,
   handlePipeline,
+  handleCall,
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
@@ -58,19 +59,25 @@ export class CallmuxProxy {
   async start(transport: Transport): Promise<void> {
     const connections = await this.upstream.connect(this.config.servers);
 
-    // Build combined tool list: proxied tools + meta-tools
     const proxiedTools = this.upstream.getTools().map(({ qualifiedName, tool }) => ({
       ...tool,
       name: qualifiedName,
     }));
 
-    this.allTools = [...proxiedTools, ...META_TOOLS];
-
     const totalTools = proxiedTools.length;
     const serverCount = connections.length;
-    process.stderr.write(
-      `[callmux] Proxying ${totalTools} tools from ${serverCount} server(s) + ${META_TOOLS.length} meta-tools\n`
-    );
+
+    if (this.config.metaOnly) {
+      this.allTools = [...META_TOOLS];
+      process.stderr.write(
+        `[callmux] Meta-only mode: ${META_TOOLS.length} meta-tools (${totalTools} tools available via callmux_call/parallel/batch from ${serverCount} server(s))\n`
+      );
+    } else {
+      this.allTools = [...proxiedTools, ...META_TOOLS];
+      process.stderr.write(
+        `[callmux] Proxying ${totalTools} tools from ${serverCount} server(s) + ${META_TOOLS.length} meta-tools\n`
+      );
+    }
 
     await this.server.connect(transport);
   }
@@ -104,6 +111,13 @@ export class CallmuxProxy {
           args
         );
 
+      case "callmux_call":
+        return handleCall(
+          this.upstream,
+          this.cache,
+          args
+        );
+
       case "callmux_cache_clear":
         return handleCacheClear(
           this.cache,
@@ -115,6 +129,8 @@ export class CallmuxProxy {
           this.upstream,
           this.cache,
           this.maxConcurrency,
+          this.config.metaOnly ?? false,
+          this.config.descriptionMaxLength,
           args
         );
     }

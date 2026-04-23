@@ -12,6 +12,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { SERVER_REGISTRY, type RegistryEntry } from "./registry.js";
 import { isHttpServerConfig } from "./types.js";
+import { META_TOOLS } from "./meta-tools.js";
 import type { CallmuxConfig, ServerConfig } from "./types.js";
 
 interface DiscoveredServer {
@@ -69,7 +70,47 @@ export async function runSetup(configPath?: string): Promise<void> {
 
   const cacheTtl = cacheChoice ? 60 : 0;
 
-  const config = buildConfig(discovered, cacheTtl, existing);
+  const totalToolCount = discovered.reduce(
+    (sum, s) => sum + (s.selectedTools?.length ?? s.tools.length),
+    0
+  );
+
+  const metaOnlyChoice = await p.confirm({
+    message: `Enable meta-only mode? Hides individual tools from your agent's listing and exposes them only through callmux meta-tools. Reduces tool listing from ${totalToolCount} tools to ${META_TOOLS.length}.`,
+    initialValue: false,
+  });
+
+  if (p.isCancel(metaOnlyChoice)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  let descriptionMaxLength: number | undefined;
+  if (metaOnlyChoice) {
+    const descMaxInput = await p.text({
+      message: "Max description length for tool discovery (leave blank for no limit):",
+      placeholder: "100",
+      validate: (v = "") => {
+        if (v && (!/^\d+$/.test(v) || Number(v) < 1))
+          return "Must be a positive integer";
+      },
+    });
+
+    if (p.isCancel(descMaxInput)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+
+    descriptionMaxLength = descMaxInput ? Number(descMaxInput) : undefined;
+  }
+
+  const config = buildConfig(
+    discovered,
+    cacheTtl,
+    metaOnlyChoice,
+    descriptionMaxLength,
+    existing
+  );
 
   await saveManagedConfig(resolvedConfigPath, config);
   p.log.success(`Config written to ${resolvedConfigPath}`);
@@ -342,6 +383,8 @@ async function discoverTools(
 function buildConfig(
   discovered: DiscoveredServer[],
   cacheTtl: number,
+  metaOnly: boolean,
+  descriptionMaxLength: number | undefined,
   existing?: CallmuxConfig | null
 ): CallmuxConfig {
   const servers: Record<string, ServerConfig> = existing?.servers ?? {};
@@ -357,6 +400,8 @@ function buildConfig(
     servers,
     ...(cacheTtl > 0 ? { cacheTtlSeconds: cacheTtl } : {}),
     maxConcurrency: existing?.maxConcurrency ?? 20,
+    ...(metaOnly ? { metaOnly } : {}),
+    ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
   };
 }
 

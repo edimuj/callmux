@@ -224,6 +224,24 @@ export class UpstreamManager {
     return exposed ? Array.from(exposed).sort() : [];
   }
 
+  getToolsWithDescriptions(
+    server: string
+  ): Array<{ name: string; description?: string }> {
+    const exposed = this.exposedToolsByServer.get(server);
+    if (!exposed) return [];
+
+    const result: Array<{ name: string; description?: string }> = [];
+    for (const [, { server: srv, tool }] of this.toolMap) {
+      if (srv === server && exposed.has(tool.name)) {
+        result.push({
+          name: tool.name,
+          ...(tool.description ? { description: tool.description } : {}),
+        });
+      }
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   async close(): Promise<void> {
     for (const [name, client] of this.clients) {
       try {
