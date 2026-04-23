@@ -117,6 +117,7 @@ Create `~/.config/callmux/config.json` (or run `callmux setup`):
 
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/edimuj/callmux/main/schema.json",
   "servers": {
     "github": {
       "command": "npx",
@@ -131,11 +132,7 @@ Create `~/.config/callmux/config.json` (or run `callmux setup`):
     }
   },
   "cacheTtlSeconds": 60,
-  "maxConcurrency": 20,
-  "maxCacheEntries": 1000,
-  "connectTimeoutMs": 30000,
-  "callTimeoutMs": 30000,
-  "strictStartup": false
+  "maxConcurrency": 20
 }
 ```
 
@@ -484,8 +481,11 @@ Works on Linux, macOS, and Windows.
 <details>
 <summary><strong>Full config schema</strong></summary>
 
+Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
+
 ```json
 {
+  "$schema": "https://raw.githubusercontent.com/edimuj/callmux/main/schema.json",
   "servers": {
     "<stdio-server>": {
       "command": "...",
@@ -493,6 +493,7 @@ Works on Linux, macOS, and Windows.
       "env": { "KEY": "value" },
       "cwd": "/path",
       "tools": ["tool_a", "tool_b"],
+      "maxConcurrency": 2,
       "cachePolicy": {
         "allowTools": ["get_*"],
         "denyTools": ["get_secret"]
@@ -503,6 +504,7 @@ Works on Linux, macOS, and Windows.
       "transport": "streamable-http | sse",
       "headers": { "Authorization": "Bearer ..." },
       "tools": ["tool_a"],
+      "maxConcurrency": 5,
       "cachePolicy": { "allowTools": ["*"] }
     }
   },
@@ -520,7 +522,43 @@ Works on Linux, macOS, and Windows.
 
 Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 
-Each server needs either `command` (local stdio) or `url` (remote HTTP/SSE). All other fields are optional. `tools` filters which downstream tools are exposed. Omit to expose everything.
+**Global options:**
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `servers` | object | *(required)* | Map of server name → server config |
+| `cacheTtlSeconds` | integer | `0` | Cache TTL in seconds (0 = disabled) |
+| `cachePolicy` | object | — | Global cache allow/deny rules (see [Caching](#caching)) |
+| `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
+| `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
+| `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
+| `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
+| `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
+| `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
+| `descriptionMaxLength` | integer | — | Default max chars for tool descriptions in `callmux_status` |
+
+**Stdio server config** (local process):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `command` | string | yes | Command to launch the MCP server |
+| `args` | string[] | — | Arguments passed to the command |
+| `env` | object | — | Environment variables for the process |
+| `cwd` | string | — | Working directory |
+| `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
+| `maxConcurrency` | integer | — | Max concurrent calls to this server |
+| `cachePolicy` | object | — | Per-server cache allow/deny rules |
+
+**HTTP server config** (remote):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `url` | string | yes | URL of the remote MCP server |
+| `transport` | string | — | `"streamable-http"` or `"sse"` (auto-detected if omitted) |
+| `headers` | object | — | HTTP headers (e.g. authorization) |
+| `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
+| `maxConcurrency` | integer | — | Max concurrent calls to this server |
+| `cachePolicy` | object | — | Per-server cache allow/deny rules |
 
 </details>
 
