@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 380">
+  <defs>
+    <marker id="ag" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#78716c"/>
+    </marker>
+    <marker id="aa" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#c2410c"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="380" fill="#fafaf9" rx="8"/>
+
+  <!-- Divider -->
+  <line x1="400" y1="16" x2="400" y2="364" stroke="#d6d3d1" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- ===== LEFT PANEL: Without callmux ===== -->
+
+  <text x="200" y="28" fill="#1c1917" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="700" text-anchor="middle">Without callmux</text>
+
+  <!-- Agent box -->
+  <rect x="48" y="44" width="80" height="28" rx="4" fill="#ffffff" stroke="#a8a29e" stroke-width="1"/>
+  <text x="88" y="63" fill="#1c1917" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="middle">Agent</text>
+
+  <!-- Server box -->
+  <rect x="268" y="44" width="96" height="28" rx="4" fill="#ffffff" stroke="#a8a29e" stroke-width="1"/>
+  <text x="316" y="63" fill="#1c1917" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" text-anchor="middle">MCP Server</text>
+
+  <!-- Lifelines -->
+  <line x1="88" y1="72" x2="88" y2="316" stroke="#d6d3d1" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="316" y1="72" x2="316" y2="316" stroke="#d6d3d1" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- RT 1 -->
+  <line x1="92" y1="96" x2="312" y2="96" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="176" y="84" width="36" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="94" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">call 1</text>
+
+  <line x1="312" y1="112" x2="92" y2="112" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="170" y="100" width="48" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="110" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">result 1</text>
+
+  <rect x="52" y="120" width="128" height="16" rx="2" fill="#fef2f2" stroke="#fecaca" stroke-width="0.5"/>
+  <text x="116" y="131" fill="#a8a29e" font-family="system-ui, sans-serif" font-size="8" font-style="italic" text-anchor="middle">Fetching issue #2...</text>
+
+  <!-- RT 2 -->
+  <line x1="92" y1="148" x2="312" y2="148" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="176" y="136" width="36" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="146" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">call 2</text>
+
+  <line x1="312" y1="164" x2="92" y2="164" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="170" y="152" width="48" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="162" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">result 2</text>
+
+  <rect x="52" y="172" width="128" height="16" rx="2" fill="#fef2f2" stroke="#fecaca" stroke-width="0.5"/>
+  <text x="116" y="183" fill="#a8a29e" font-family="system-ui, sans-serif" font-size="8" font-style="italic" text-anchor="middle">Fetching issue #3...</text>
+
+  <!-- RT 3 -->
+  <line x1="92" y1="200" x2="312" y2="200" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="176" y="188" width="36" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="198" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">call 3</text>
+
+  <line x1="312" y1="216" x2="92" y2="216" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="170" y="204" width="48" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="214" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">result 3</text>
+
+  <rect x="52" y="224" width="128" height="16" rx="2" fill="#fef2f2" stroke="#fecaca" stroke-width="0.5"/>
+  <text x="116" y="235" fill="#a8a29e" font-family="system-ui, sans-serif" font-size="8" font-style="italic" text-anchor="middle">Fetching issue #4...</text>
+
+  <!-- Dots -->
+  <text x="200" y="260" fill="#a8a29e" font-family="system-ui, sans-serif" font-size="11" text-anchor="middle" letter-spacing="4">. . .</text>
+  <text x="200" y="276" fill="#a8a29e" font-family="system-ui, sans-serif" font-size="9" text-anchor="middle">4 more round trips</text>
+
+  <!-- RT 7 -->
+  <line x1="92" y1="292" x2="312" y2="292" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="176" y="280" width="36" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="290" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">call 7</text>
+
+  <line x1="312" y1="308" x2="92" y2="308" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <rect x="170" y="296" width="48" height="14" rx="2" fill="#fafaf9"/>
+  <text x="194" y="306" fill="#78716c" font-family="'SFMono-Regular', Consolas, 'Courier New', monospace" font-size="8" text-anchor="middle">result 7</text>
+
+  <!-- Left stats -->
+  <text x="200" y="352" fill="#78716c" font-family="system-ui, sans-serif" font-size="11" text-anchor="middle">7 round trips</text>
+  <text x="200" y="368" fill="#78716c" font-family="'SFMono-Regular', Consolas, monospace" font-size="10" font-weight="600" text-anchor="middle">~1,425 tokens overhead</text>
+
+  <!-- ===== RIGHT PANEL: With callmux ===== -->
+
+  <text x="612" y="28" fill="#1c1917" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="14" font-weight="700" text-anchor="middle">With callmux</text>
+
+  <!-- Agent box -->
+  <rect x="436" y="176" width="68" height="28" rx="4" fill="#ffffff" stroke="#a8a29e" stroke-width="1"/>
+  <text x="470" y="195" fill="#1c1917" font-family="system-ui, sans-serif" font-size="11" font-weight="600" text-anchor="middle">Agent</text>
+
+  <!-- callmux box (focal) -->
+  <rect x="564" y="168" width="92" height="44" rx="4" fill="#fff7ed" stroke="#c2410c" stroke-width="1.5"/>
+  <text x="610" y="195" fill="#9a3412" font-family="system-ui, sans-serif" font-size="12" font-weight="700" text-anchor="middle">callmux</text>
+
+  <!-- Server box -->
+  <rect x="716" y="176" width="84" height="28" rx="4" fill="#ffffff" stroke="#a8a29e" stroke-width="1"/>
+  <text x="758" y="195" fill="#1c1917" font-family="system-ui, sans-serif" font-size="11" font-weight="600" text-anchor="middle">MCP Server</text>
+
+  <!-- Forward: Agent -> callmux -->
+  <line x1="508" y1="186" x2="560" y2="186" stroke="#78716c" stroke-width="1" marker-end="url(#ag)"/>
+  <text x="534" y="178" fill="#78716c" font-family="'SFMono-Regular', Consolas, monospace" font-size="8" text-anchor="middle">1 call</text>
+
+  <!-- Forward: callmux -> Server (accent, thicker) -->
+  <line x1="660" y1="184" x2="712" y2="184" stroke="#c2410c" stroke-width="1.5" marker-end="url(#aa)"/>
+  <line x1="660" y1="188" x2="712" y2="188" stroke="#c2410c" stroke-width="1.5" marker-end="url(#aa)" opacity="0.5"/>
+  <line x1="660" y1="192" x2="712" y2="192" stroke="#c2410c" stroke-width="1.5" marker-end="url(#aa)" opacity="0.25"/>
+  <text x="686" y="176" fill="#c2410c" font-family="'SFMono-Regular', Consolas, monospace" font-size="8" font-weight="600" text-anchor="middle">7x parallel</text>
+
+  <!-- Return: callmux -> Agent (dashed) -->
+  <line x1="560" y1="198" x2="508" y2="198" stroke="#78716c" stroke-width="1" stroke-dasharray="3,3" marker-end="url(#ag)"/>
+  <text x="534" y="212" fill="#78716c" font-family="'SFMono-Regular', Consolas, monospace" font-size="8" text-anchor="middle">1 result</text>
+
+  <!-- Right stats -->
+  <text x="612" y="352" fill="#78716c" font-family="system-ui, sans-serif" font-size="11" text-anchor="middle">1 round trip</text>
+  <text x="612" y="368" fill="#16a34a" font-family="'SFMono-Regular', Consolas, monospace" font-size="10" font-weight="600" text-anchor="middle">~75 tokens overhead</text>
+</svg>

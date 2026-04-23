@@ -1,7 +1,7 @@
 <div align="center">
   <h1>callmux</h1>
   <p>
-    <strong>Add parallel execution, batching, caching, and pipelining to any MCP server.</strong>
+    <strong>Parallel execution, batching, caching, pipelining, and tool management for any MCP server.</strong>
   </p>
   <p>
     <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/npm/v/callmux?color=blue&label=npm" alt="npm version"></a>
@@ -22,63 +22,32 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
+| 40+ tools bloating the system prompt | 6 meta-tools via meta-only mode |
 
-```
-Agent (Claude, Codex, etc.)          callmux adds:
-        │                            ┌─────────────────────┐
-        │  stdio                     │ callmux_parallel    │
-        ▼                            │ callmux_batch       │
-   ┌─────────┐                       │ callmux_pipeline    │
-   │ callmux │──── stdio ───▶ Local  │ callmux_cache_clear │
-   └─────────┤              Server   │ callmux_status      │
-        │    │                       └─────────────────────┘
-        │    └──── http/sse ──▶ Remote Server
-        │
-        └──── stdio ───▶ Local Server 2 (optional)
-```
+<p align="center">
+  <img src="docs/diagram.svg" alt="callmux: 7 sequential calls reduced to 1 batched call" width="720">
+</p>
 
 ## Why Tool Call Reduction Matters
 
-The speed improvement from parallelization is obvious. The less obvious - and bigger - win is **context pollution**.
+Every tool call adds structural overhead (~75 tokens) and intermediate reasoning (~150 tokens of "Now I'll fetch the next one...") to your context window. Batch 7 calls into 1 and you eliminate **~1,350 tokens of pure waste** -- a 19:1 reduction in context pollution. Since context is cumulative (every turn re-processes everything before it), this compounds across a session.
 
-Every tool call in an LLM conversation adds three things to the context window:
+In practice, callmux reduces tool calls to ~15% of the original count. Sessions run longer before compaction, cost less in API tokens, and produce better output because the model isn't re-reading filler from 40 turns ago.
 
-| Component | Typical tokens | Reduced by callmux? |
-|:---|:---|:---|
-| **Payload** (parameters + result data) | 200–1,000 | No - same data either way |
-| **Structural overhead** (JSON wrappers, role markers, function name) | 50–100 per call | Yes - 1 wrapper instead of N |
-| **Intermediate reasoning** ("Now I'll fetch the next one…") | 50–300 per call | Yes - eliminated entirely |
+[Deep dive on the context math with diagrams](https://longgamedev.substack.com/p/your-ai-agent-is-re-reading-its-own)
 
-The payload is a wash - the same data moves whether it's 7 calls or 1 batched call. But structural overhead and intermediate reasoning scale linearly with call count, and they're pure waste.
+---
 
-**Example: 7 sequential tool calls vs. 1 `callmux_parallel` call**
+## Features
 
-| | Without callmux | With callmux |
-|:---|:---|:---|
-| Structural overhead | 7 × ~75 = **525 tokens** | 1 × ~75 = **75 tokens** |
-| Intermediate reasoning | 6 × ~150 = **900 tokens** | **0 tokens** |
-| **Total pollution** | **~1,425 tokens** | **~75 tokens** |
-
-That's **~19:1 reduction in context pollution** from a 7:1 reduction in tool calls.
-
-### The compounding effect
-
-Context is cumulative. Each subsequent API turn re-processes everything before it:
-
-```
-Turn 1:  base_context + call₁
-Turn 2:  base_context + call₁ + result₁ + reasoning₁ + call₂
-Turn 3:  base_context + call₁ + result₁ + reasoning₁ + call₂ + result₂ + reasoning₂ + call₃
-  ⋮
-```
-
-Total input tokens processed across N sequential calls grows **quadratically**. With callmux, it's one roundtrip. Over a session with dozens of multi-call operations, the cumulative difference is dramatic:
-
-- **Longer sessions** - context fills slower, compaction happens later, less work is lost
-- **Lower cost** - fewer input tokens processed across API roundtrips
-- **Better output quality** - the model spends attention on your conversation, not on re-reading filler from 40 turns ago
-
-In real-world usage, callmux typically reduces tool calls to **~15% of the original count** - which translates to roughly **5–8% of the context pollution** when accounting for eliminated reasoning turns and the compounding effect.
+- **Parallel execution** -- fire independent tool calls concurrently, get all results in one turn
+- **Batch operations** -- same tool, many items, one call (bulk create, bulk fetch)
+- **Pipelining** -- chain tools where each step feeds into the next via input mapping
+- **Caching** -- TTL-based result cache with wildcard allow/deny policies, per-server overrides
+- **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 6 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
+- **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
+- **Multi-transport** -- local stdio, Streamable HTTP, and SSE with auto-fallback
+- **Zero config** -- wrap any server with one `npx` command, or use the interactive setup wizard
 
 ---
 
@@ -269,7 +238,8 @@ The wizard walks you through:
 2. **Pick servers** from a curated list (GitHub, Linear, Slack, Filesystem, etc.) or add custom (local command or remote URL)
 3. **Auto-discovers tools** by probing each server, then lets you pick which to expose
 4. **Configures caching** with sensible defaults
-5. **Attaches to your client** (Claude Code, Codex) automatically
+5. **Offers meta-only mode** to hide proxied tools and reduce system prompt size
+6. **Attaches to your client** (Claude Code, Codex) automatically
 
 ---
 
@@ -326,12 +296,20 @@ Invalidate cached results. Scope by tool, server, or clear everything.
 { "tool": "get_issue", "server": "github" }
 ```
 
-### `callmux_status`
+### `callmux_call`
 
-Introspect callmux from inside your agent. Shows connected servers, tools, and cache state.
+Call a single downstream tool by name. Primary invocation path in [meta-only mode](#meta-only-mode).
 
 ```json
-{ "server": "github" }
+{ "tool": "get_issue", "server": "github", "arguments": { "number": 42 } }
+```
+
+### `callmux_status`
+
+Introspect callmux from inside your agent. Shows connected servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
+
+```json
+{ "server": "github", "descriptions": true, "descriptionMaxLength": 80 }
 ```
 
 ---
@@ -375,6 +353,31 @@ Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP
 ```bash
 npx -y callmux --url https://mcp.example.com/mcp --header "Authorization:Bearer sk-..."
 ```
+
+---
+
+## Meta-Only Mode
+
+By default, callmux exposes all downstream tools alongside its meta-tools. With multiple servers this can mean 50-100+ tool definitions in the system prompt on every API turn.
+
+**Meta-only mode** hides all proxied tools and exposes only the 6 meta-tools (`callmux_parallel`, `callmux_batch`, `callmux_pipeline`, `callmux_call`, `callmux_cache_clear`, `callmux_status`). The agent discovers available tools via `callmux_status` and invokes them through `callmux_call` or the batch/parallel meta-tools.
+
+```json
+{
+  "servers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] } },
+  "metaOnly": true,
+  "descriptionMaxLength": 80
+}
+```
+
+| | Standard mode | Meta-only mode |
+|:---|:---|:---|
+| Tools in listing | All downstream + 6 meta-tools | 6 meta-tools only |
+| Single tool call | Direct by name | `callmux_call` |
+| Tool discovery | Automatic (in listing) | `callmux_status` with `descriptions: true` |
+| System prompt size | Grows with server count | Fixed at 6 tools |
+
+Enable via config (`"metaOnly": true`), CLI flag (`--meta-only`), or the setup wizard.
 
 ---
 
@@ -443,6 +446,8 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--cache-allow <list>` | Cacheable tool patterns |
 | `--cache-deny <list>` | Non-cacheable tool patterns |
 | `--concurrency <n>` | Max parallel calls (default: 20) |
+| `--meta-only` | Hide proxied tools, expose only meta-tools |
+| `--description-max-length <n>` | Default max chars for tool descriptions in status |
 | `--url <url>` | Connect to remote server (instead of `-- command`) |
 | `--transport <type>` | Force `streamable-http` or `sse` |
 | `--header Name:Value` | HTTP header (repeatable) |
@@ -485,7 +490,9 @@ Works on Linux, macOS, and Windows.
   },
   "cacheTtlSeconds": 60,
   "cachePolicy": { "denyTools": ["create_*"] },
-  "maxConcurrency": 20
+  "maxConcurrency": 20,
+  "metaOnly": false,
+  "descriptionMaxLength": 80
 }
 ```
 
