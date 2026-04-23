@@ -1,9 +1,5 @@
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-// ─── Transport types ──────────────────────────────────────────
-
-export type TransportType = "stdio" | "streamable-http" | "sse";
-
 // ─── Downstream server configuration ───────────────────────────
 
 export interface StdioServerConfig {
@@ -53,6 +49,14 @@ export interface CallmuxConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls for parallel() */
   maxConcurrency?: number;
+  /** Timeout in milliseconds for downstream startup connect/list-tools work */
+  connectTimeoutMs?: number;
+  /** Timeout in milliseconds for downstream tool calls */
+  callTimeoutMs?: number;
+  /** When true, any downstream startup failure prevents callmux from starting */
+  strictStartup?: boolean;
+  /** Maximum cached entries before oldest entries are evicted */
+  maxCacheEntries?: number;
   /** Hide proxied tools, expose only meta-tools (callmux_call, parallel, batch, etc.) */
   metaOnly?: boolean;
   /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
@@ -130,4 +134,10 @@ export interface UpstreamConnection {
   name: string;
   config: ServerConfig;
   tools: Tool[];
+}
+
+export interface UpstreamConnectionFailure {
+  name: string;
+  config: ServerConfig;
+  error: string;
 }

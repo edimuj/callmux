@@ -15,6 +15,7 @@ import {
   applyServerMutation,
   createEmptyConfig,
   formatServerList,
+  parseCommandLine,
   parseServerMutationArgs,
   parseServerDefinitionArgs,
   renderClientSnippet,
@@ -40,13 +41,28 @@ import {
 } from "./doctor.js";
 import { handleBatch, handleCall, handleCacheClear, handleParallel, handlePipeline, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
-import { UpstreamManager } from "./upstream.js";
+import { mapBounded, UpstreamManager } from "./upstream.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { StdioServerConfig } from "./types.js";
+import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
+import { formatCommandForDisplay, redactUrl } from "./redact.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
+}
+
+function fakeMcpServer(
+  name: string,
+  env: Record<string, string> = {}
+): StdioServerConfig {
+  return {
+    command: process.execPath,
+    args: [join(process.cwd(), "dist-test", "test-fixtures", "fake-mcp-server.js")],
+    env: {
+      FAKE_MCP_NAME: name,
+      ...env,
+    },
+  };
 }
 
 test("CallCache distinguishes nested arguments while preserving stable object order", () => {
@@ -74,6 +90,20 @@ test("CallCache prunes expired entries", async () => {
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.equal(cache.size, 0);
+});
+
+test("CallCache evicts least-recently-used entries beyond max size", () => {
+  const cache = new CallCache(60, undefined, undefined, 2);
+
+  cache.set("get_item", { id: 1 }, textResult("one"));
+  cache.set("get_item", { id: 2 }, textResult("two"));
+  assert.deepEqual(cache.get("get_item", { id: 1 }), textResult("one"));
+  cache.set("get_item", { id: 3 }, textResult("three"));
+
+  assert.deepEqual(cache.get("get_item", { id: 1 }), textResult("one"));
+  assert.equal(cache.get("get_item", { id: 2 }), null);
+  assert.deepEqual(cache.get("get_item", { id: 3 }), textResult("three"));
+  assert.equal(cache.stats().maxEntries, 2);
 });
 
 test("CallCache respects explicit allow and deny policies", () => {
@@ -268,6 +298,23 @@ test("configFromArgs rejects invalid concurrency", () => {
   );
 });
 
+test("configFromArgs rejects unknown options and malformed numeric values", () => {
+  assert.throws(
+    () => configFromArgs(["--cahce", "60", "--", "node", "server.js"]),
+    /Unknown option/
+  );
+
+  assert.throws(
+    () => configFromArgs(["--cache", "10abc", "--", "node", "server.js"]),
+    /non-negative integer/
+  );
+
+  assert.throws(
+    () => configFromArgs(["--cache", "--", "node", "server.js"]),
+    /Missing value/
+  );
+});
+
 test("configFromArgs parses explicit cache allow and deny lists", () => {
   const config = configFromArgs([
     "--cache",
@@ -285,6 +332,37 @@ test("configFromArgs parses explicit cache allow and deny lists", () => {
     allowTools: ["get_*", "list_*"],
     denyTools: ["get_secret"],
   });
+});
+
+test("configFromArgs parses cache max entries", () => {
+  const config = configFromArgs([
+    "--cache",
+    "60",
+    "--cache-max-entries",
+    "25",
+    "--",
+    "node",
+    "server.js",
+  ]);
+
+  assert.equal(config.maxCacheEntries, 25);
+});
+
+test("configFromArgs parses timeout and strict startup flags", () => {
+  const config = configFromArgs([
+    "--connect-timeout",
+    "1000",
+    "--call-timeout",
+    "2000",
+    "--strict-startup",
+    "--",
+    "node",
+    "server.js",
+  ]);
+
+  assert.equal(config.connectTimeoutMs, 1000);
+  assert.equal(config.callTimeoutMs, 2000);
+  assert.equal(config.strictStartup, true);
 });
 
 test("configFromArgs parses --env KEY=VALUE pairs", () => {
@@ -432,6 +510,15 @@ test("parseServerDefinitionArgs parses server add options", () => {
   });
 });
 
+test("parseCommandLine preserves quoted custom command arguments", () => {
+  assert.deepEqual(
+    parseCommandLine('npx -y "server package" --flag="two words" path\\ with\\ spaces'),
+    ["npx", "-y", "server package", "--flag=two words", "path with spaces"]
+  );
+
+  assert.throws(() => parseCommandLine('node "server.js'), /Unterminated/);
+});
+
 test("parseServerMutationArgs parses server set options and command replacement", () => {
   const mutation = parseServerMutationArgs([
     "--add-tool",
@@ -541,6 +628,24 @@ test("formatServerList redacts env values and shows key metadata", () => {
   assert.match(output, /tools: get_issue/);
   assert.match(output, /env keys: GITHUB_TOKEN/);
   assert.doesNotMatch(output, /secret/);
+});
+
+test("display helpers redact command arguments and URL secrets", () => {
+  assert.equal(
+    formatCommandForDisplay("server", [
+      "--token",
+      "secret-token",
+      "--api-key=secret-key",
+      "--safe",
+      "visible",
+    ]),
+    "server --token [redacted] --api-key=[redacted] --safe visible"
+  );
+
+  assert.equal(
+    redactUrl("https://user:pass@example.com/mcp?token=secret&query=visible"),
+    "https://%5Bredacted%5D:%5Bredacted%5D@example.com/mcp?token=%5Bredacted%5D&query=visible"
+  );
 });
 
 test("attachClaudeConfig inserts callmux into Claude config", () => {
@@ -714,6 +819,24 @@ test("renderClientSnippet emits Codex snippet with explicit config path when nee
       'command = "callmux"',
       `args = ${JSON.stringify(["--config", configPath])}`,
     ].join("\n")
+  );
+});
+
+test("client config helpers reject unsafe server names", () => {
+  assert.throws(
+    () =>
+      renderClientSnippet("codex", {
+        serverName: 'callmux"]\n[mcp_servers.injected]',
+      }),
+    /client server name/
+  );
+
+  assert.throws(
+    () =>
+      renderClientAttachPreview("claude", {
+        serverName: "bad name",
+      }),
+    /client server name/
   );
 });
 
@@ -938,6 +1061,215 @@ test("tool lookup failures return structured error payloads", async () => {
       details: { tool: "missing_tool" },
     },
   });
+});
+
+test("mapBounded runs work concurrently while preserving input order", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const starts: number[] = [];
+
+  const results = await mapBounded([1, 2, 3, 4], 2, async (value) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    starts.push(value);
+    await new Promise((resolve) => setTimeout(resolve, value === 1 ? 30 : 5));
+    active--;
+    return value * 10;
+  });
+
+  assert.deepEqual(results, [10, 20, 30, 40]);
+  assert.equal(maxActive, 2);
+  assert.deepEqual(starts.slice(0, 2), [1, 2]);
+});
+
+test("UpstreamManager degraded startup keeps successful servers and records failures", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    if (name === "bad") throw new Error("boom");
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  const connections = await upstream.connect({
+    good: { command: "good" },
+    bad: { command: "bad" },
+  });
+
+  assert.deepEqual(connections.map((connection) => connection.name), ["good"]);
+  assert.deepEqual(upstream.getServerNames(), ["good"]);
+  assert.deepEqual(upstream.getFailedServers().map((failure) => failure.name), ["bad"]);
+});
+
+test("UpstreamManager strict startup fails when any server fails", async () => {
+  let closed = false;
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    if (name === "bad") throw new Error("boom");
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {
+          closed = true;
+        },
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await assert.rejects(
+    upstream.connect(
+      {
+        good: { command: "good" },
+        bad: { command: "bad" },
+      },
+      { strictStartup: true }
+    ),
+    /downstream startup failed/
+  );
+  assert.equal(closed, true);
+});
+
+test("UpstreamManager call timeout returns a structured tool error", async () => {
+  const upstream = new UpstreamManager(5) as unknown as {
+    clients: Map<string, { callTool: () => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool() {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return textResult("late");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["get_issue", { server: "github", tool: { name: "get_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["get_issue"])]]);
+
+  const result = await upstream.callTool("get_issue", { id: 1 });
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, {
+    error: {
+      code: "tool_call_failed",
+      message: 'tool "get_issue" timed out after 5ms',
+      details: { tool: "get_issue" },
+    },
+  });
+});
+
+test("fake MCP fixture supports real stdio listTools and callTool", async () => {
+  const upstream = new UpstreamManager();
+
+  try {
+    const connections = await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([
+          { name: "get_item", description: "Get a fake item" },
+        ]),
+      }),
+    });
+
+    assert.equal(connections.length, 1);
+    assert.deepEqual(connections[0].tools.map((tool) => tool.name), ["get_item"]);
+
+    const result = await upstream.callTool("get_item", { id: 42 });
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse((result.content[0] as { text: string }).text) as {
+      server: string;
+      tool: string;
+      arguments: { id: number };
+    };
+    assert.deepEqual(payload, {
+      server: "fake",
+      tool: "get_item",
+      arguments: { id: 42 },
+    });
+  } finally {
+    await upstream.close();
+  }
+});
+
+test("fake MCP fixture verifies degraded startup with a failed server", async () => {
+  const upstream = new UpstreamManager();
+
+  try {
+    const connections = await upstream.connect(
+      {
+        good: fakeMcpServer("good", {
+          FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]),
+        }),
+        bad: fakeMcpServer("bad", {
+          FAKE_MCP_FAIL_START: "1",
+        }),
+      },
+      { maxConcurrency: 2 }
+    );
+
+    assert.deepEqual(connections.map((connection) => connection.name), ["good"]);
+    assert.deepEqual(upstream.getServerNames(), ["good"]);
+    assert.deepEqual(upstream.getFailedServers().map((failure) => failure.name), ["bad"]);
+
+    const result = await upstream.callTool("get_item", { id: 1 }, "good");
+    assert.equal(result.isError, undefined);
+  } finally {
+    await upstream.close();
+  }
+});
+
+test("fake MCP fixture verifies startup timeout", async () => {
+  const upstream = new UpstreamManager();
+
+  try {
+    const connections = await upstream.connect(
+      {
+        slow: fakeMcpServer("slow", {
+          FAKE_MCP_START_DELAY_MS: "250",
+        }),
+      },
+      { connectTimeoutMs: 50 }
+    );
+
+    assert.deepEqual(connections, []);
+    assert.equal(upstream.getFailedServers()[0].name, "slow");
+    assert.match(upstream.getFailedServers()[0].error, /connect.*timed out/);
+  } finally {
+    await upstream.close();
+  }
 });
 
 // ─── HTTP/SSE transport config tests ──────────────────────────
@@ -1315,6 +1647,24 @@ test("handleStatus returns string array without descriptions flag", () => {
   assert.deepEqual(content.servers[0].tools, ["get_issue"]);
 });
 
+test("handleStatus reports degraded startup failures", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as ReturnType<typeof createMockUpstream> & {
+    getFailedServers: () => Array<{ name: string; error: string }>;
+  };
+  upstream.getFailedServers = () => [{ name: "linear", error: "boom" }];
+
+  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const content = result.structuredContent as {
+    status: string;
+    failedServers: Array<{ name: string; error: string }>;
+  };
+
+  assert.equal(content.status, "degraded");
+  assert.deepEqual(content.failedServers, [{ name: "linear", error: "boom" }]);
+});
+
 test("meta-only proxy exposes only meta-tools", async () => {
   const proxy = new CallmuxProxy({
     servers: { default: { command: "ignored" } },
@@ -1361,6 +1711,30 @@ test("loadConfig parses metaOnly and descriptionMaxLength from file", async () =
     const config = await loadConfig(configPath);
     assert.equal(config.metaOnly, true);
     assert.equal(config.descriptionMaxLength, 80);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses startup timeout settings from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-timeout-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        connectTimeoutMs: 1000,
+        callTimeoutMs: 2000,
+        strictStartup: true,
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.connectTimeoutMs, 1000);
+    assert.equal(config.callTimeoutMs, 2000);
+    assert.equal(config.strictStartup, true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1750,6 +2124,7 @@ test("proxy routes callmux_call to handleCall", async () => {
       resolveServer: () => null;
       getServerNames: () => string[];
       getServerTools: (s: string) => string[];
+      getFailedServers: () => [];
     }
   }).upstream = {
     async callTool() {
@@ -1758,6 +2133,7 @@ test("proxy routes callmux_call to handleCall", async () => {
     resolveServer() { return null; },
     getServerNames() { return ["default"]; },
     getServerTools() { return ["list_items"]; },
+    getFailedServers() { return []; },
   };
 
   const harness = proxy as unknown as {
@@ -1830,10 +2206,15 @@ test("proxy routes callmux_status to handleStatus", async () => {
   });
 
   (proxy as unknown as {
-    upstream: { getServerNames: () => string[]; getServerTools: () => string[] }
+    upstream: {
+      getServerNames: () => string[];
+      getServerTools: () => string[];
+      getFailedServers: () => [];
+    }
   }).upstream = {
     getServerNames: () => ["default"],
     getServerTools: () => ["get_issue"],
+    getFailedServers: () => [],
   };
 
   const harness = proxy as unknown as {

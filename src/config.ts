@@ -24,6 +24,35 @@ function parsePositiveInteger(value: unknown, optionName: string): number {
   return value as number;
 }
 
+function parseIntegerOption(
+  value: string,
+  optionName: string,
+  allowZero: boolean
+): number {
+  if (!/^\d+$/.test(value)) {
+    throw new Error(
+      `${optionName} must be ${allowZero ? "a non-negative" : "a positive"} integer`
+    );
+  }
+
+  const parsed = Number(value);
+  return allowZero
+    ? parseNonNegativeInteger(parsed, optionName)
+    : parsePositiveInteger(parsed, optionName);
+}
+
+function readOptionValue(
+  args: string[],
+  index: number,
+  optionsLimit: number,
+  optionName: string
+): string {
+  if (index + 1 >= optionsLimit) {
+    throw new Error(`Missing value for ${optionName}`);
+  }
+  return args[index + 1];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -177,6 +206,38 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
         parsed.maxConcurrency === undefined
           ? 20
           : parsePositiveInteger(parsed.maxConcurrency, "maxConcurrency"),
+      ...(parsed.connectTimeoutMs !== undefined
+        ? {
+            connectTimeoutMs: parsePositiveInteger(
+              parsed.connectTimeoutMs,
+              "connectTimeoutMs"
+            ),
+          }
+        : {}),
+      ...(parsed.callTimeoutMs !== undefined
+        ? {
+            callTimeoutMs: parsePositiveInteger(
+              parsed.callTimeoutMs,
+              "callTimeoutMs"
+            ),
+          }
+        : {}),
+      ...(parsed.strictStartup !== undefined
+        ? {
+            strictStartup:
+              typeof parsed.strictStartup === "boolean"
+                ? parsed.strictStartup
+                : (() => { throw new Error("strictStartup must be a boolean"); })(),
+          }
+        : {}),
+      ...(parsed.maxCacheEntries !== undefined
+        ? {
+            maxCacheEntries: parsePositiveInteger(
+              parsed.maxCacheEntries,
+              "maxCacheEntries"
+            ),
+          }
+        : {}),
       ...(parsed.metaOnly !== undefined
         ? {
             metaOnly:
@@ -323,6 +384,10 @@ export async function saveManagedConfig(
 export function configFromArgs(args: string[]): CallmuxConfig {
   let cacheTtl = 0;
   let maxConcurrency = 20;
+  let maxCacheEntries: number | undefined;
+  let connectTimeoutMs: number | undefined;
+  let callTimeoutMs: number | undefined;
+  let strictStartup = false;
   let metaOnly = false;
   let descriptionMaxLength: number | undefined;
   let tools: string[] | undefined;
@@ -337,20 +402,38 @@ export function configFromArgs(args: string[]): CallmuxConfig {
   const optionsLimit = dashDash === -1 ? args.length : dashDash;
 
   for (let i = 0; i < optionsLimit; i++) {
-    if (args[i] === "--cache" && i + 1 < optionsLimit) {
-      const value = Number.parseInt(args[++i], 10);
-      cacheTtl = parseNonNegativeInteger(value, "--cache");
-    } else if (args[i] === "--concurrency" && i + 1 < optionsLimit) {
-      const value = Number.parseInt(args[++i], 10);
-      maxConcurrency = parsePositiveInteger(value, "--concurrency");
-    } else if (args[i] === "--tools" && i + 1 < optionsLimit) {
-      tools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--cache-allow" && i + 1 < optionsLimit) {
-      cacheAllowTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--cache-deny" && i + 1 < optionsLimit) {
-      cacheDenyTools = args[++i].split(",").map((t) => t.trim()).filter(Boolean);
-    } else if (args[i] === "--env" && i + 1 < optionsLimit) {
-      const pair = args[++i];
+    if (args[i] === "--cache") {
+      const raw = readOptionValue(args, i, optionsLimit, "--cache");
+      cacheTtl = parseIntegerOption(raw, "--cache", true);
+      i++;
+    } else if (args[i] === "--concurrency") {
+      const raw = readOptionValue(args, i, optionsLimit, "--concurrency");
+      maxConcurrency = parseIntegerOption(raw, "--concurrency", false);
+      i++;
+    } else if (args[i] === "--cache-max-entries") {
+      const raw = readOptionValue(args, i, optionsLimit, "--cache-max-entries");
+      maxCacheEntries = parseIntegerOption(raw, "--cache-max-entries", false);
+      i++;
+    } else if (args[i] === "--connect-timeout") {
+      const raw = readOptionValue(args, i, optionsLimit, "--connect-timeout");
+      connectTimeoutMs = parseIntegerOption(raw, "--connect-timeout", false);
+      i++;
+    } else if (args[i] === "--call-timeout") {
+      const raw = readOptionValue(args, i, optionsLimit, "--call-timeout");
+      callTimeoutMs = parseIntegerOption(raw, "--call-timeout", false);
+      i++;
+    } else if (args[i] === "--tools") {
+      tools = readOptionValue(args, i, optionsLimit, "--tools").split(",").map((t) => t.trim()).filter(Boolean);
+      i++;
+    } else if (args[i] === "--cache-allow") {
+      cacheAllowTools = readOptionValue(args, i, optionsLimit, "--cache-allow").split(",").map((t) => t.trim()).filter(Boolean);
+      i++;
+    } else if (args[i] === "--cache-deny") {
+      cacheDenyTools = readOptionValue(args, i, optionsLimit, "--cache-deny").split(",").map((t) => t.trim()).filter(Boolean);
+      i++;
+    } else if (args[i] === "--env") {
+      const pair = readOptionValue(args, i, optionsLimit, "--env");
+      i++;
       const eqIdx = pair.indexOf("=");
       if (eqIdx === -1) {
         throw new Error(`Invalid --env value "${pair}": must be KEY=VALUE`);
@@ -358,24 +441,32 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       env[pair.slice(0, eqIdx)] = pair.slice(eqIdx + 1);
     } else if (args[i] === "--meta-only") {
       metaOnly = true;
-    } else if (args[i] === "--description-max-length" && i + 1 < optionsLimit) {
-      const value = Number.parseInt(args[++i], 10);
-      descriptionMaxLength = parsePositiveInteger(value, "--description-max-length");
-    } else if (args[i] === "--url" && i + 1 < optionsLimit) {
-      url = args[++i];
-    } else if (args[i] === "--transport" && i + 1 < optionsLimit) {
-      const t = args[++i];
+    } else if (args[i] === "--strict-startup") {
+      strictStartup = true;
+    } else if (args[i] === "--description-max-length") {
+      const raw = readOptionValue(args, i, optionsLimit, "--description-max-length");
+      descriptionMaxLength = parseIntegerOption(raw, "--description-max-length", false);
+      i++;
+    } else if (args[i] === "--url") {
+      url = readOptionValue(args, i, optionsLimit, "--url");
+      i++;
+    } else if (args[i] === "--transport") {
+      const t = readOptionValue(args, i, optionsLimit, "--transport");
+      i++;
       if (t !== "streamable-http" && t !== "sse") {
         throw new Error(`--transport must be "streamable-http" or "sse"`);
       }
       transport = t;
-    } else if (args[i] === "--header" && i + 1 < optionsLimit) {
-      const pair = args[++i];
+    } else if (args[i] === "--header") {
+      const pair = readOptionValue(args, i, optionsLimit, "--header");
+      i++;
       const colonIdx = pair.indexOf(":");
       if (colonIdx === -1) {
         throw new Error(`Invalid --header value "${pair}": must be Name:Value`);
       }
       headers[pair.slice(0, colonIdx).trim()] = pair.slice(colonIdx + 1).trim();
+    } else {
+      throw new Error(`Unknown option "${args[i]}"`);
     }
   }
 
@@ -403,6 +494,10 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       },
       cacheTtlSeconds: cacheTtl,
       maxConcurrency,
+      ...(maxCacheEntries !== undefined ? { maxCacheEntries } : {}),
+      ...(connectTimeoutMs !== undefined ? { connectTimeoutMs } : {}),
+      ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
+      ...(strictStartup ? { strictStartup } : {}),
       ...(metaOnly ? { metaOnly } : {}),
       ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
     };
@@ -427,6 +522,10 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     },
     cacheTtlSeconds: cacheTtl,
     maxConcurrency,
+    ...(maxCacheEntries !== undefined ? { maxCacheEntries } : {}),
+    ...(connectTimeoutMs !== undefined ? { connectTimeoutMs } : {}),
+    ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
+    ...(strictStartup ? { strictStartup } : {}),
     ...(metaOnly ? { metaOnly } : {}),
     ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
   };

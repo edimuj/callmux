@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { UpstreamManager } from "./upstream.js";
+import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { isHttpServerConfig } from "./types.js";
 import type { CallmuxConfig, ConfigFormat, ServerConfig } from "./types.js";
 
@@ -116,7 +117,7 @@ async function inspectServer(
 
     return {
       name,
-      command: config.url,
+      command: redactUrl(config.url),
       status: issues.length > 0 ? "error" : "ok",
       tools,
       issues,
@@ -138,7 +139,7 @@ async function inspectServer(
 
   return {
     name,
-    command: [config.command, ...(config.args ?? [])].join(" "),
+    command: formatCommandForDisplay(config.command, config.args),
     status: issues.length > 0 ? "error" : "ok",
     ...(executablePath ? { executablePath } : {}),
     tools,

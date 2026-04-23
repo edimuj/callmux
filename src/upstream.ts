@@ -6,7 +6,83 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
 import { isHttpServerConfig } from "./types.js";
-import type { ServerConfig, StdioServerConfig, HttpServerConfig, UpstreamConnection } from "./types.js";
+import type {
+  ServerConfig,
+  StdioServerConfig,
+  HttpServerConfig,
+  UpstreamConnection,
+  UpstreamConnectionFailure,
+} from "./types.js";
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+
+export async function mapBounded<T, R>(
+  items: T[],
+  maxConcurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new Error("maxConcurrency must be a positive integer");
+  }
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(maxConcurrency, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await mapper(items[index], index);
+      }
+    }
+  );
+
+  await Promise.all(workers);
+  return results;
+}
+
+interface ConnectedServer {
+  name: string;
+  config: ServerConfig;
+  client: Client;
+  transport: Transport;
+  allTools: Tool[];
+  tools: Tool[];
+}
+
+interface UpstreamConnectOptions {
+  maxConcurrency?: number;
+  connectTimeoutMs?: number;
+  strictStartup?: boolean;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 /**
  * Manages connections to downstream MCP servers.
@@ -17,6 +93,23 @@ export class UpstreamManager {
   private transports = new Map<string, Transport>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
   private exposedToolsByServer = new Map<string, Set<string>>();
+  private failedConnections: UpstreamConnectionFailure[] = [];
+
+  constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
+
+  private async closeQuietly(client?: Client, transport?: Transport): Promise<void> {
+    if (client) {
+      try {
+        await client.close();
+        return;
+      } catch {}
+    }
+    if (transport) {
+      try {
+        await transport.close();
+      } catch {}
+    }
+  }
 
   private createStdioTransport(config: StdioServerConfig): Transport {
     return new StdioClientTransport({
@@ -24,7 +117,7 @@ export class UpstreamManager {
       args: config.args,
       env: { ...process.env, ...config.env } as Record<string, string>,
       cwd: config.cwd,
-      stderr: "pipe",
+      stderr: "inherit",
     });
   }
 
@@ -41,64 +134,156 @@ export class UpstreamManager {
     return new StreamableHTTPClientTransport(url, opts);
   }
 
-  private async connectWithFallback(name: string, config: HttpServerConfig): Promise<{ transport: Transport; client: Client }> {
+  private async connectWithFallback(
+    name: string,
+    config: HttpServerConfig,
+    connectTimeoutMs: number
+  ): Promise<{ transport: Transport; client: Client }> {
     if (config.transport) {
       const transport = this.createHttpTransport(config);
       const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
-      await client.connect(transport);
+      await withTimeout(
+        client.connect(transport),
+        connectTimeoutMs,
+        `"${name}" connect`
+      );
       return { transport, client };
     }
 
     // Try streamable-http first, fall back to SSE
+    let transport: Transport | undefined;
+    let client: Client | undefined;
     try {
-      const transport = new StreamableHTTPClientTransport(
+      transport = new StreamableHTTPClientTransport(
         new URL(config.url),
         config.headers ? { requestInit: { headers: config.headers } } : undefined
       );
-      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
-      await client.connect(transport);
+      client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      await withTimeout(
+        client.connect(transport),
+        connectTimeoutMs,
+        `"${name}" streamable-http connect`
+      );
       return { transport, client };
     } catch {
+      await this.closeQuietly(client, transport);
       process.stderr.write(`[callmux] "${name}": streamable-http failed, trying SSE fallback\n`);
-      const transport = new SSEClientTransport(
+      const sseTransport = new SSEClientTransport(
         new URL(config.url),
         config.headers ? { requestInit: { headers: config.headers } } : undefined
       );
-      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
-      await client.connect(transport);
-      return { transport, client };
+      const sseClient = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      await withTimeout(
+        sseClient.connect(sseTransport),
+        connectTimeoutMs,
+        `"${name}" SSE connect`
+      );
+      return { transport: sseTransport, client: sseClient };
     }
   }
 
-  async connect(servers: Record<string, ServerConfig>): Promise<UpstreamConnection[]> {
-    const connections: UpstreamConnection[] = [];
-
-    for (const [name, config] of Object.entries(servers)) {
-      let transport: Transport;
-      let client: Client;
-
+  private async connectOne(
+    name: string,
+    config: ServerConfig,
+    connectTimeoutMs: number
+  ): Promise<ConnectedServer> {
+    let transport: Transport | undefined;
+    let client: Client | undefined;
+    try {
       if (isHttpServerConfig(config)) {
-        ({ transport, client } = await this.connectWithFallback(name, config));
+        ({ transport, client } = await this.connectWithFallback(
+          name,
+          config,
+          connectTimeoutMs
+        ));
       } else {
         transport = this.createStdioTransport(config);
         client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
-        await client.connect(transport);
+        await withTimeout(
+          client.connect(transport),
+          connectTimeoutMs,
+          `"${name}" connect`
+        );
       }
 
-      const { tools: allTools } = await client.listTools();
+      const { tools: allTools } = await withTimeout(
+        client.listTools(),
+        connectTimeoutMs,
+        `"${name}" listTools`
+      );
 
       const allowSet = config.tools ? new Set(config.tools) : null;
       const tools = allowSet
         ? allTools.filter((t) => allowSet.has(t.name))
         : allTools;
 
+      return { name, config, client, transport, allTools, tools };
+    } catch (error) {
+      await this.closeQuietly(client, transport);
+      throw error;
+    }
+  }
+
+  async connect(
+    servers: Record<string, ServerConfig>,
+    options: UpstreamConnectOptions = {}
+  ): Promise<UpstreamConnection[]> {
+    const entries = Object.entries(servers);
+    const multiServer = entries.length > 1;
+    const maxConcurrency = options.maxConcurrency ?? 20;
+    const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    const strictStartup = options.strictStartup ?? false;
+    this.failedConnections = [];
+
+    const results = await mapBounded(entries, maxConcurrency, async ([name, config]) => {
+      try {
+        return {
+          status: "fulfilled" as const,
+          value: await this.connectOne(name, config, connectTimeoutMs),
+        };
+      } catch (error) {
+        return {
+          status: "rejected" as const,
+          reason: {
+            name,
+            config,
+            error: errorMessage(error),
+          } satisfies UpstreamConnectionFailure,
+        };
+      }
+    });
+
+    const connected = results
+      .filter((result): result is { status: "fulfilled"; value: ConnectedServer } =>
+        result.status === "fulfilled"
+      )
+      .map((result) => result.value);
+    this.failedConnections = results
+      .filter((result): result is { status: "rejected"; reason: UpstreamConnectionFailure } =>
+        result.status === "rejected"
+      )
+      .map((result) => result.reason);
+
+    if (strictStartup && this.failedConnections.length > 0) {
+      await Promise.all(
+        connected.map(({ client, transport }) => this.closeQuietly(client, transport))
+      );
+      const summary = this.failedConnections
+        .map((failure) => `${failure.name}: ${failure.error}`)
+        .join("; ");
+      throw new Error(`downstream startup failed: ${summary}`);
+    }
+
+    const connections: UpstreamConnection[] = [];
+
+    for (const { name, config, client, transport, allTools, tools } of connected) {
       this.exposedToolsByServer.set(
         name,
         new Set(tools.map((tool) => tool.name))
       );
 
       for (const tool of tools) {
-        const qualifiedName = Object.keys(servers).length > 1
+        const qualifiedName = multiServer
           ? `${name}__${tool.name}`
           : tool.name;
         this.toolMap.set(qualifiedName, { server: name, tool });
@@ -108,9 +293,15 @@ export class UpstreamManager {
       this.transports.set(name, transport);
       connections.push({ name, config, tools });
 
-      const filtered = allowSet ? ` (filtered from ${allTools.length})` : "";
+      const filtered = config.tools ? ` (filtered from ${allTools.length})` : "";
       const transportLabel = isHttpServerConfig(config) ? ` [${config.transport ?? "http"}]` : "";
       process.stderr.write(`[callmux] Connected to "${name}"${transportLabel}: ${tools.length} tools${filtered}\n`);
+    }
+
+    for (const failure of this.failedConnections) {
+      process.stderr.write(
+        `[callmux] Warning: failed to connect "${failure.name}": ${failure.error}\n`
+      );
     }
 
     return connections;
@@ -207,16 +398,29 @@ export class UpstreamManager {
       return resolved.error;
     }
 
-    const result = await resolved.client.callTool({
-      name: resolved.actualName,
-      arguments: args,
-    });
-
-    return result as CallToolResult;
+    try {
+      return await withTimeout(
+        resolved.client.callTool({
+          name: resolved.actualName,
+          arguments: args,
+        }) as Promise<CallToolResult>,
+        this.callTimeoutMs,
+        `tool "${toolName}"`
+      );
+    } catch (error) {
+      return errorResult("tool_call_failed", errorMessage(error), {
+        tool: toolName,
+        ...(serverHint ? { server: serverHint } : {}),
+      });
+    }
   }
 
   getServerNames(): string[] {
     return Array.from(this.clients.keys());
+  }
+
+  getFailedServers(): UpstreamConnectionFailure[] {
+    return this.failedConnections.map((failure) => ({ ...failure }));
   }
 
   getServerTools(server: string): string[] {
@@ -254,5 +458,6 @@ export class UpstreamManager {
     this.transports.clear();
     this.toolMap.clear();
     this.exposedToolsByServer.clear();
+    this.failedConnections = [];
   }
 }

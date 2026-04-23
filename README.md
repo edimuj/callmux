@@ -127,7 +127,11 @@ Create `~/.config/callmux/config.json` (or run `callmux setup`):
     }
   },
   "cacheTtlSeconds": 60,
-  "maxConcurrency": 20
+  "maxConcurrency": 20,
+  "maxCacheEntries": 1000,
+  "connectTimeoutMs": 30000,
+  "callTimeoutMs": 30000,
+  "strictStartup": false
 }
 ```
 
@@ -306,7 +310,7 @@ Call a single downstream tool by name. Primary invocation path in [meta-only mod
 
 ### `callmux_status`
 
-Introspect callmux from inside your agent. Shows connected servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
+Introspect callmux from inside your agent. Shows connected servers, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
 
 ```json
 { "server": "github", "descriptions": true, "descriptionMaxLength": 80 }
@@ -348,6 +352,10 @@ callmux can connect to remote MCP servers over HTTP, not just local stdio proces
 
 Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
 
+Startup is degraded by default: if one downstream server fails to connect, callmux still starts with the healthy servers and reports failures in `callmux_status.failedServers`. Set `"strictStartup": true` or pass `--strict-startup` to fail startup when any downstream server fails.
+
+Startup connect/list-tools work and downstream calls both have finite timeouts. Configure with `connectTimeoutMs` and `callTimeoutMs`, or inline flags `--connect-timeout <ms>` and `--call-timeout <ms>`.
+
 **Inline mode** for a single remote server:
 
 ```bash
@@ -388,6 +396,7 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
 ```json
 {
   "cacheTtlSeconds": 60,
+  "maxCacheEntries": 1000,
   "cachePolicy": {
     "allowTools": ["get_*", "list_*", "search_*"],
     "denyTools": ["get_secret"]
@@ -399,6 +408,7 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
 - **`denyTools`**: matching tools are never cached (blacklist)
 - Supports exact names and `*` wildcards
 - Per-server policies combine with the global policy
+- Oldest cache entries are evicted after `maxCacheEntries` (default: 1000)
 - `callmux_cache_clear` invalidates manually
 
 ## CLI Management
@@ -443,9 +453,13 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--tools <list>` | Comma-separated tool whitelist |
 | `--env KEY=VALUE` | Environment variable (repeatable) |
 | `--cache <seconds>` | Cache TTL |
+| `--cache-max-entries <n>` | Max cache entries before oldest entries are evicted |
 | `--cache-allow <list>` | Cacheable tool patterns |
 | `--cache-deny <list>` | Non-cacheable tool patterns |
 | `--concurrency <n>` | Max parallel calls (default: 20) |
+| `--connect-timeout <ms>` | Startup connect/list-tools timeout |
+| `--call-timeout <ms>` | Downstream tool call timeout |
+| `--strict-startup` | Fail startup if any downstream server fails |
 | `--meta-only` | Hide proxied tools, expose only meta-tools |
 | `--description-max-length <n>` | Default max chars for tool descriptions in status |
 | `--url <url>` | Connect to remote server (instead of `-- command`) |
@@ -491,6 +505,10 @@ Works on Linux, macOS, and Windows.
   "cacheTtlSeconds": 60,
   "cachePolicy": { "denyTools": ["create_*"] },
   "maxConcurrency": 20,
+  "maxCacheEntries": 1000,
+  "connectTimeoutMs": 30000,
+  "callTimeoutMs": 30000,
+  "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
 }

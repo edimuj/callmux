@@ -1,6 +1,7 @@
 import * as p from "@clack/prompts";
 import { UpstreamManager } from "./upstream.js";
 import { loadManagedConfig, saveManagedConfig, getDefaultConfigPath } from "./config.js";
+import { parseCommandLine } from "./cli.js";
 import {
   attachClaudeConfig,
   attachCodexConfig,
@@ -236,6 +237,11 @@ async function selectServers(): Promise<Array<{ entry?: RegistryEntry; custom?: 
           placeholder: "npx -y @modelcontextprotocol/server-something",
           validate: (v = "") => {
             if (!v.trim()) return "Command is required";
+            try {
+              parseCommandLine(v);
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
           },
         });
 
@@ -305,7 +311,7 @@ async function discoverTools(
         ...(Object.keys(env).length > 0 ? { env } : {}),
       };
     } else {
-      const parts = server.custom!.command.split(/\s+/);
+      const parts = parseCommandLine(server.custom!.command);
       config = {
         command: parts[0],
         args: parts.slice(1),
@@ -400,6 +406,10 @@ function buildConfig(
     servers,
     ...(cacheTtl > 0 ? { cacheTtlSeconds: cacheTtl } : {}),
     maxConcurrency: existing?.maxConcurrency ?? 20,
+    ...(existing?.maxCacheEntries ? { maxCacheEntries: existing.maxCacheEntries } : {}),
+    ...(existing?.connectTimeoutMs ? { connectTimeoutMs: existing.connectTimeoutMs } : {}),
+    ...(existing?.callTimeoutMs ? { callTimeoutMs: existing.callTimeoutMs } : {}),
+    ...(existing?.strictStartup ? { strictStartup: existing.strictStartup } : {}),
     ...(metaOnly ? { metaOnly } : {}),
     ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
   };

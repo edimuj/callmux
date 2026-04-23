@@ -1,5 +1,6 @@
 import { buildClaudeEntry, buildCodexSnippet, type ClientKind } from "./client-config.js";
 import { getDefaultConfigPath } from "./config.js";
+import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import type { CachePolicyConfig, CallmuxConfig, ServerConfig, StdioServerConfig } from "./types.js";
 
@@ -38,13 +39,71 @@ function buildCachePolicy(
 
 function formatCommand(server: ServerConfig): string {
   if (isHttpServerConfig(server)) {
-    return server.url;
+    return redactUrl(server.url);
   }
-  return [server.command, ...(server.args ?? [])].join(" ");
+  return formatCommandForDisplay(server.command, server.args);
 }
 
 function formatValueList(values: string[] | undefined): string | undefined {
   return values && values.length > 0 ? values.join(", ") : undefined;
+}
+
+export function parseCommandLine(input: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaping = false;
+
+  for (const char of input) {
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaping = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escaping) {
+    current += "\\";
+  }
+
+  if (quote) {
+    throw new Error("Unterminated quoted argument");
+  }
+
+  if (current.length > 0) {
+    parts.push(current);
+  }
+
+  return parts;
 }
 
 export function createEmptyConfig(): CallmuxConfig {
@@ -332,7 +391,7 @@ export function formatServerList(config: CallmuxConfig): string {
       const lines: string[] = [name];
 
       if (isHttpServerConfig(server)) {
-        lines.push(`  url: ${server.url}`);
+        lines.push(`  url: ${redactUrl(server.url)}`);
         if (server.transport) lines.push(`  transport: ${server.transport}`);
       } else {
         lines.push(`  command: ${formatCommand(server)}`);

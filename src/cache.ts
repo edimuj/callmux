@@ -120,15 +120,18 @@ function isToolCacheable(tool: string): boolean {
 export class CallCache {
   private entries = new Map<string, CacheEntry>();
   private ttlMs: number;
+  private maxEntries: number;
   private globalPolicy?: CachePolicyConfig;
   private serverPolicies: Map<string, CachePolicyConfig>;
 
   constructor(
     ttlSeconds: number,
     globalPolicy?: CachePolicyConfig,
-    serverPolicies?: Record<string, CachePolicyConfig | undefined>
+    serverPolicies?: Record<string, CachePolicyConfig | undefined>,
+    maxEntries = 1000
   ) {
     this.ttlMs = ttlSeconds * 1000;
+    this.maxEntries = maxEntries;
     this.globalPolicy = globalPolicy;
     this.serverPolicies = new Map(
       Object.entries(serverPolicies ?? {}).filter(([, policy]) => policy !== undefined)
@@ -188,6 +191,14 @@ export class CallCache {
     }
   }
 
+  private evictOldest(): void {
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string | undefined;
+      if (oldest === undefined) return;
+      this.entries.delete(oldest);
+    }
+  }
+
   get(
     tool: string,
     args?: Record<string, unknown>,
@@ -198,9 +209,12 @@ export class CallCache {
 
     this.pruneExpired();
 
-    const entry = this.entries.get(this.key(tool, args, server));
+    const key = this.key(tool, args, server);
+    const entry = this.entries.get(key);
     if (!entry) return null;
 
+    this.entries.delete(key);
+    this.entries.set(key, entry);
     return entry.result;
   }
 
@@ -222,6 +236,7 @@ export class CallCache {
       result,
       expiresAt: Date.now() + this.ttlMs,
     });
+    this.evictOldest();
   }
 
   invalidate(tool?: string, server?: string): void {
@@ -257,12 +272,13 @@ export class CallCache {
     return this.ttlMs / 1000;
   }
 
-  stats(): { entries: number; ttlSeconds: number; enabled: boolean } {
+  stats(): { entries: number; ttlSeconds: number; enabled: boolean; maxEntries: number } {
     this.pruneExpired();
     return {
       entries: this.entries.size,
       ttlSeconds: this.ttlMs / 1000,
       enabled: this.ttlMs > 0,
+      maxEntries: this.maxEntries,
     };
   }
 }

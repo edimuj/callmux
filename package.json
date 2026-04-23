@@ -1,6 +1,6 @@
 {
   "name": "callmux",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Multiplexer for MCP tool calls — parallel execution, batching, caching, and pipelining for any MCP server",
   "type": "module",
   "engines": {
@@ -52,7 +52,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "zod": "^4.3.6"
   },
   "author": "Edin Mujkanovic",
   "license": "MIT"

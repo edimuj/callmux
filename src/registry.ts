@@ -7,7 +7,7 @@ export interface RegistryEntry {
   envVars: EnvVarSpec[];
 }
 
-export interface EnvVarSpec {
+interface EnvVarSpec {
   name: string;
   description: string;
   required: boolean;

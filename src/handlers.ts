@@ -558,6 +558,7 @@ export function handleStatus(
         : undefined;
 
   const serverNames = upstream.getServerNames();
+  const failedServers = upstream.getFailedServers();
 
   const truncate = (desc: string | undefined): string | undefined => {
     if (!desc) return desc;
@@ -585,18 +586,26 @@ export function handleStatus(
       return { name, tools, toolCount: tools.length };
     });
 
-  if (serverFilter && servers.length === 0) {
+  const failed = failedServers
+    .filter((failure) => !serverFilter || failure.name === serverFilter)
+    .map((failure) => ({
+      name: failure.name,
+      error: failure.error,
+    }));
+
+  if (serverFilter && servers.length === 0 && failed.length === 0) {
     return errorResult(
       "server_not_found",
       `server "${serverFilter}" not found`,
-      { available: serverNames }
+      { available: [...serverNames, ...failedServers.map((failure) => failure.name)] }
     );
   }
 
   return jsonResult({
-    status: "ok",
+    status: failedServers.length > 0 ? "degraded" : "ok",
     mode: metaOnly ? "meta-only" : "standard",
     servers,
+    failedServers: failed,
     totalTools: servers.reduce((sum, s) => sum + s.toolCount, 0),
     cache: cache.stats(),
     maxConcurrency,

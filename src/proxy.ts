@@ -23,10 +23,11 @@ export class CallmuxProxy {
   private upstream: UpstreamManager;
   private cache: CallCache;
   private maxConcurrency: number;
+  private connectTimeoutMs: number;
   private allTools: Tool[] = [];
 
   constructor(private config: CallmuxConfig) {
-    this.upstream = new UpstreamManager();
+    this.upstream = new UpstreamManager(config.callTimeoutMs ?? 30_000);
     this.cache = new CallCache(
       config.cacheTtlSeconds ?? 0,
       config.cachePolicy,
@@ -35,9 +36,11 @@ export class CallmuxProxy {
           name,
           server.cachePolicy,
         ])
-      )
+      ),
+      config.maxCacheEntries ?? 1000
     );
     this.maxConcurrency = config.maxConcurrency ?? 20;
+    this.connectTimeoutMs = config.connectTimeoutMs ?? 30_000;
 
     this.server = new Server(
       { name: "callmux", version: "0.1.0" },
@@ -57,7 +60,14 @@ export class CallmuxProxy {
   }
 
   async start(transport: Transport): Promise<void> {
-    const connections = await this.upstream.connect(this.config.servers);
+    const connections = await this.upstream.connect(
+      this.config.servers,
+      {
+        maxConcurrency: this.maxConcurrency,
+        connectTimeoutMs: this.connectTimeoutMs,
+        strictStartup: this.config.strictStartup ?? false,
+      }
+    );
 
     const proxiedTools = this.upstream.getTools().map(({ qualifiedName, tool }) => ({
       ...tool,

@@ -9,7 +9,7 @@ export interface DetectedServer {
   source: string;
 }
 
-export interface DetectionResult {
+interface DetectionResult {
   servers: DetectedServer[];
   scanned: string[];
   errors: Array<{ path: string; error: string }>;

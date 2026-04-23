@@ -78,9 +78,13 @@ Options:
   --tools <list>        Comma-separated tool whitelist (single-server mode)
   --env KEY=VALUE       Environment variable for downstream server (repeatable)
   --cache <seconds>     Cache TTL for read operations (default: 0 = off)
+  --cache-max-entries <n> Max cache entries before oldest entries are evicted (default: 1000)
   --cache-allow <list>  Comma-separated cache allowlist for single-server mode
   --cache-deny <list>   Comma-separated cache denylist for single-server mode
   --concurrency <n>     Max parallel calls (default: 20)
+  --connect-timeout <ms> Timeout for downstream startup connect/list-tools (default: 30000)
+  --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
+  --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --help, -h            Show this help
 
 Server Add Options:
@@ -121,7 +125,11 @@ Config file format:
     },
     "cacheTtlSeconds": 60,
     "cachePolicy": { "denyTools": ["create_*"] },
-    "maxConcurrency": 20
+    "maxConcurrency": 20,
+    "maxCacheEntries": 1000,
+    "connectTimeoutMs": 30000,
+    "callTimeoutMs": 30000,
+    "strictStartup": false
   }
 
 Also accepts MCP-compatible format:
