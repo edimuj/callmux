@@ -25,7 +25,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | 40+ tools bloating the system prompt | 6 meta-tools via meta-only mode |
 
 <p align="center">
-  <img src="docs/diagram.svg" alt="callmux: 7 sequential calls reduced to 1 batched call" width="720">
+  <img src="docs/diagram.png" alt="callmux: 7 sequential calls reduced to 1 batched call" width="720">
 </p>
 
 ## Why Tool Call Reduction Matters
