@@ -2477,3 +2477,101 @@ test("cache wildcard matches qualified tool names across servers", () => {
     textResult("issues")
   );
 });
+
+// ── Result unwrapping ─────────────────────────────────────────────
+
+test("batch unwraps JSON content from upstream results", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ nodes: ["a", "b"], count: 2 }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "ms_list",
+    items: [{ arguments: { story: "test" } }],
+  }, 4);
+
+  const content = result.structuredContent as {
+    results: Array<{ index: number; result: { nodes: string[]; count: number } }>;
+  };
+  assert.deepEqual(content.results[0].result, { nodes: ["a", "b"], count: 2 });
+});
+
+test("parallel unwraps JSON content from upstream results", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ id: 42, name: "test" }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    calls: [{ tool: "ms_get", arguments: { nodeId: "ch1_001" } }],
+  }, 4);
+
+  const content = result.structuredContent as {
+    results: Array<{ result: { id: number; name: string } }>;
+  };
+  assert.deepEqual(content.results[0].result, { id: 42, name: "test" });
+});
+
+test("pipeline unwraps JSON content in steps and finalResult", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ value: "done" }));
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [{ tool: "ms_get", arguments: { nodeId: "ch1_001" } }],
+  });
+
+  const content = result.structuredContent as {
+    steps: Array<{ result: { value: string } }>;
+    finalResult: { value: string };
+  };
+  assert.deepEqual(content.steps[0].result, { value: "done" });
+  assert.deepEqual(content.finalResult, { value: "done" });
+});
+
+test("unwrap keeps plain text when content is not JSON", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult("not json");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "echo",
+    items: [{ arguments: {} }],
+  }, 4);
+
+  const content = result.structuredContent as {
+    results: Array<{ result: string }>;
+  };
+  assert.equal(content.results[0].result, "not json");
+});
+
+test("unwrap preserves error info from upstream", async () => {
+  const upstream = {
+    async callTool() {
+      return { content: [{ type: "text" as const, text: "something broke" }], isError: true };
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "fail",
+    items: [{ arguments: {} }],
+  }, 4);
+
+  const content = result.structuredContent as {
+    results: Array<{ result: { error: string; isError: boolean } }>;
+    failed: number;
+  };
+  assert.equal(content.failed, 1);
+  assert.deepEqual(content.results[0].result, { error: "something broke", isError: true });
+});

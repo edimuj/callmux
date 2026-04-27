@@ -80,7 +80,8 @@ export interface ParallelCall {
 export interface ParallelResult {
   results: Array<{
     call: ParallelCall;
-    result?: CallToolResult;
+    /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
+    result?: unknown;
     error?: string;
     durationMs: number;
   }>;
@@ -94,7 +95,8 @@ export interface BatchItem {
 export interface BatchResult {
   results: Array<{
     index: number;
-    result?: CallToolResult;
+    /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
+    result?: unknown;
     error?: string;
     durationMs: number;
   }>;
@@ -115,11 +117,13 @@ export interface PipelineResult {
   steps: Array<{
     step: number;
     tool: string;
-    result?: CallToolResult;
+    /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
+    result?: unknown;
     error?: string;
     durationMs: number;
   }>;
-  finalResult?: CallToolResult;
+  /** Unwrapped result of the last step */
+  finalResult?: unknown;
   totalDurationMs: number;
 }
 

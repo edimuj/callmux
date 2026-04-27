@@ -4,11 +4,8 @@ import type { CallCache } from "./cache.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
   ParallelCall,
-  ParallelResult,
   BatchItem,
-  BatchResult,
   PipelineStep,
-  PipelineResult,
 } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,6 +25,16 @@ function extractText(result: CallToolResult): string {
     .filter((c): c is { type: "text"; text: string } => c.type === "text")
     .map((c) => c.text)
     .join("\n");
+}
+
+function unwrapResult(result: CallToolResult): unknown {
+  const text = extractText(result);
+  if (result.isError) return { error: text, isError: true };
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 function resolveMapping(text: string, expr: string): unknown {
@@ -313,12 +320,12 @@ export async function handleParallel(
     try {
       const cached = cache.get(call.tool, call.arguments, call.server);
       if (cached) {
-        return { call, result: cached, durationMs: Date.now() - callStart };
+        return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
       const result = await upstream.callTool(call.tool, call.arguments, call.server);
       cache.set(call.tool, call.arguments, result, call.server);
-      return { call, result, durationMs: Date.now() - callStart };
+      return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
     } catch (err) {
       return {
         call,
@@ -332,7 +339,7 @@ export async function handleParallel(
   });
 
   const results = await Promise.all(promises);
-  const output: ParallelResult = {
+  const output = {
     results,
     totalDurationMs: Date.now() - startTime,
   };
@@ -370,14 +377,14 @@ export async function handleBatch(
       const cached = cache.get(tool, item.arguments, server);
       if (cached) {
         succeeded++;
-        return { index, result: cached, durationMs: Date.now() - callStart };
+        return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
       const result = await upstream.callTool(tool, item.arguments, server);
       cache.set(tool, item.arguments, result, server);
       if (result.isError) failed++;
       else succeeded++;
-      return { index, result, durationMs: Date.now() - callStart };
+      return { index, result: unwrapResult(result), durationMs: Date.now() - callStart };
     } catch (err) {
       failed++;
       return {
@@ -391,7 +398,7 @@ export async function handleBatch(
   });
 
   const results = await Promise.all(promises);
-  const output: BatchResult = {
+  const output = {
     results,
     totalDurationMs: Date.now() - startTime,
     succeeded,
@@ -411,7 +418,7 @@ export async function handlePipeline(
 
   const startTime = Date.now();
   const { steps } = parsedArgs;
-  const stepResults: PipelineResult["steps"] = [];
+  const stepResults: Array<{ step: number; tool: string; result?: unknown; error?: string; durationMs: number }> = [];
   let previousText = "";
 
   for (let i = 0; i < steps.length; i++) {
@@ -438,14 +445,13 @@ export async function handlePipeline(
       }
 
       const durationMs = Date.now() - callStart;
-      stepResults.push({ step: i, tool: step.tool, result, durationMs });
+      stepResults.push({ step: i, tool: step.tool, result: unwrapResult(result), durationMs });
 
       if (result.isError) {
-        const output: PipelineResult = {
+        return successResult({
           steps: stepResults,
           totalDurationMs: Date.now() - startTime,
-        };
-        return successResult(output as unknown as Record<string, unknown>);
+        });
       }
 
       previousText = extractText(result);
@@ -457,21 +463,18 @@ export async function handlePipeline(
         durationMs: Date.now() - callStart,
       });
 
-      const output: PipelineResult = {
+      return successResult({
         steps: stepResults,
         totalDurationMs: Date.now() - startTime,
-      };
-      return successResult(output as unknown as Record<string, unknown>);
+      });
     }
   }
 
-  const output: PipelineResult = {
+  return successResult({
     steps: stepResults,
     finalResult: stepResults[stepResults.length - 1]?.result,
     totalDurationMs: Date.now() - startTime,
-  };
-
-  return successResult(output as unknown as Record<string, unknown>);
+  });
 }
 
 export async function handleCall(
