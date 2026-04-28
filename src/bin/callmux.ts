@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallmuxProxy } from "../proxy.js";
+import { CallmuxListener } from "../listener.js";
 import {
   attachClaudeConfig,
   attachCodexConfig,
@@ -58,6 +59,7 @@ proxies to downstream servers and exposes meta-tools alongside them.
 Usage:
   callmux                                    Auto-detect config file
   callmux --config <path>                    Explicit config file
+  callmux --listen <port>                    Shared server mode (SSE/HTTP)
   callmux [options] -- <command> [args...]   Single-server mode
   callmux setup [--config <path>]            Interactive setup wizard
   callmux init [--config <path>] [--force]
@@ -86,6 +88,8 @@ Options:
   --connect-timeout <ms> Timeout for downstream startup connect/list-tools (default: 30000)
   --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
+  --listen <port>       Run as shared HTTP/SSE server (multiple clients connect via URL)
+  --host <addr>         Bind address for --listen (default: 127.0.0.1)
   --help, -h            Show this help
   --version, -v         Show version
 
@@ -139,6 +143,8 @@ Also accepts MCP-compatible format:
   { "mcpServers": { ... } }
 
 Examples:
+  callmux --listen 4860
+  callmux --listen 4860 --config callmux.json
   callmux --config callmux.json
   callmux --cache 60 -- node my-mcp-server.js
   callmux --cache 60 --cache-allow get_*,list_* -- npx -y @modelcontextprotocol/server-github
@@ -721,12 +727,30 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Extract --listen and --host before config resolution
+  let listenPort: number | undefined;
+  let listenHost = "127.0.0.1";
+  const filteredArgs: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--listen" && i + 1 < args.length) {
+      listenPort = parseInt(args[++i], 10);
+      if (!Number.isFinite(listenPort) || listenPort < 1 || listenPort > 65535) {
+        console.error("Error: --listen requires a valid port (1-65535)");
+        process.exit(2);
+      }
+    } else if (args[i] === "--host" && i + 1 < args.length) {
+      listenHost = args[++i];
+    } else {
+      filteredArgs.push(args[i]);
+    }
+  }
+
   let config;
 
   if (extracted.configPath) {
     config = await loadConfig(extracted.configPath);
-  } else if (args.includes("--")) {
-    config = configFromArgs(args);
+  } else if (filteredArgs.includes("--")) {
+    config = configFromArgs(filteredArgs);
   } else {
     const defaultPath = await findDefaultConfig();
     if (defaultPath) {
@@ -740,19 +764,50 @@ async function main(): Promise<void> {
   }
 
   const proxy = new CallmuxProxy(config);
-  const transport = new StdioServerTransport();
 
-  process.on("SIGINT", async () => {
-    await proxy.close();
-    process.exit(0);
-  });
+  if (listenPort) {
+    // Shared server mode: connect upstreams, then start HTTP listener
+    await proxy.connectUpstreams();
 
-  process.on("SIGTERM", async () => {
-    await proxy.close();
-    process.exit(0);
-  });
+    const listener = new CallmuxListener({
+      port: listenPort,
+      host: listenHost,
+      config,
+      upstream: proxy.getUpstream(),
+      cache: proxy.getCache(),
+      allTools: proxy.getTools(),
+      maxConcurrency: proxy.getMaxConcurrency(),
+    });
 
-  await proxy.start(transport);
+    await listener.start();
+
+    process.on("SIGINT", async () => {
+      await listener.close();
+      await proxy.close();
+      process.exit(0);
+    });
+
+    process.on("SIGTERM", async () => {
+      await listener.close();
+      await proxy.close();
+      process.exit(0);
+    });
+  } else {
+    // Stdio mode (default)
+    const transport = new StdioServerTransport();
+
+    process.on("SIGINT", async () => {
+      await proxy.close();
+      process.exit(0);
+    });
+
+    process.on("SIGTERM", async () => {
+      await proxy.close();
+      process.exit(0);
+    });
+
+    await proxy.start(transport);
+  }
 }
 
 main().catch((err) => {

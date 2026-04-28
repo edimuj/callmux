@@ -59,7 +59,8 @@ export class CallmuxProxy {
     });
   }
 
-  async start(transport: Transport): Promise<void> {
+  /** Connect to all downstream servers and build the tool list. Does not bind a client transport. */
+  async connectUpstreams(): Promise<void> {
     const connections = await this.upstream.connect(
       this.config.servers,
       {
@@ -88,9 +89,19 @@ export class CallmuxProxy {
         `[callmux] Proxying ${totalTools} tools from ${serverCount} server(s) + ${META_TOOLS.length} meta-tools\n`
       );
     }
+  }
 
+  async start(transport: Transport): Promise<void> {
+    await this.connectUpstreams();
     await this.server.connect(transport);
   }
+
+  /** Shared state accessors for listener mode */
+  getUpstream(): UpstreamManager { return this.upstream; }
+  getCache(): CallCache { return this.cache; }
+  getMaxConcurrency(): number { return this.maxConcurrency; }
+  getTools(): Tool[] { return this.allTools; }
+  getConfig(): CallmuxConfig { return this.config; }
 
   private async handleToolCall(
     name: string,

@@ -2575,3 +2575,165 @@ test("unwrap preserves error info from upstream", async () => {
   assert.equal(content.failed, 1);
   assert.deepEqual(content.results[0].result, { error: "something broke", isError: true });
 });
+
+// ─── Listener tests ─────────────────────────────────────────────
+
+import { CallmuxListener } from "./listener.js";
+
+test("listener /health returns ok with session count", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const tools: Tool[] = [{ name: "test_tool", description: "A test", inputSchema: { type: "object", properties: {} } }];
+
+  const listener = new CallmuxListener({
+    port: 0, // will bind to any free port — override below
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: tools,
+    maxConcurrency: 10,
+  });
+
+  // Use a random port
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.status, "ok");
+    assert.equal(body.sessions, 0);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener /mcp returns 400 for non-initialize request without session", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener accepts streamable HTTP initialize and lists tools", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const tools: Tool[] = [{ name: "my_tool", description: "Test", inputSchema: { type: "object", properties: {} } }];
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: tools,
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+
+    // Initialize
+    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        id: 1,
+      }),
+    });
+    assert.equal(initRes.status, 200);
+    const sessionId = initRes.headers.get("mcp-session-id");
+    assert.ok(sessionId, "should return session ID");
+
+    // List tools — response may be SSE or JSON depending on transport
+    const listRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 2 }),
+    });
+    assert.equal(listRes.status, 200);
+
+    const contentType = listRes.headers.get("content-type") ?? "";
+    let listBody: any;
+    if (contentType.includes("text/event-stream")) {
+      const text = await listRes.text();
+      const dataLine = text.split("\n").find((l: string) => l.startsWith("data: "));
+      assert.ok(dataLine, "SSE response should contain data line");
+      listBody = JSON.parse(dataLine.slice(6));
+    } else {
+      listBody = await listRes.json();
+    }
+    assert.equal(listBody.result.tools.length, 1);
+    assert.equal(listBody.result.tools[0].name, "my_tool");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener SSE endpoint establishes connection", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const controller = new AbortController();
+    const res = await fetch(`http://127.0.0.1:${port}/sse`, {
+      signal: controller.signal,
+      headers: { Accept: "text/event-stream" },
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get("content-type")?.includes("text/event-stream"));
+    controller.abort();
+  } finally {
+    await listener.close();
+  }
+});

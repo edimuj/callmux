@@ -23,6 +23,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
 | 40+ tools bloating the system prompt | 6 meta-tools via meta-only mode |
+| 6 sessions × 5 servers = 30 processes | 1 shared callmux + 5 servers |
 
 <p align="center">
   <img src="docs/diagram.png" alt="callmux: 7 sequential calls reduced to 1 batched call" width="720">
@@ -33,6 +34,8 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 Every tool call adds structural overhead (~75 tokens) and intermediate reasoning (~150 tokens of "Now I'll fetch the next one...") to your context window. Batch 7 calls into 1 and you eliminate **~1,350 tokens of pure waste** -- a 19:1 reduction in context pollution. Since context is cumulative (every turn re-processes everything before it), this compounds across a session.
 
 In practice, callmux reduces tool calls to ~15% of the original count. Sessions run longer before compaction, cost less in API tokens, and produce better output because the model isn't re-reading filler from 40 turns ago.
+
+On machines running multiple agent sessions, callmux's [shared server mode](#shared-server-mode) collapses the process sprawl: one callmux instance serves all sessions, eliminating duplicate downstream servers and sharing the cache across every connected client.
 
 [Deep dive on the context math with diagrams](https://longgamedev.substack.com/p/your-ai-agent-is-re-reading-its-own)
 
@@ -47,6 +50,7 @@ In practice, callmux reduces tool calls to ~15% of the original count. Sessions 
 - **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 6 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
 - **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
 - **Tool scoping** -- whitelist which tools each server exposes. Gives any MCP client per-server tool filtering, even if the client doesn't support it natively (Codex, Cursor, Windsurf, etc.)
+- **Shared server mode** -- run callmux once with `--listen <port>`, connect all sessions via URL. One set of downstream servers shared across every agent session on the machine
 - **Per-server concurrency** -- protect fragile downstreams with per-server call limits alongside the global concurrency cap
 - **Degraded startup** -- servers that fail to connect are skipped instead of blocking startup, with full diagnostics in `callmux_status`
 - **Multi-transport** -- local stdio, Streamable HTTP, and SSE with auto-fallback
@@ -365,6 +369,50 @@ npx -y callmux --url https://mcp.example.com/mcp --header "Authorization:Bearer 
 
 ---
 
+## Shared Server Mode
+
+Every MCP client session spawns its own callmux + downstream servers. With 6 concurrent Claude Code sessions each connecting to 5 MCP servers, that's **~60 processes and 4+ GB RAM** for what could be 6.
+
+Run callmux once as a persistent server, connect all sessions to it:
+
+```bash
+callmux --listen 4860
+```
+
+```
+                     ┌─ GitHub MCP (1 instance)
+callmux (port 4860) ─┼─ Linear MCP (1 instance)
+   HTTP listener     ├─ Filesystem MCP (1 instance)
+        ↑            └─ Custom server (1 instance)
+        │
+   ┌────┼────┬────┐
+   │    │    │    │
+ ses1  ses2  ses3  ses4  (connect via URL)
+```
+
+**Benefits:**
+- ~60 processes → ~6 (one callmux + one of each downstream)
+- ~4 GB → ~500 MB RAM for MCP infrastructure
+- No orphaned servers when sessions die (one process, clean lifecycle)
+- Cache shared across sessions (one session's cached result serves all)
+- Downstream startup cost paid once
+
+**Client config:**
+
+```json
+{
+  "mcpServers": {
+    "callmux": { "url": "http://localhost:4860/sse" }
+  }
+}
+```
+
+Supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count.
+
+By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expose on all interfaces (e.g., for Tailscale access from other machines).
+
+---
+
 ## Meta-Only Mode
 
 By default, callmux exposes all downstream tools alongside its meta-tools. With multiple servers this can mean 50-100+ tool definitions in the system prompt on every API turn.
@@ -461,6 +509,8 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--connect-timeout <ms>` | Startup connect/list-tools timeout |
 | `--call-timeout <ms>` | Downstream tool call timeout |
 | `--strict-startup` | Fail startup if any downstream server fails |
+| `--listen <port>` | Run as shared HTTP/SSE server (multiple clients) |
+| `--host <addr>` | Bind address for `--listen` (default: `127.0.0.1`) |
 | `--meta-only` | Hide proxied tools, expose only meta-tools |
 | `--description-max-length <n>` | Default max chars for tool descriptions in status |
 | `--url <url>` | Connect to remote server (instead of `-- command`) |
