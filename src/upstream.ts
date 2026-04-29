@@ -298,6 +298,18 @@ export class UpstreamManager {
         this.toolMap.set(qualifiedName, { server: name, tool });
       }
 
+      client.onclose = () => {
+        process.stderr.write(`[callmux] Server "${name}" disconnected\n`);
+        const info = this.serverInfoMap.get(name);
+        if (info) {
+          this.serverInfoMap.set(name, { ...info, state: "disconnected" });
+        }
+      };
+
+      client.onerror = (err) => {
+        process.stderr.write(`[callmux] Server "${name}" error: ${err.message}\n`);
+      };
+
       this.clients.set(name, client);
       this.transports.set(name, transport);
       connections.push({ name, config, tools });

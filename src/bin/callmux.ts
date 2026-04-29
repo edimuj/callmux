@@ -781,17 +781,29 @@ async function main(): Promise<void> {
 
     await listener.start();
 
-    process.on("SIGINT", async () => {
-      await listener.close();
-      await proxy.close();
-      process.exit(0);
+    // Sentinel keeps the event loop alive even if every other ref is dropped
+    // (all child transports closed, no active HTTP connections, etc.)
+    const keepalive = setInterval(() => {}, 30_000);
+
+    process.on("uncaughtException", (err) => {
+      process.stderr.write(`[callmux] Uncaught exception: ${err.stack ?? err.message}\n`);
     });
 
-    process.on("SIGTERM", async () => {
-      await listener.close();
-      await proxy.close();
-      process.exit(0);
+    process.on("unhandledRejection", (reason) => {
+      const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+      process.stderr.write(`[callmux] Unhandled rejection: ${msg}\n`);
     });
+
+    const shutdown = async (signal: string) => {
+      process.stderr.write(`[callmux] ${signal} received, shutting down\n`);
+      clearInterval(keepalive);
+      try { await listener.close(); } catch {}
+      try { await proxy.close(); } catch {}
+      process.exit(0);
+    };
+
+    process.on("SIGINT", () => { shutdown("SIGINT"); });
+    process.on("SIGTERM", () => { shutdown("SIGTERM"); });
   } else {
     // Stdio mode (default)
     const transport = new StdioServerTransport();

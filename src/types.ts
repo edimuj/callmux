@@ -152,7 +152,7 @@ export interface UpstreamConnectionFailure {
 
 export interface ServerInfo {
   transport: "stdio" | "streamable-http" | "sse";
-  state: "connected" | "failed";
+  state: "connected" | "failed" | "disconnected";
   connectDurationMs: number;
   totalTools: number;
   exposedTools: number;
