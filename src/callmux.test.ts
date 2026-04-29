@@ -497,6 +497,20 @@ test("configFromArgs parses timeout and strict startup flags", () => {
   assert.equal(config.strictStartup, true);
 });
 
+test("configFromArgs parses request body limit flags", () => {
+  const config = configFromArgs([
+    "--request-body-max-bytes",
+    "2097152",
+    "--allow-request-body-override",
+    "--",
+    "node",
+    "server.js",
+  ]);
+
+  assert.equal(config.requestBodyMaxBytes, 2_097_152);
+  assert.equal(config.allowRequestBodyMaxOverride, true);
+});
+
 test("configFromArgs parses --env KEY=VALUE pairs", () => {
   const config = configFromArgs([
     "--env",
@@ -623,6 +637,8 @@ test("parseServerDefinitionArgs parses server add options", () => {
     "get_*,list_*",
     "--cache-deny",
     "get_secret",
+    "--request-body-max-bytes",
+    "2048",
     "--",
     "npx",
     "-y",
@@ -639,6 +655,7 @@ test("parseServerDefinitionArgs parses server add options", () => {
       allowTools: ["get_*", "list_*"],
       denyTools: ["get_secret"],
     },
+    requestBodyMaxBytes: 2048,
   });
 });
 
@@ -667,6 +684,8 @@ test("parseServerMutationArgs parses server set options and command replacement"
     "get_*,list_*",
     "--cache-deny",
     "get_secret",
+    "--request-body-max-bytes",
+    "4096",
     "--",
     "uvx",
     "server-github",
@@ -680,6 +699,7 @@ test("parseServerMutationArgs parses server set options and command replacement"
     cwd: "/tmp/project",
     cacheAllowTools: ["get_*", "list_*"],
     cacheDenyTools: ["get_secret"],
+    requestBodyMaxBytes: 4096,
     command: "uvx",
     args: ["server-github"],
   });
@@ -694,6 +714,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
       cwd: "/tmp/old",
       tools: ["get_issue", "create_issue"],
       cachePolicy: { allowTools: ["get_*"], denyTools: ["create_*"] },
+      requestBodyMaxBytes: 1024,
     },
     {
       command: "uvx",
@@ -705,6 +726,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
       cwd: "/tmp/new",
       cacheAllowTools: [],
       cacheDenyTools: ["create_*", "delete_*"],
+      requestBodyMaxBytes: 2048,
     }
   );
 
@@ -720,6 +742,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
     cachePolicy: {
       denyTools: ["create_*", "delete_*"],
     },
+    requestBodyMaxBytes: 2048,
   });
 });
 
@@ -730,6 +753,7 @@ test("serializeServers redacts env values and preserves cache policy", () => {
     args: ["server.js"],
     env: { B_TOKEN: "b", A_TOKEN: "a" },
     cachePolicy: { allowTools: ["get_*"] },
+    requestBodyMaxBytes: 2048,
   };
 
   assert.deepEqual(serializeServers(config), [
@@ -739,6 +763,7 @@ test("serializeServers redacts env values and preserves cache policy", () => {
       args: ["server.js"],
       envKeys: ["A_TOKEN", "B_TOKEN"],
       cachePolicy: { allowTools: ["get_*"] },
+      requestBodyMaxBytes: 2048,
     },
   ]);
 });
@@ -751,6 +776,7 @@ test("formatServerList redacts env values and shows key metadata", () => {
     env: { GITHUB_TOKEN: "secret" },
     tools: ["get_issue"],
     cachePolicy: { allowTools: ["get_*"] },
+    requestBodyMaxBytes: 2048,
   };
 
   const output = formatServerList(config);
@@ -759,6 +785,7 @@ test("formatServerList redacts env values and shows key metadata", () => {
   assert.match(output, /command: npx -y @modelcontextprotocol\/server-github/);
   assert.match(output, /tools: get_issue/);
   assert.match(output, /env keys: GITHUB_TOKEN/);
+  assert.match(output, /request body max bytes: 2048/);
   assert.doesNotMatch(output, /secret/);
 });
 
@@ -1984,6 +2011,33 @@ test("loadConfig parses startup timeout settings from file", async () => {
   }
 });
 
+test("loadConfig parses request body limits from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-body-limit-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"], requestBodyMaxBytes: 4096 },
+          linear: { command: "node", args: ["server2.js"] },
+        },
+        requestBodyMaxBytes: 8192,
+        allowRequestBodyMaxOverride: true,
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.requestBodyMaxBytes, 8192);
+    assert.equal(config.allowRequestBodyMaxOverride, true);
+    assert.equal((config.servers.github as StdioServerConfig).requestBodyMaxBytes, 4096);
+    assert.equal((config.servers.linear as StdioServerConfig).requestBodyMaxBytes, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid metaOnly type", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-meta-"));
   const configPath = join(dir, "config.json");
@@ -2786,6 +2840,132 @@ test("listener rejects oversized /mcp payloads with 413", async () => {
     assert.equal(res.status, 413);
     const body = await res.json();
     assert.equal(body.error, "Payload too large");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener allows per-request payload override when enabled", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      requestBodyMaxBytes: 1024,
+      allowRequestBodyMaxOverride: true,
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: { payload: "x".repeat(32_000) },
+      id: 1,
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "x-callmux-max-body-bytes": "0",
+      },
+      body,
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener rejects per-request payload override when disabled", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      requestBodyMaxBytes: 1024,
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "x-callmux-max-body-bytes": "2048",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(res.status, 400);
+    const payload = await res.json();
+    assert.match(payload.error, /not allowed/);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener applies per-server payload limit for targeted tools", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {
+        github: { command: "node", args: ["server.js"], requestBodyMaxBytes: 1024 },
+      },
+      requestBodyMaxBytes: 100_000,
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "github__get_issue",
+          arguments: { payload: "x".repeat(6_000) },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(res.status, 413);
   } finally {
     await listener.close();
   }

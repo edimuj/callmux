@@ -13,6 +13,8 @@ export interface StdioServerConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
   maxConcurrency?: number;
+  /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
+  requestBodyMaxBytes?: number;
 }
 
 export interface HttpServerConfig {
@@ -25,6 +27,8 @@ export interface HttpServerConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
   maxConcurrency?: number;
+  /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
+  requestBodyMaxBytes?: number;
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig;
@@ -65,6 +69,10 @@ export interface CallmuxConfig {
   metaOnly?: boolean;
   /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
   descriptionMaxLength?: number;
+  /** Global max inbound request payload bytes (0 = unlimited; default: 1048576) */
+  requestBodyMaxBytes?: number;
+  /** Allow per-request override via x-callmux-max-body-bytes header */
+  allowRequestBodyMaxOverride?: boolean;
 }
 
 export type ConfigFormat = "native" | "mcpCompatible";

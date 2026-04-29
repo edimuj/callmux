@@ -361,6 +361,8 @@ Startup is degraded by default: if one downstream server fails to connect, callm
 
 Startup connect/list-tools work and downstream calls both have finite timeouts. Configure with `connectTimeoutMs` and `callTimeoutMs`, or inline flags `--connect-timeout <ms>` and `--call-timeout <ms>`.
 
+Inbound request payload size defaults to `1048576` bytes (1 MiB) in listener mode. Configure globally with `requestBodyMaxBytes`, override per downstream server with `servers.<name>.requestBodyMaxBytes`, or disable with `0`. Optional per-request overrides are available via `x-callmux-max-body-bytes` when `allowRequestBodyMaxOverride` is enabled.
+
 **Inline mode** for a single remote server:
 
 ```bash
@@ -508,6 +510,8 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--concurrency <n>` | Max parallel calls (default: 20) |
 | `--connect-timeout <ms>` | Startup connect/list-tools timeout |
 | `--call-timeout <ms>` | Downstream tool call timeout |
+| `--request-body-max-bytes <n>` | Max inbound request payload bytes (0 = unlimited) |
+| `--allow-request-body-override` | Allow `x-callmux-max-body-bytes` per-request override |
 | `--strict-startup` | Fail startup if any downstream server fails |
 | `--listen <port>` | Run as shared HTTP/SSE server (multiple clients) |
 | `--host <addr>` | Bind address for `--listen` (default: `127.0.0.1`) |
@@ -544,6 +548,7 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
       "cwd": "/path",
       "tools": ["tool_a", "tool_b"],
       "maxConcurrency": 2,
+      "requestBodyMaxBytes": 1048576,
       "cachePolicy": {
         "allowTools": ["get_*"],
         "denyTools": ["get_secret"]
@@ -555,6 +560,7 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
       "headers": { "Authorization": "Bearer ..." },
       "tools": ["tool_a"],
       "maxConcurrency": 5,
+      "requestBodyMaxBytes": 0,
       "cachePolicy": { "allowTools": ["*"] }
     }
   },
@@ -564,6 +570,8 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
   "maxCacheEntries": 1000,
   "connectTimeoutMs": 30000,
   "callTimeoutMs": 30000,
+  "requestBodyMaxBytes": 1048576,
+  "allowRequestBodyMaxOverride": false,
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
@@ -582,6 +590,8 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
 | `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
 | `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
+| `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
+| `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -597,6 +607,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `cwd` | string | — | Working directory |
 | `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
+| `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | — | Per-server cache allow/deny rules |
 
 **HTTP server config** (remote):
@@ -608,6 +619,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `headers` | object | — | HTTP headers (e.g. authorization) |
 | `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
+| `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | — | Per-server cache allow/deny rules |
 
 </details>

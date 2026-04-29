@@ -87,6 +87,8 @@ Options:
   --concurrency <n>     Max parallel calls (default: 20)
   --connect-timeout <ms> Timeout for downstream startup connect/list-tools (default: 30000)
   --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
+  --request-body-max-bytes <n> Max inbound request payload bytes (0 = unlimited, default: 1048576)
+  --allow-request-body-override Allow per-request x-callmux-max-body-bytes override header
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --listen <port>       Run as shared HTTP/SSE server (multiple clients connect via URL)
   --host <addr>         Bind address for --listen (default: 127.0.0.1)
@@ -99,6 +101,7 @@ Server Add Options:
   --cwd <path>          Working directory for the downstream server
   --cache-allow <list>  Per-server cache allowlist
   --cache-deny <list>   Per-server cache denylist
+  --request-body-max-bytes <n> Per-server inbound payload cap (0 = unlimited, omit = use global)
 
 Server Set/Edit Options:
   --tools <list>        Replace downstream tool whitelist
@@ -113,6 +116,8 @@ Server Set/Edit Options:
   --cache-allow <list>  Replace per-server cache allowlist
   --cache-deny <list>   Replace per-server cache denylist
   --clear-cache-policy  Remove per-server cache policy
+  --request-body-max-bytes <n> Replace per-server inbound payload cap (0 = unlimited)
+  --clear-request-body-max-bytes Remove per-server inbound payload cap
 
 Config auto-discovery (checked in order):
   1. $CALLMUX_CONFIG environment variable
@@ -136,6 +141,8 @@ Config file format:
     "maxCacheEntries": 1000,
     "connectTimeoutMs": 30000,
     "callTimeoutMs": 30000,
+    "requestBodyMaxBytes": 1048576,
+    "allowRequestBodyMaxOverride": false,
     "strictStartup": false
   }
 

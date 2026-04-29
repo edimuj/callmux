@@ -22,7 +22,8 @@ import {
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
 
-const MAX_REQUEST_BODY_BYTES = 1024 * 1024; // 1 MiB
+const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
+const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
 
 interface SessionEntry {
   transport: Transport;
@@ -43,9 +44,17 @@ export class CallmuxListener {
   private sessions = new Map<string, SessionEntry>();
   private httpServer: ReturnType<typeof createServer> | undefined;
   private options: ListenerOptions;
+  private globalRequestBodyMaxBytes: number;
+  private allowRequestBodyMaxOverride: boolean;
+  private preReadMaxBytes: number | undefined;
 
   constructor(options: ListenerOptions) {
     this.options = options;
+    this.globalRequestBodyMaxBytes =
+      options.config.requestBodyMaxBytes ?? DEFAULT_REQUEST_BODY_MAX_BYTES;
+    this.allowRequestBodyMaxOverride =
+      options.config.allowRequestBodyMaxOverride ?? false;
+    this.preReadMaxBytes = this.computePreReadMaxBytes();
   }
 
   async start(): Promise<void> {
@@ -104,6 +113,11 @@ export class CallmuxListener {
         res.end(JSON.stringify({ error: "Payload too large" }));
         return;
       }
+      if (error instanceof InvalidRequestBodyOverrideError) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: error.message }));
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[callmux] HTTP error: ${message}\n`);
       if (!res.headersSent) {
@@ -116,8 +130,18 @@ export class CallmuxListener {
   // ─── Streamable HTTP ────────────────────────────────────────────
 
   private async handleStreamableHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await readBody(req, MAX_REQUEST_BODY_BYTES);
+    const requestedLimit = this.parsePerRequestLimitOverride(req);
+    const readLimit = requestedLimit === undefined
+      ? this.preReadMaxBytes
+      : requestedLimit === 0
+        ? undefined
+        : requestedLimit;
+    const { body, bytes } = await readBody(req, readLimit);
     const parsed = body ? JSON.parse(body) : undefined;
+    const effectiveLimit = this.resolveEffectiveRequestBodyMaxBytes(parsed, requestedLimit);
+    if (effectiveLimit !== undefined && bytes > effectiveLimit) {
+      throw new PayloadTooLargeError(effectiveLimit);
+    }
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -185,8 +209,18 @@ export class CallmuxListener {
       return;
     }
 
-    const body = await readBody(req, MAX_REQUEST_BODY_BYTES);
+    const requestedLimit = this.parsePerRequestLimitOverride(req);
+    const readLimit = requestedLimit === undefined
+      ? this.preReadMaxBytes
+      : requestedLimit === 0
+        ? undefined
+        : requestedLimit;
+    const { body, bytes } = await readBody(req, readLimit);
     const parsed = body ? JSON.parse(body) : undefined;
+    const effectiveLimit = this.resolveEffectiveRequestBodyMaxBytes(parsed, requestedLimit);
+    if (effectiveLimit !== undefined && bytes > effectiveLimit) {
+      throw new PayloadTooLargeError(effectiveLimit);
+    }
     await session.transport.handlePostMessage(req, res, parsed);
   }
 
@@ -234,6 +268,107 @@ export class CallmuxListener {
 
     return server;
   }
+
+  private computePreReadMaxBytes(): number | undefined {
+    const limits: number[] = [this.globalRequestBodyMaxBytes];
+    for (const server of Object.values(this.options.config.servers)) {
+      if (server.requestBodyMaxBytes !== undefined) {
+        limits.push(server.requestBodyMaxBytes);
+      }
+    }
+
+    if (limits.some((limit) => limit === 0)) return undefined;
+    return Math.max(...limits);
+  }
+
+  private parsePerRequestLimitOverride(req: IncomingMessage): number | undefined {
+    const raw = headerValue(req.headers[REQUEST_BODY_OVERRIDE_HEADER]);
+    if (raw === undefined) return undefined;
+
+    if (!this.allowRequestBodyMaxOverride) {
+      throw new InvalidRequestBodyOverrideError(
+        `${REQUEST_BODY_OVERRIDE_HEADER} is not allowed by configuration`
+      );
+    }
+
+    if (!/^\d+$/.test(raw)) {
+      throw new InvalidRequestBodyOverrideError(
+        `${REQUEST_BODY_OVERRIDE_HEADER} must be a non-negative integer`
+      );
+    }
+
+    return Number(raw);
+  }
+
+  private resolveEffectiveRequestBodyMaxBytes(
+    parsed: unknown,
+    overrideLimit: number | undefined
+  ): number | undefined {
+    if (overrideLimit !== undefined) {
+      return overrideLimit === 0 ? undefined : overrideLimit;
+    }
+
+    const serverTargets = this.extractServerTargets(parsed);
+    if (serverTargets.length === 0) {
+      return this.globalRequestBodyMaxBytes === 0
+        ? undefined
+        : this.globalRequestBodyMaxBytes;
+    }
+
+    const perTargetLimits = serverTargets.map((server) => {
+      const config = this.options.config.servers[server];
+      return config?.requestBodyMaxBytes ?? this.globalRequestBodyMaxBytes;
+    });
+    const finiteLimits = perTargetLimits.filter((limit) => limit > 0);
+    if (finiteLimits.length === 0) return undefined;
+    return Math.min(...finiteLimits);
+  }
+
+  private extractServerTargets(parsed: unknown): string[] {
+    if (!isRecord(parsed)) return [];
+    if (parsed.method !== "tools/call") return [];
+    if (!isRecord(parsed.params)) return [];
+
+    const name = typeof parsed.params.name === "string" ? parsed.params.name : undefined;
+    if (!name) return [];
+    const args = parsed.params.arguments;
+
+    const targets = new Set<string>();
+    const addTarget = (target: unknown): void => {
+      if (typeof target === "string" && target.length > 0) {
+        targets.add(target);
+      }
+    };
+    const addQualifiedToolTarget = (toolName: unknown): void => {
+      if (typeof toolName !== "string") return;
+      const target = inferServerFromQualifiedToolName(toolName);
+      if (target) targets.add(target);
+    };
+
+    if (name === "callmux_call" && isRecord(args)) {
+      addTarget(args.server);
+      addQualifiedToolTarget(args.tool);
+    } else if (name === "callmux_batch" && isRecord(args)) {
+      addTarget(args.server);
+      addQualifiedToolTarget(args.tool);
+    } else if (name === "callmux_parallel" && isRecord(args) && Array.isArray(args.calls)) {
+      for (const call of args.calls) {
+        if (!isRecord(call)) continue;
+        addTarget(call.server);
+        addQualifiedToolTarget(call.tool);
+      }
+    } else if (name === "callmux_pipeline" && isRecord(args) && Array.isArray(args.steps)) {
+      for (const step of args.steps) {
+        if (!isRecord(step)) continue;
+        addTarget(step.server);
+        addQualifiedToolTarget(step.tool);
+      }
+    } else {
+      addQualifiedToolTarget(name);
+    }
+
+    return Array.from(targets);
+  }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -245,7 +380,32 @@ class PayloadTooLargeError extends Error {
   }
 }
 
-function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+class InvalidRequestBodyOverrideError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRequestBodyOverrideError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function inferServerFromQualifiedToolName(toolName: string): string | undefined {
+  const separator = toolName.indexOf("__");
+  if (separator <= 0) return undefined;
+  return toolName.slice(0, separator);
+}
+
+function headerValue(header: string | string[] | undefined): string | undefined {
+  if (Array.isArray(header)) return header[0];
+  return header;
+}
+
+function readBody(
+  req: IncomingMessage,
+  maxBytes?: number
+): Promise<{ body: string; bytes: number }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
@@ -253,7 +413,7 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
     req.on("data", (chunk: Buffer) => {
       if (exceeded) return;
       totalBytes += chunk.length;
-      if (totalBytes > maxBytes) {
+      if (maxBytes !== undefined && totalBytes > maxBytes) {
         exceeded = true;
         reject(new PayloadTooLargeError(maxBytes));
         return;
@@ -262,7 +422,7 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
     });
     req.on("end", () => {
       if (exceeded) return;
-      resolve(Buffer.concat(chunks).toString("utf-8"));
+      resolve({ body: Buffer.concat(chunks).toString("utf-8"), bytes: totalBytes });
     });
     req.on("error", reject);
   });

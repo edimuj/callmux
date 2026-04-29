@@ -137,11 +137,18 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   const maxConcurrency = value.maxConcurrency !== undefined
     ? parsePositiveInteger(value.maxConcurrency, `servers.${serverName}.maxConcurrency`)
     : undefined;
+  const requestBodyMaxBytes = value.requestBodyMaxBytes !== undefined
+    ? parseNonNegativeInteger(
+        value.requestBodyMaxBytes,
+        `servers.${serverName}.requestBodyMaxBytes`
+      )
+    : undefined;
 
   const shared = {
     ...(tools ? { tools } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+    ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
   };
 
   if (hasUrl) {
@@ -259,6 +266,24 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
               parsed.descriptionMaxLength,
               "descriptionMaxLength"
             ),
+          }
+        : {}),
+      ...(parsed.requestBodyMaxBytes !== undefined
+        ? {
+            requestBodyMaxBytes: parseNonNegativeInteger(
+              parsed.requestBodyMaxBytes,
+              "requestBodyMaxBytes"
+            ),
+          }
+        : {}),
+      ...(parsed.allowRequestBodyMaxOverride !== undefined
+        ? {
+            allowRequestBodyMaxOverride:
+              typeof parsed.allowRequestBodyMaxOverride === "boolean"
+                ? parsed.allowRequestBodyMaxOverride
+                : (() => {
+                    throw new Error("allowRequestBodyMaxOverride must be a boolean");
+                  })(),
           }
         : {}),
     };
@@ -401,6 +426,8 @@ export function configFromArgs(args: string[]): CallmuxConfig {
   let strictStartup = false;
   let metaOnly = false;
   let descriptionMaxLength: number | undefined;
+  let requestBodyMaxBytes: number | undefined;
+  let allowRequestBodyMaxOverride = false;
   let tools: string[] | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
@@ -458,6 +485,12 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       const raw = readOptionValue(args, i, optionsLimit, "--description-max-length");
       descriptionMaxLength = parseIntegerOption(raw, "--description-max-length", false);
       i++;
+    } else if (args[i] === "--request-body-max-bytes") {
+      const raw = readOptionValue(args, i, optionsLimit, "--request-body-max-bytes");
+      requestBodyMaxBytes = parseIntegerOption(raw, "--request-body-max-bytes", true);
+      i++;
+    } else if (args[i] === "--allow-request-body-override") {
+      allowRequestBodyMaxOverride = true;
     } else if (args[i] === "--url") {
       url = readOptionValue(args, i, optionsLimit, "--url");
       i++;
@@ -511,6 +544,8 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       ...(strictStartup ? { strictStartup } : {}),
       ...(metaOnly ? { metaOnly } : {}),
       ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
+      ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
+      ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
     };
   }
 
@@ -539,5 +574,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     ...(strictStartup ? { strictStartup } : {}),
     ...(metaOnly ? { metaOnly } : {}),
     ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
+    ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
+    ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
   };
 }

@@ -74,6 +74,17 @@
       "type": "integer",
       "minimum": 1,
       "description": "Default max chars for tool descriptions in callmux_status (omit = no limit)"
+    },
+    "requestBodyMaxBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1048576,
+      "description": "Global max inbound request payload bytes (0 = unlimited)"
+    },
+    "allowRequestBodyMaxOverride": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow per-request x-callmux-max-body-bytes override header"
     }
   },
   "additionalProperties": false,
@@ -119,6 +130,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
+        },
+        "requestBodyMaxBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         }
       },
       "not": { "required": ["url"] },
@@ -153,6 +169,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
+        },
+        "requestBodyMaxBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         }
       },
       "not": { "required": ["command"] },

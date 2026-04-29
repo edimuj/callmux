@@ -19,6 +19,8 @@ interface ServerMutation {
   cacheAllowTools?: string[];
   cacheDenyTools?: string[];
   clearCachePolicy?: boolean;
+  requestBodyMaxBytes?: number;
+  clearRequestBodyMaxBytes?: boolean;
 }
 
 function parseCommaList(value: string): string[] | undefined {
@@ -139,6 +141,7 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
   let cwd: string | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
+  let requestBodyMaxBytes: number | undefined;
   const env: Record<string, string> = {};
 
   for (let i = 0; i < dashDash; i++) {
@@ -154,6 +157,12 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
       cacheAllowTools = parseCommaList(args[++i]);
     } else if (arg === "--cache-deny" && i + 1 < dashDash) {
       cacheDenyTools = parseCommaList(args[++i]);
+    } else if (arg === "--request-body-max-bytes" && i + 1 < dashDash) {
+      const raw = args[++i];
+      if (!/^\d+$/.test(raw)) {
+        throw new Error(`Invalid --request-body-max-bytes value "${raw}". Expected non-negative integer.`);
+      }
+      requestBodyMaxBytes = Number(raw);
     } else {
       throw new Error(`Unknown server add option "${arg}"`);
     }
@@ -168,6 +177,7 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
     ...(buildCachePolicy(cacheAllowTools, cacheDenyTools)
       ? { cachePolicy: buildCachePolicy(cacheAllowTools, cacheDenyTools) }
       : {}),
+    ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
   };
 }
 
@@ -207,6 +217,14 @@ export function parseServerMutationArgs(args: string[]): ServerMutation {
       mutation.cacheDenyTools = parseCommaList(args[++i]) ?? [];
     } else if (arg === "--clear-cache-policy") {
       mutation.clearCachePolicy = true;
+    } else if (arg === "--request-body-max-bytes" && i + 1 < optionsLimit) {
+      const raw = args[++i];
+      if (!/^\d+$/.test(raw)) {
+        throw new Error(`Invalid --request-body-max-bytes value "${raw}". Expected non-negative integer.`);
+      }
+      mutation.requestBodyMaxBytes = Number(raw);
+    } else if (arg === "--clear-request-body-max-bytes") {
+      mutation.clearRequestBodyMaxBytes = true;
     } else {
       throw new Error(`Unknown server set option "${arg}"`);
     }
@@ -233,7 +251,9 @@ export function parseServerMutationArgs(args: string[]): ServerMutation {
     !mutation.clearEnv &&
     mutation.cacheAllowTools === undefined &&
     mutation.cacheDenyTools === undefined &&
-    !mutation.clearCachePolicy
+    !mutation.clearCachePolicy &&
+    mutation.requestBodyMaxBytes === undefined &&
+    !mutation.clearRequestBodyMaxBytes
   ) {
     throw new Error("No server changes requested");
   }
@@ -311,6 +331,13 @@ export function applyServerMutation(
       ...(server.headers ? { headers: server.headers } : {}),
       ...(tools ? { tools } : {}),
       ...(cachePolicy ? { cachePolicy } : {}),
+      ...(mutation.clearRequestBodyMaxBytes
+        ? {}
+        : mutation.requestBodyMaxBytes !== undefined
+          ? { requestBodyMaxBytes: mutation.requestBodyMaxBytes }
+          : server.requestBodyMaxBytes !== undefined
+            ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
+            : {}),
     };
   }
 
@@ -344,6 +371,13 @@ export function applyServerMutation(
       : {}),
     ...(tools ? { tools } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
+    ...(mutation.clearRequestBodyMaxBytes
+      ? {}
+      : mutation.requestBodyMaxBytes !== undefined
+        ? { requestBodyMaxBytes: mutation.requestBodyMaxBytes }
+        : server.requestBodyMaxBytes !== undefined
+          ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
+          : {}),
   };
 }
 
@@ -357,6 +391,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
   tools?: string[];
   envKeys?: string[];
   cachePolicy?: CachePolicyConfig;
+  requestBodyMaxBytes?: number;
 }> {
   return Object.entries(config.servers).map(([name, server]) => {
     if (isHttpServerConfig(server)) {
@@ -366,6 +401,9 @@ export function serializeServers(config: CallmuxConfig): Array<{
         ...(server.transport ? { transport: server.transport } : {}),
         ...(server.tools ? { tools: server.tools } : {}),
         ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+        ...(server.requestBodyMaxBytes !== undefined
+          ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
+          : {}),
       };
     }
     return {
@@ -376,6 +414,9 @@ export function serializeServers(config: CallmuxConfig): Array<{
       ...(server.tools ? { tools: server.tools } : {}),
       ...(server.env ? { envKeys: Object.keys(server.env).sort() } : {}),
       ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+      ...(server.requestBodyMaxBytes !== undefined
+        ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
+        : {}),
     };
   });
 }
@@ -403,10 +444,21 @@ export function formatServerList(config: CallmuxConfig): string {
       const tools = formatValueList(server.tools);
       const cacheAllow = formatValueList(server.cachePolicy?.allowTools);
       const cacheDeny = formatValueList(server.cachePolicy?.denyTools);
+      const requestBodyMaxBytes =
+        server.requestBodyMaxBytes === undefined
+          ? undefined
+          : String(server.requestBodyMaxBytes);
 
       if (tools) lines.push(`  tools: ${tools}`);
       if (cacheAllow) lines.push(`  cache allow: ${cacheAllow}`);
       if (cacheDeny) lines.push(`  cache deny: ${cacheDeny}`);
+      if (requestBodyMaxBytes !== undefined) {
+        lines.push(
+          `  request body max bytes: ${
+            requestBodyMaxBytes === "0" ? "unlimited" : requestBodyMaxBytes
+          }`
+        );
+      }
 
       return lines.join("\n");
     })
