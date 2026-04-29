@@ -4,9 +4,11 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type {
+  BearerAuthConfig,
   BearerAuthTokenConfig,
   BearerAuthTokenPlaintextConfig,
 } from "./types.js";
+import type { AuthorizationPrincipal } from "./authorization.js";
 
 const DEFAULT_SCRYPT_N = 16_384;
 const DEFAULT_SCRYPT_R = 8;
@@ -128,7 +130,7 @@ export function isPlaintextBearerTokenConfig(
   return "token" in token;
 }
 
-export function verifyBearerToken(
+function verifyBearerToken(
   token: string,
   configuredToken: BearerAuthTokenConfig
 ): boolean {
@@ -139,4 +141,24 @@ export function verifyBearerToken(
   const left = Buffer.from(token);
   const right = Buffer.from(configuredToken.token);
   return constantTimeBufferEquals(left, right);
+}
+
+export function authenticateBearerToken(
+  token: string,
+  config: BearerAuthConfig
+): AuthorizationPrincipal | undefined {
+  for (const candidate of config.tokens) {
+    if (!verifyBearerToken(token, candidate)) {
+      continue;
+    }
+
+    return {
+      kind: "bearer",
+      id: candidate.id,
+      scopes: [],
+      groups: [],
+    };
+  }
+
+  return undefined;
 }

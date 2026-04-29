@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -21,8 +22,13 @@ import {
   handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
-import { verifyBearerToken } from "./auth.js";
+import { authenticateBearerToken } from "./auth.js";
 import { OidcJwtVerifier } from "./oidc.js";
+import {
+  evaluateToolAuthorization,
+  type AuthorizationPrincipal,
+} from "./authorization.js";
+import { errorResult } from "./results.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
@@ -51,6 +57,7 @@ export class CallmuxListener {
   private preReadMaxBytes: number | undefined;
   private authConfig: CallmuxConfig["auth"];
   private oidcVerifier: OidcJwtVerifier | undefined;
+  private authzContext = new AsyncLocalStorage<AuthorizationPrincipal | undefined>();
 
   constructor(options: ListenerOptions) {
     this.options = options;
@@ -103,24 +110,27 @@ export class CallmuxListener {
     const path = url.pathname;
 
     try {
-      if (!(await this.isAuthorized(req, path))) {
+      const principal = await this.authenticateRequest(req, path);
+      if (principal === null) {
         this.writeUnauthorized(res);
         return;
       }
 
-      if (path === "/mcp") {
-        await this.handleStreamableHttp(req, res);
-      } else if (path === "/sse" && req.method === "GET") {
-        await this.handleSseConnect(req, res);
-      } else if (path === "/messages" && req.method === "POST") {
-        await this.handleSseMessage(req, res, url);
-      } else if (path === "/health" && req.method === "GET") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", sessions: this.sessions.size }));
-      } else {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Not found" }));
-      }
+      await this.authzContext.run(principal ?? undefined, async () => {
+        if (path === "/mcp") {
+          await this.handleStreamableHttp(req, res);
+        } else if (path === "/sse" && req.method === "GET") {
+          await this.handleSseConnect(req, res);
+        } else if (path === "/messages" && req.method === "POST") {
+          await this.handleSseMessage(req, res, url);
+        } else if (path === "/health" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok", sessions: this.sessions.size }));
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Not found" }));
+        }
+      });
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
         res.writeHead(413, { "Content-Type": "application/json" });
@@ -255,6 +265,16 @@ export class CallmuxListener {
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const name = request.params.name;
       const args = request.params.arguments;
+      const principal = this.authzContext.getStore();
+      const authz = this.authorizeToolCall(name, args, principal);
+      if (!authz.allowed) {
+        return errorResult("authorization_denied", "Authorization policy denied tool call", {
+          code: authz.code,
+          reason: authz.reason,
+          ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
+          ...(authz.tool ? { tool: authz.tool } : {}),
+        });
+      }
 
       switch (name) {
         case "callmux_parallel":
@@ -301,25 +321,138 @@ export class CallmuxListener {
     }
   }
 
-  private async isAuthorized(req: IncomingMessage, path: string): Promise<boolean> {
+  private async authenticateRequest(
+    req: IncomingMessage,
+    path: string
+  ): Promise<AuthorizationPrincipal | undefined | null> {
     const auth = this.authConfig;
-    if (!auth) return true;
+    if (!auth) return undefined;
 
     if (path === "/health" && auth.allowUnauthenticatedHealth) {
-      return true;
+      return undefined;
     }
 
     const rawAuthorization = headerValue(req.headers.authorization);
-    if (!rawAuthorization) return false;
+    if (!rawAuthorization) return null;
     const token = parseBearerToken(rawAuthorization);
-    if (!token) return false;
+    if (!token) return null;
 
     if (auth.mode === "bearer") {
-      return auth.tokens.some((candidate) => verifyBearerToken(token, candidate));
+      return authenticateBearerToken(token, auth) ?? null;
     }
 
-    if (!this.oidcVerifier) return false;
-    return this.oidcVerifier.verify(token);
+    if (!this.oidcVerifier) return null;
+    return (await this.oidcVerifier.verify(token)) ?? null;
+  }
+
+  private authorizeToolCall(
+    name: string,
+    args: unknown,
+    principal: AuthorizationPrincipal | undefined
+  ) {
+    if (!this.options.config.authorization) {
+      return {
+        allowed: true,
+        code: "authorization_disabled",
+        reason: "Authorization policy is not configured",
+      };
+    }
+
+    const targets = this.extractAuthorizationTargets(name, args);
+    if (!targets) {
+      return {
+        allowed: false,
+        code: "authorization_ambiguous_target",
+        reason: "Unable to resolve concrete tool targets for authorization",
+      };
+    }
+
+    return evaluateToolAuthorization(
+      this.options.config.authorization,
+      principal,
+      targets
+    );
+  }
+
+  private extractAuthorizationTargets(
+    name: string,
+    args: unknown
+  ): string[] | undefined {
+    const resolveTarget = (
+      toolName: unknown,
+      serverHint: unknown
+    ): string | null | undefined => {
+      if (typeof toolName !== "string" || toolName.trim().length === 0) return undefined;
+      if (typeof serverHint === "string" && serverHint.length > 0) {
+        const prefix = `${serverHint}__`;
+        const actualName = toolName.startsWith(prefix)
+          ? toolName.slice(prefix.length)
+          : toolName;
+        return `${serverHint}__${actualName}`;
+      }
+
+      if (toolName.includes("__")) {
+        return toolName;
+      }
+
+      const resolved = this.options.upstream.resolveServer(toolName);
+      if (!resolved || "error" in resolved) {
+        if (!resolved) return null;
+        const message = extractStructuredErrorMessage(resolved.error);
+        if (message.includes("ambiguous")) return undefined;
+        return null;
+      }
+      return `${resolved.server}__${resolved.actualName}`;
+    };
+
+    if (name === "callmux_status" || name === "callmux_cache_clear") {
+      return [];
+    }
+
+    if (name === "callmux_call") {
+      if (!isRecord(args)) return [];
+      const target = resolveTarget(args.tool, args.server);
+      if (target === undefined) return undefined;
+      if (target === null) return [];
+      return [target];
+    }
+
+    if (name === "callmux_batch") {
+      if (!isRecord(args)) return [];
+      const target = resolveTarget(args.tool, args.server);
+      if (target === undefined) return undefined;
+      if (target === null) return [];
+      return [target];
+    }
+
+    if (name === "callmux_parallel") {
+      if (!isRecord(args) || !Array.isArray(args.calls)) return [];
+      const targets: string[] = [];
+      for (const call of args.calls) {
+        if (!isRecord(call)) continue;
+        const target = resolveTarget(call.tool, call.server);
+        if (!target) return undefined;
+        targets.push(target);
+      }
+      return targets;
+    }
+
+    if (name === "callmux_pipeline") {
+      if (!isRecord(args) || !Array.isArray(args.steps)) return [];
+      const targets: string[] = [];
+      for (const step of args.steps) {
+        if (!isRecord(step)) continue;
+        const target = resolveTarget(step.tool, step.server);
+        if (!target) return undefined;
+        targets.push(target);
+      }
+      return targets;
+    }
+
+    const directTarget = resolveTarget(name, undefined);
+    if (directTarget === undefined) return undefined;
+    if (directTarget === null) return [];
+    return [directTarget];
   }
 
   private writeUnauthorized(res: ServerResponse): void {
@@ -466,6 +599,15 @@ function headerValue(header: string | string[] | undefined): string | undefined 
 function parseBearerToken(authorization: string): string | undefined {
   const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
   return match?.[1];
+}
+
+function extractStructuredErrorMessage(result: unknown): string {
+  if (!isRecord(result)) return "";
+  if (!isRecord(result.structuredContent)) return "";
+  if (!isRecord(result.structuredContent.error)) return "";
+  return typeof result.structuredContent.error.message === "string"
+    ? result.structuredContent.error.message
+    : "";
 }
 
 function isLoopbackHost(host: string): boolean {

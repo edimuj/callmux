@@ -225,6 +225,11 @@ function collectSecurityIssues(config: CallmuxConfig): string[] {
   }
 
   const auth = config.auth;
+  if (config.authorization && !auth) {
+    issues.push(
+      "authorization is configured without auth; all tool calls will be denied (no principal context)"
+    );
+  }
   if (!auth) return issues;
 
   if (auth.mode === "oidc_jwt") {

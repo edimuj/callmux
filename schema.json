@@ -87,6 +87,7 @@
       "description": "Allow per-request x-callmux-max-body-bytes override header"
     },
     "auth": { "$ref": "#/$defs/authConfig" },
+    "authorization": { "$ref": "#/$defs/authorizationConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
       "default": false,
@@ -314,6 +315,51 @@
           "type": "boolean",
           "default": false,
           "description": "Allow unauthenticated access to /health"
+        }
+      },
+      "additionalProperties": false
+    },
+    "authorizationRuleConfig": {
+      "type": "object",
+      "required": ["effect"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable policy rule identifier"
+        },
+        "effect": {
+          "type": "string",
+          "enum": ["allow", "deny"],
+          "description": "Rule effect"
+        },
+        "principals": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Principal patterns (supports '*' wildcards)"
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool patterns (supports '*' wildcards, including server__tool)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "authorizationConfig": {
+      "type": "object",
+      "required": ["rules"],
+      "properties": {
+        "defaultEffect": {
+          "type": "string",
+          "enum": ["allow", "deny"],
+          "description": "Default effect when no rule matches"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/authorizationRuleConfig" },
+          "description": "Ordered authorization policy rules"
         }
       },
       "additionalProperties": false

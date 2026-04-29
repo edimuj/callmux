@@ -96,6 +96,24 @@ export interface OidcJwtAuthConfig {
 
 export type AuthConfig = BearerAuthConfig | OidcJwtAuthConfig;
 
+export interface AuthorizationRuleConfig {
+  /** Stable rule identifier for audit/debugging */
+  id?: string;
+  /** Rule effect */
+  effect: "allow" | "deny";
+  /** Principal patterns (supports '*' wildcards). Omit for all principals. */
+  principals?: string[];
+  /** Tool patterns (supports '*' wildcards, including server__tool). Omit for all tools. */
+  tools?: string[];
+}
+
+export interface AuthorizationConfig {
+  /** Default effect when no rule matches */
+  defaultEffect?: "allow" | "deny";
+  /** Ordered rule list */
+  rules: AuthorizationRuleConfig[];
+}
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -123,6 +141,8 @@ export interface CallmuxConfig {
   allowRequestBodyMaxOverride?: boolean;
   /** Listener authentication configuration */
   auth?: AuthConfig;
+  /** Listener authorization policy configuration */
+  authorization?: AuthorizationConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */
   allowInsecureRemoteListener?: boolean;
 }

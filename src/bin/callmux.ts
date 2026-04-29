@@ -150,6 +150,12 @@ Config file format:
       "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
       "allowUnauthenticatedHealth": false
     },
+    "authorization": {
+      "defaultEffect": "deny",
+      "rules": [
+        { "id": "ops", "effect": "allow", "principals": ["bearer:ops"], "tools": ["*"] }
+      ]
+    },
     "strictStartup": false
   }
 

@@ -408,7 +408,7 @@ export class UpstreamManager {
   resolveServer(
     toolName: string,
     serverHint?: string
-  ): { client: Client; actualName: string } | { error: CallToolResult } | null {
+  ): { client: Client; actualName: string; server: string } | { error: CallToolResult } | null {
     if (serverHint) {
       const client = this.clients.get(serverHint);
       if (!client) {
@@ -431,14 +431,14 @@ export class UpstreamManager {
         };
       }
 
-      return { client, actualName };
+      return { client, actualName, server: serverHint };
     }
 
     const entry = this.toolMap.get(toolName);
     if (entry) {
       const client = this.clients.get(entry.server);
       if (!client) return null;
-      return { client, actualName: entry.tool.name };
+      return { client, actualName: entry.tool.name, server: entry.server };
     }
 
     const unqualified = this.unqualifiedToolMap.get(toolName);
@@ -452,7 +452,7 @@ export class UpstreamManager {
         const match = matches[0];
         const client = this.clients.get(match.server);
         if (client) {
-          return { client, actualName: match.tool.name };
+          return { client, actualName: match.tool.name, server: match.server };
         }
       }
 
@@ -469,7 +469,7 @@ export class UpstreamManager {
     if (unqualified && unqualified !== null) {
       const client = this.clients.get(unqualified.server);
       if (client) {
-        return { client, actualName: unqualified.tool.name };
+        return { client, actualName: unqualified.tool.name, server: unqualified.server };
       }
     }
 

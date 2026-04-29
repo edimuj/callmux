@@ -49,6 +49,7 @@ import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
+import { evaluateToolAuthorization } from "./authorization.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -139,6 +140,19 @@ async function startJwksServer(initialKeys: Record<string, unknown>[]): Promise<
       });
     },
   };
+}
+
+async function parseMcpResponseBody(res: Response): Promise<any> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream")) {
+    const text = await res.text();
+    const dataLine = text
+      .split("\n")
+      .find((line: string) => line.startsWith("data: "));
+    if (!dataLine) return undefined;
+    return JSON.parse(dataLine.slice(6));
+  }
+  return res.json();
 }
 
 test("CallCache distinguishes nested arguments while preserving stable object order", () => {
@@ -1135,6 +1149,52 @@ test("runDoctor flags insecure oidc_jwt endpoints", async () => {
   assert.ok(report.issues.some((issue) => issue.includes("auth.jwksUri should use https://")));
 });
 
+test("authorization policy supports deny-by-default with allow rule", () => {
+  const decision = evaluateToolAuthorization(
+    {
+      defaultEffect: "deny",
+      rules: [
+        {
+          id: "allow-github-read",
+          effect: "allow",
+          principals: ["bearer:ops"],
+          tools: ["github__get_*"],
+        },
+      ],
+    },
+    { kind: "bearer", id: "ops", scopes: [], groups: [] },
+    ["github__get_issue"]
+  );
+
+  assert.equal(decision.allowed, true);
+});
+
+test("authorization policy denies conflicting allow and deny rules", () => {
+  const decision = evaluateToolAuthorization(
+    {
+      rules: [
+        {
+          id: "allow-all",
+          effect: "allow",
+          principals: ["bearer:ops"],
+          tools: ["github__*"],
+        },
+        {
+          id: "deny-secret",
+          effect: "deny",
+          principals: ["bearer:ops"],
+          tools: ["github__get_secret"],
+        },
+      ],
+    },
+    { kind: "bearer", id: "ops", scopes: [], groups: [] },
+    ["github__get_secret"]
+  );
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.code, "authorization_ambiguous");
+});
+
 test("runServerTest reports missing executables cleanly", async () => {
   const report = await runServerTest("github", {
     command: "definitely-not-a-real-callmux-command",
@@ -1826,7 +1886,7 @@ function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
     serverInfoMap: Map<string, { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number; error?: string }>;
     serverConcurrency: Map<string, number>;
     callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
-    resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string } | { error: CallToolResult } | null;
+    resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string; server: string } | { error: CallToolResult } | null;
     getServerNames: () => string[];
     getServerTools: (server: string) => string[];
     getServerInfo: (server: string) => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number } | undefined;
@@ -2309,6 +2369,48 @@ test("loadConfig parses oidc_jwt auth config", async () => {
   }
 });
 
+test("loadConfig parses authorization policy config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-authz-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        authorization: {
+          defaultEffect: "deny",
+          rules: [
+            {
+              id: "ops-all",
+              effect: "allow",
+              principals: ["bearer:ops"],
+              tools: ["*"],
+            },
+          ],
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.authorization, {
+      defaultEffect: "deny",
+      rules: [
+        {
+          id: "ops-all",
+          effect: "allow",
+          principals: ["bearer:ops"],
+          tools: ["*"],
+        },
+      ],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid bearer auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-"));
   const configPath = join(dir, "config.json");
@@ -2357,6 +2459,32 @@ test("loadConfig rejects oidc_jwt auth with unsupported algorithms", async () =>
     await assert.rejects(
       loadConfig(configPath),
       /auth\.algorithms must contain only RS256, RS384, RS512, ES256, ES384, or ES512/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects authorization policy with empty rules", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-authz-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        authorization: {
+          rules: [],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /authorization\.rules must contain at least one rule/
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -3238,6 +3366,7 @@ test("listener accepts valid oidc_jwt bearer tokens", async () => {
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const token = signJwtRs256(key, {
+    sub: "user-1",
     iss: issuer,
     aud: audience,
     exp: nowSeconds + 300,
@@ -3291,6 +3420,7 @@ test("listener rejects oidc_jwt token with invalid signature", async () => {
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const badToken = signJwtRs256(untrusted, {
+    sub: "user-2",
     iss: issuer,
     aud: audience,
     exp: nowSeconds + 300,
@@ -3340,6 +3470,7 @@ test("listener rejects expired oidc_jwt token", async () => {
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const expiredToken = signJwtRs256(key, {
+    sub: "user-3",
     iss: issuer,
     aud: audience,
     exp: nowSeconds - 5,
@@ -3390,11 +3521,13 @@ test("listener refreshes JWKS on kid rotation for oidc_jwt tokens", async () => 
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const tokenOne = signJwtRs256(keyOne, {
+    sub: "user-4",
     iss: issuer,
     aud: audience,
     exp: nowSeconds + 300,
   });
   const tokenTwo = signJwtRs256(keyTwo, {
+    sub: "user-4",
     iss: issuer,
     aud: audience,
     exp: nowSeconds + 300,
@@ -3527,6 +3660,148 @@ test("listener requires bearer auth for /mcp", async () => {
       body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
     });
     assert.equal(authorized.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener enforces authorization policy for direct and meta-routed tool calls", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string; server: string } | null;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.resolveServer = (toolName: string, serverHint?: string) => {
+    if (serverHint === "github" || toolName === "github__get_issue" || toolName === "get_issue") {
+      return { client: {}, actualName: "get_issue", server: "github" };
+    }
+    return null;
+  };
+  upstream.callTool = async (toolName: string) => textResult(`ok:${toolName}`);
+
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [
+          { id: "ops", token: "ops-secret" },
+          { id: "viewer", token: "viewer-secret" },
+        ],
+      },
+      authorization: {
+        defaultEffect: "deny",
+        rules: [
+          {
+            id: "ops-read",
+            effect: "allow",
+            principals: ["bearer:ops"],
+            tools: ["github__get_*"],
+          },
+        ],
+      },
+    },
+    upstream: upstream as unknown as UpstreamManager,
+    cache,
+    allTools: [{ name: "github__get_issue", description: "test", inputSchema: { type: "object", properties: {} } }],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      Authorization: "Bearer viewer-secret",
+    };
+
+    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        id: 1,
+      }),
+    });
+    assert.equal(initRes.status, 200);
+    const sessionId = initRes.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+
+    const deniedDirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "github__get_issue",
+          arguments: { number: 1 },
+        },
+        id: 2,
+      }),
+    });
+    assert.equal(deniedDirect.status, 200);
+    const deniedDirectBody = await parseMcpResponseBody(deniedDirect);
+    assert.equal(deniedDirectBody.result.isError, true);
+    assert.equal(
+      deniedDirectBody.result.structuredContent.error.code,
+      "authorization_denied"
+    );
+    assert.equal(
+      deniedDirectBody.result.structuredContent.error.details.code,
+      "authorization_default_deny"
+    );
+
+    const deniedMeta = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "callmux_call",
+          arguments: { tool: "github__get_issue", arguments: { number: 1 } },
+        },
+        id: 3,
+      }),
+    });
+    assert.equal(deniedMeta.status, 200);
+    const deniedMetaBody = await parseMcpResponseBody(deniedMeta);
+    assert.equal(deniedMetaBody.result.isError, true);
+    assert.equal(
+      deniedMetaBody.result.structuredContent.error.code,
+      "authorization_denied"
+    );
+
+    const allowedDirect = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        ...mcpHeaders,
+        "mcp-session-id": sessionId,
+        Authorization: "Bearer ops-secret",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "github__get_issue",
+          arguments: { number: 1 },
+        },
+        id: 4,
+      }),
+    });
+    assert.equal(allowedDirect.status, 200);
+    const allowedDirectBody = await parseMcpResponseBody(allowedDirect);
+    assert.equal(allowedDirectBody.result.isError, undefined);
   } finally {
     await listener.close();
   }

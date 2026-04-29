@@ -603,6 +603,23 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
     "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
     "allowUnauthenticatedHealth": false
   },
+  "authorization": {
+    "defaultEffect": "deny",
+    "rules": [
+      {
+        "id": "ops-all",
+        "effect": "allow",
+        "principals": ["bearer:ops"],
+        "tools": ["*"]
+      },
+      {
+        "id": "agents-read",
+        "effect": "allow",
+        "principals": ["oidc:*", "scope:mcp.read"],
+        "tools": ["github__get_*", "github__list_*"]
+      }
+    ]
+  },
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
@@ -625,6 +642,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
 | `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
 | `auth` | object | — | Listener authentication config (hashed bearer tokens) |
+| `authorization` | object | — | Listener authorization policy (principal + tool rules) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -678,6 +696,24 @@ OIDC JWT mode:
 | `jwksCacheTtlSeconds` | integer | — | JWKS cache TTL (default `300`) |
 | `jwksFetchTimeoutMs` | integer | — | JWKS fetch timeout (default `5000`) |
 | `allowUnauthenticatedHealth` | boolean | — | Allow `/health` without auth |
+
+**Authorization config** (listener mode):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `defaultEffect` | string | — | `allow` or `deny` when no rule matches (default `allow`) |
+| `rules` | object[] | yes | Ordered policy rules |
+
+Authorization rule fields:
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `id` | string | — | Stable rule identifier used in denied responses |
+| `effect` | string | yes | `allow` or `deny` |
+| `principals` | string[] | — | Principal patterns (`bearer:ops`, `oidc:alice`, `scope:mcp.read`, `group:admins`, wildcard `*`) |
+| `tools` | string[] | — | Tool patterns (supports wildcards, including `server__tool` patterns like `github__get_*`) |
+
+If `authorization` is configured, request auth (`auth`) should also be configured so policy can evaluate an authenticated principal.
 
 </details>
 

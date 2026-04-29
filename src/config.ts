@@ -3,6 +3,8 @@ import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
   AuthConfig,
+  AuthorizationConfig,
+  AuthorizationRuleConfig,
   BearerAuthTokenConfig,
   CachePolicyConfig,
   CallmuxConfig,
@@ -141,6 +143,75 @@ function parseAuthAllowUnauthenticatedHealth(
   optionName: string
 ): boolean | undefined {
   return parseBooleanOption(value, `${optionName}.allowUnauthenticatedHealth`);
+}
+
+function parseAuthorizationConfig(
+  value: unknown,
+  optionName: string
+): AuthorizationConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  if (!Array.isArray(value.rules)) {
+    throw new Error(`${optionName}.rules must be an array`);
+  }
+  if (value.rules.length === 0) {
+    throw new Error(`${optionName}.rules must contain at least one rule`);
+  }
+
+  const defaultEffect =
+    value.defaultEffect === undefined
+      ? undefined
+      : value.defaultEffect === "allow" || value.defaultEffect === "deny"
+        ? value.defaultEffect
+        : (() => {
+            throw new Error(`${optionName}.defaultEffect must be "allow" or "deny"`);
+          })();
+
+  const rules = value.rules.map((rule, index): AuthorizationRuleConfig => {
+    if (!isRecord(rule)) {
+      throw new Error(`${optionName}.rules[${index}] must be an object`);
+    }
+
+    const id =
+      rule.id === undefined
+        ? undefined
+        : typeof rule.id === "string" && rule.id.trim().length > 0
+          ? rule.id
+          : (() => {
+              throw new Error(`${optionName}.rules[${index}].id must be a non-empty string`);
+            })();
+
+    const effect =
+      rule.effect === "allow" || rule.effect === "deny"
+        ? rule.effect
+        : (() => {
+            throw new Error(`${optionName}.rules[${index}].effect must be "allow" or "deny"`);
+          })();
+
+    const principals = parseStringArray(
+      rule.principals,
+      `${optionName}.rules[${index}].principals`
+    );
+    const tools = parseStringArray(
+      rule.tools,
+      `${optionName}.rules[${index}].tools`
+    );
+
+    return {
+      ...(id ? { id } : {}),
+      effect,
+      ...(principals ? { principals } : {}),
+      ...(tools ? { tools } : {}),
+    };
+  });
+
+  return {
+    ...(defaultEffect ? { defaultEffect } : {}),
+    rules,
+  };
 }
 
 function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undefined {
@@ -391,6 +462,10 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
   const parseSharedFields = () => {
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
     const auth = parseAuthConfig(parsed.auth, "auth");
+    const authorization = parseAuthorizationConfig(
+      parsed.authorization,
+      "authorization"
+    );
     return {
       cacheTtlSeconds:
         parsed.cacheTtlSeconds === undefined
@@ -468,6 +543,7 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
           }
         : {}),
       ...(auth ? { auth } : {}),
+      ...(authorization ? { authorization } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {
             allowInsecureRemoteListener:

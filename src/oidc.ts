@@ -1,5 +1,6 @@
 import { createPublicKey, verify as verifySignature } from "node:crypto";
 import type { OidcJwtAuthConfig } from "./types.js";
+import type { AuthorizationPrincipal } from "./authorization.js";
 
 const DEFAULT_CLOCK_SKEW_SECONDS = 30;
 const DEFAULT_JWKS_CACHE_TTL_SECONDS = 300;
@@ -131,43 +132,59 @@ export class OidcJwtVerifier {
     this.allowedAlgorithms = jwtAllowedAlgorithms(config);
   }
 
-  async verify(token: string): Promise<boolean> {
+  async verify(token: string): Promise<AuthorizationPrincipal | undefined> {
     const parsed = parseJwt(token);
-    if (!parsed) return false;
+    if (!parsed) return undefined;
 
     const algorithm =
       typeof parsed.header.alg === "string" ? parsed.header.alg : undefined;
     const kid = typeof parsed.header.kid === "string" ? parsed.header.kid : undefined;
-    if (!algorithm || !kid) return false;
-    if (!this.allowedAlgorithms.has(algorithm)) return false;
-    if (!isSupportedAlgorithm(algorithm)) return false;
+    if (!algorithm || !kid) return undefined;
+    if (!this.allowedAlgorithms.has(algorithm)) return undefined;
+    if (!isSupportedAlgorithm(algorithm)) return undefined;
 
-    if (!this.claimsAreValid(parsed.payload)) {
-      return false;
+    const principal = this.extractPrincipal(parsed.payload);
+    if (!principal) {
+      return undefined;
     }
 
     const jwk =
       (await this.getJwkByKid(kid, false)) ??
       (await this.getJwkByKid(kid, true));
-    if (!jwk) return false;
+    if (!jwk) return undefined;
 
-    return verifyJwtSignature(parsed, algorithm, jwk);
+    if (!verifyJwtSignature(parsed, algorithm, jwk)) {
+      return undefined;
+    }
+
+    return principal;
   }
 
-  private claimsAreValid(payload: Record<string, unknown>): boolean {
+  private extractPrincipal(
+    payload: Record<string, unknown>
+  ): AuthorizationPrincipal | undefined {
     const skew = clockSkewSeconds(this.config);
     const nowSeconds = Date.now() / 1000;
 
-    if (payload.iss !== this.config.issuer) return false;
-    if (!payloadMatchesAudience(payload.aud, this.acceptedAudiences)) return false;
+    if (payload.iss !== this.config.issuer) return undefined;
+    if (!payloadMatchesAudience(payload.aud, this.acceptedAudiences)) return undefined;
 
     const exp = readNumericClaim(payload, "exp");
-    if (exp === undefined || nowSeconds > exp + skew) return false;
+    if (exp === undefined || nowSeconds > exp + skew) return undefined;
 
     const nbf = readNumericClaim(payload, "nbf");
-    if (nbf !== undefined && nowSeconds + skew < nbf) return false;
+    if (nbf !== undefined && nowSeconds + skew < nbf) return undefined;
 
-    return true;
+    const subject = typeof payload.sub === "string" ? payload.sub : undefined;
+    if (!subject || subject.length === 0) return undefined;
+
+    return {
+      kind: "oidc_jwt",
+      id: subject,
+      subject,
+      scopes: extractScopes(payload.scope, payload.scopes),
+      groups: extractGroups(payload.groups),
+    };
   }
 
   private async getJwkByKid(
@@ -245,6 +262,32 @@ export class OidcJwtVerifier {
       clearTimeout(timeout);
     }
   }
+}
+
+function extractScopes(
+  scopeClaim: unknown,
+  scopesClaim: unknown
+): string[] {
+  if (typeof scopeClaim === "string") {
+    return scopeClaim
+      .split(/\s+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  if (Array.isArray(scopesClaim)) {
+    return scopesClaim.filter((entry): entry is string => typeof entry === "string");
+  }
+  return [];
+}
+
+function extractGroups(groupsClaim: unknown): string[] {
+  if (Array.isArray(groupsClaim)) {
+    return groupsClaim.filter((entry): entry is string => typeof entry === "string");
+  }
+  if (typeof groupsClaim === "string" && groupsClaim.length > 0) {
+    return [groupsClaim];
+  }
+  return [];
 }
 
 function verifyJwtSignature(
