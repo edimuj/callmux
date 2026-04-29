@@ -7,6 +7,7 @@ import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
 import { isHttpServerConfig } from "./types.js";
 import type {
+  InstanceIdentity,
   ServerConfig,
   ServerInfo,
   StdioServerConfig,
@@ -100,8 +101,17 @@ export class UpstreamManager {
   private failedConnections: UpstreamConnectionFailure[] = [];
   private serverInfoMap = new Map<string, ServerInfo>();
   private serverConcurrency = new Map<string, number>();
+  private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
+
+  setInstanceIdentity(identity: InstanceIdentity): void {
+    this.instanceIdentity = identity;
+  }
+
+  getInstanceIdentity(): InstanceIdentity {
+    return this.instanceIdentity;
+  }
 
   private async resetConnectionState(): Promise<void> {
     await Promise.all(
@@ -388,8 +398,20 @@ export class UpstreamManager {
     });
   }
 
-  private resolutionError(message: string): CallToolResult {
-    return errorResult("tool_resolution_failed", message);
+  private resolutionError(
+    message: string,
+    details?: Record<string, unknown>
+  ): CallToolResult {
+    return errorResult("tool_resolution_failed", message, details);
+  }
+
+  private getKnownServerNames(): string[] {
+    return Array.from(
+      new Set([
+        ...Array.from(this.clients.keys()),
+        ...this.failedConnections.map((failure) => failure.name),
+      ])
+    ).sort();
   }
 
   private indexUnqualifiedTool(server: string, tool: Tool): void {
@@ -412,8 +434,26 @@ export class UpstreamManager {
     if (serverHint) {
       const client = this.clients.get(serverHint);
       if (!client) {
+        const availableServers = this.getKnownServerNames();
+        const namespaceText = this.instanceIdentity.namespace
+          ? ` (namespace: ${this.instanceIdentity.namespace})`
+          : "";
+        const wrappedText =
+          availableServers.length > 0
+            ? ` This instance wraps: [${availableServers.join(", ")}].`
+            : " This instance has no connected or known downstream servers.";
         return {
-          error: this.resolutionError(`server "${serverHint}" not found`),
+          error: this.resolutionError(
+            `server "${serverHint}" not found in this callmux instance${namespaceText}.${wrappedText}`,
+            {
+              server: serverHint,
+              availableServers,
+              ...(this.instanceIdentity.namespace
+                ? { namespace: this.instanceIdentity.namespace }
+                : {}),
+              instanceId: this.instanceIdentity.instanceId,
+            }
+          ),
         };
       }
 

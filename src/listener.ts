@@ -381,7 +381,15 @@ export class CallmuxListener {
         case "callmux_cache_clear":
           return handleCacheClear(cache, args);
         case "callmux_status":
-          return handleStatus(upstream, cache, maxConcurrency, config.metaOnly ?? false, config.descriptionMaxLength, args);
+          return handleStatus(
+            upstream,
+            cache,
+            maxConcurrency,
+            config.metaOnly ?? false,
+            config.descriptionMaxLength,
+            upstream.getInstanceIdentity(),
+            args
+          );
       }
 
       // Proxied tool — check cache first

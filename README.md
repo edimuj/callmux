@@ -313,13 +313,17 @@ Call a single downstream tool by name. Primary invocation path in [meta-only mod
 { "tool": "get_issue", "server": "github", "arguments": { "number": 42 } }
 ```
 
+If `server` is wrong, callmux now returns a structured `tool_resolution_failed` error with the instance identity and available server names for faster rerouting.
+
 ### `callmux_status`
 
-Introspect callmux from inside your agent. Shows connected servers, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
+Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
 
 ```json
 { "server": "github", "descriptions": true, "descriptionMaxLength": 80 }
 ```
+
+If you run multiple callmux instances in one session, set `CALLMUX_NAMESPACE` on each process (for example `mcp__server1__`, `mcp__callmux__`) so errors and status output clearly identify which instance handled a call.
 
 ---
 
@@ -423,7 +427,16 @@ callmux (port 4860) ─┼─ Linear MCP (1 instance)
 - Cache shared across sessions (one session's cached result serves all)
 - Downstream startup cost paid once
 
-**Client config:**
+**Client config (shared server):**
+
+**Codex** (Streamable HTTP):
+
+```toml
+[mcp_servers.callmux]
+url = "http://localhost:4860/mcp"
+```
+
+**Claude Code** (legacy SSE transport):
 
 ```json
 {
@@ -433,7 +446,7 @@ callmux (port 4860) ─┼─ Linear MCP (1 instance)
 }
 ```
 
-Supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count, and `/metrics` exposes Prometheus metrics when enabled.
+callmux supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count, and `/metrics` exposes Prometheus metrics when enabled.
 
 By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expose on all interfaces (e.g., for Tailscale access from other machines).
 

@@ -1,4 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { createHash } from "node:crypto";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -16,7 +17,7 @@ import {
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
-import type { CallmuxConfig } from "./types.js";
+import type { CallmuxConfig, InstanceIdentity, ServerConfig } from "./types.js";
 
 export class CallmuxProxy {
   private server: Server;
@@ -25,6 +26,45 @@ export class CallmuxProxy {
   private maxConcurrency: number;
   private connectTimeoutMs: number;
   private allTools: Tool[] = [];
+  private instanceIdentity: InstanceIdentity;
+
+  private static buildInstanceId(config: CallmuxConfig): string {
+    const serverFingerprint = Object.entries(config.servers)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, server]) => ({
+        name,
+        ...(CallmuxProxy.fingerprintServerConfig(server)),
+      }));
+    const fingerprint = {
+      serverFingerprint,
+      metaOnly: config.metaOnly ?? false,
+      strictStartup: config.strictStartup ?? false,
+      cwd: process.cwd(),
+    };
+    return createHash("sha256")
+      .update(JSON.stringify(fingerprint))
+      .digest("hex")
+      .slice(0, 12);
+  }
+
+  private static fingerprintServerConfig(config: ServerConfig): Record<string, unknown> {
+    if ("command" in config) {
+      return {
+        type: "stdio",
+        command: config.command,
+        args: config.args ?? [],
+        cwd: config.cwd,
+        tools: config.tools ?? [],
+      };
+    }
+
+    return {
+      type: "http",
+      url: config.url,
+      transport: config.transport,
+      tools: config.tools ?? [],
+    };
+  }
 
   constructor(private config: CallmuxConfig) {
     this.upstream = new UpstreamManager(config.callTimeoutMs ?? 30_000);
@@ -41,6 +81,11 @@ export class CallmuxProxy {
     );
     this.maxConcurrency = config.maxConcurrency ?? 20;
     this.connectTimeoutMs = config.connectTimeoutMs ?? 30_000;
+    this.instanceIdentity = {
+      namespace: process.env.CALLMUX_NAMESPACE,
+      instanceId: CallmuxProxy.buildInstanceId(config),
+    };
+    this.upstream.setInstanceIdentity(this.instanceIdentity);
 
     this.server = new Server(
       { name: "callmux", version: "0.1.0" },
@@ -152,6 +197,7 @@ export class CallmuxProxy {
           this.maxConcurrency,
           this.config.metaOnly ?? false,
           this.config.descriptionMaxLength,
+          this.instanceIdentity,
           args
         );
     }

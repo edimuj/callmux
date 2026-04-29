@@ -6,6 +6,7 @@ import type {
   ParallelCall,
   BatchItem,
   PipelineStep,
+  InstanceIdentity,
 } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -583,6 +584,7 @@ export function handleStatus(
   maxConcurrency: number,
   metaOnly: boolean,
   defaultDescriptionMaxLength: number | undefined,
+  instanceIdentity: InstanceIdentity,
   args: unknown
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
@@ -652,16 +654,33 @@ export function handleStatus(
     });
 
   if (serverFilter && servers.length === 0 && failed.length === 0) {
+    const availableServers = [...serverNames, ...failedServers.map((failure) => failure.name)];
+    const namespaceText = instanceIdentity.namespace
+      ? ` (namespace: ${instanceIdentity.namespace})`
+      : "";
     return errorResult(
       "server_not_found",
-      `server "${serverFilter}" not found`,
-      { available: [...serverNames, ...failedServers.map((failure) => failure.name)] }
+      `server "${serverFilter}" not found in this callmux instance${namespaceText}`,
+      {
+        server: serverFilter,
+        availableServers,
+        ...(instanceIdentity.namespace ? { namespace: instanceIdentity.namespace } : {}),
+        instanceId: instanceIdentity.instanceId,
+      }
     );
   }
+
+  const wrappedServers = [...new Set([
+    ...serverNames,
+    ...failedServers.map((failure) => failure.name),
+  ])].sort();
 
   return jsonResult({
     status: failedServers.length > 0 ? "degraded" : "ok",
     mode: metaOnly ? "meta-only" : "standard",
+    ...(instanceIdentity.namespace ? { namespace: instanceIdentity.namespace } : {}),
+    instanceId: instanceIdentity.instanceId,
+    wrappedServers,
     servers,
     failedServers: failed,
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),

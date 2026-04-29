@@ -2015,23 +2015,69 @@ test("handleCall validates missing tool name", async () => {
   );
 });
 
+const TEST_INSTANCE_IDENTITY = { instanceId: "test-instance" };
+
 test("handleStatus includes mode field", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
   ]);
   const cache = new CallCache(0);
 
-  const standard = handleStatus(upstream as never, cache, 20, false, undefined, {});
+  const standard = handleStatus(
+    upstream as never,
+    cache,
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
   assert.equal(
     (standard.structuredContent as { mode: string }).mode,
     "standard"
   );
 
-  const metaOnly = handleStatus(upstream as never, cache, 20, true, undefined, {});
+  const metaOnly = handleStatus(
+    upstream as never,
+    cache,
+    20,
+    true,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
   assert.equal(
     (metaOnly.structuredContent as { mode: string }).mode,
     "meta-only"
   );
+  const standardContent = standard.structuredContent as {
+    instanceId: string;
+    wrappedServers: string[];
+  };
+  assert.equal(standardContent.instanceId, "test-instance");
+  assert.deepEqual(standardContent.wrappedServers, ["github"]);
+});
+
+test("handleStatus includes optional namespace when provided", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    { namespace: "mcp__project_callmux__", instanceId: "project-1" },
+    {}
+  );
+  const content = result.structuredContent as {
+    namespace: string;
+    instanceId: string;
+  };
+  assert.equal(content.namespace, "mcp__project_callmux__");
+  assert.equal(content.instanceId, "project-1");
 });
 
 test("handleStatus returns descriptions when requested", () => {
@@ -2040,9 +2086,17 @@ test("handleStatus returns descriptions when requested", () => {
     { server: "github", tool: mockTool("list_issues", "List issues in a repository") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {
-    descriptions: true,
-  });
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {
+      descriptions: true,
+    }
+  );
 
   const content = result.structuredContent as {
     servers: Array<{
@@ -2059,10 +2113,18 @@ test("handleStatus truncates descriptions to maxLength", () => {
     { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {
-    descriptions: true,
-    descriptionMaxLength: 20,
-  });
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {
+      descriptions: true,
+      descriptionMaxLength: 20,
+    }
+  );
 
   const content = result.structuredContent as {
     servers: Array<{
@@ -2078,9 +2140,17 @@ test("handleStatus uses config default for descriptionMaxLength", () => {
     { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, 15, {
-    descriptions: true,
-  });
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    15,
+    TEST_INSTANCE_IDENTITY,
+    {
+      descriptions: true,
+    }
+  );
 
   const content = result.structuredContent as {
     servers: Array<{
@@ -2096,10 +2166,18 @@ test("handleStatus per-call descriptionMaxLength overrides config default", () =
     { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, 15, {
-    descriptions: true,
-    descriptionMaxLength: 30,
-  });
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    15,
+    TEST_INSTANCE_IDENTITY,
+    {
+      descriptions: true,
+      descriptionMaxLength: 30,
+    }
+  );
 
   const content = result.structuredContent as {
     servers: Array<{
@@ -2115,7 +2193,15 @@ test("handleStatus includes transport, state, and connectDurationMs per server",
     { server: "github", tool: mockTool("get_issue") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
   const content = result.structuredContent as {
     servers: Array<{ name: string; transport: string; state: string; connectDurationMs: number }>;
   };
@@ -2138,7 +2224,15 @@ test("handleStatus includes toolFilter when tools are filtered", () => {
     toolFilter: ["get_issue"],
   });
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
   const content = result.structuredContent as {
     servers: Array<{ name: string; toolFilter: string[]; totalTools: number }>;
   };
@@ -2152,7 +2246,15 @@ test("handleStatus returns string array without descriptions flag", () => {
     { server: "github", tool: mockTool("get_issue", "Get a specific issue") },
   ]);
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
 
   const content = result.structuredContent as {
     servers: Array<{ tools: string[] }>;
@@ -2177,7 +2279,15 @@ test("handleStatus reports degraded startup failures with diagnostics", () => {
     error: "boom",
   });
 
-  const result = handleStatus(upstream as never, new CallCache(0), 20, false, undefined, {});
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
   const content = result.structuredContent as {
     status: string;
     failedServers: Array<{ name: string; error: string; transport: string; connectDurationMs: number }>;
@@ -3033,10 +3143,18 @@ test("handleCall returns error for unknown server", async () => {
   });
 
   assert.equal(result.isError, true);
-  assert.match(
-    (result.structuredContent as { error: { message: string } }).error.message,
-    /not found/
-  );
+  const error = (result.structuredContent as {
+    error: {
+      message: string;
+      details: {
+        availableServers: string[];
+        instanceId: string;
+      };
+    };
+  }).error;
+  assert.match(error.message, /not found in this callmux instance/);
+  assert.deepEqual(error.details.availableServers, ["github"]);
+  assert.equal(error.details.instanceId, "unknown");
 });
 
 // ─── Proxy routing end-to-end tests ──────────────────────────
@@ -3160,9 +3278,15 @@ test("proxy routes callmux_status to handleStatus", async () => {
   };
 
   const result = await harness.handleToolCall("callmux_status", {});
-  const content = result.structuredContent as { status: string; mode: string };
+  const content = result.structuredContent as {
+    status: string;
+    mode: string;
+    instanceId: string;
+  };
   assert.equal(content.status, "ok");
   assert.equal(content.mode, "standard");
+  assert.equal(typeof content.instanceId, "string");
+  assert.ok(content.instanceId.length > 0);
 });
 
 test("proxy routes unrecognized names to proxied tool path", async () => {

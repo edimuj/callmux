@@ -186,6 +186,13 @@ export interface CallmuxConfig {
 
 export type ConfigFormat = "native" | "mcpCompatible";
 
+export interface InstanceIdentity {
+  /** Optional external namespace label (e.g. mcp__callmux__) */
+  namespace?: string;
+  /** Stable fingerprint for this callmux instance */
+  instanceId: string;
+}
+
 // ─── Meta-tool call shapes ─────────────────────────────────────
 
 export interface ParallelCall {

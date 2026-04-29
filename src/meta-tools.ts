@@ -153,7 +153,7 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_status",
     description:
       "Check the health and status of callmux and its downstream servers. " +
-      "Returns connected servers, available tools, cache stats, and configuration.",
+      "Returns instance identity, connected servers, available tools, cache stats, and configuration.",
     inputSchema: {
       type: "object" as const,
       properties: {
