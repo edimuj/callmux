@@ -155,6 +155,28 @@ async function parseMcpResponseBody(res: Response): Promise<any> {
   return res.json();
 }
 
+async function captureStderr<T>(
+  fn: () => Promise<T>
+): Promise<{ result: T; output: string }> {
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  let output = "";
+
+  (process.stderr as unknown as { write: (chunk: unknown) => boolean }).write = (
+    chunk: unknown
+  ) => {
+    output += Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk);
+    return true;
+  };
+
+  try {
+    const result = await fn();
+    return { result, output };
+  } finally {
+    (process.stderr as unknown as { write: typeof process.stderr.write }).write =
+      originalWrite;
+  }
+}
+
 test("CallCache distinguishes nested arguments while preserving stable object order", () => {
   const cache = new CallCache(60);
   const result = textResult("cached");
@@ -2443,6 +2465,48 @@ test("loadConfig parses abuse controls config", async () => {
   }
 });
 
+test("loadConfig parses audit and metrics config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-observability-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auditLog: {
+          enabled: true,
+          includeRequestBody: true,
+          maxPayloadChars: 2048,
+          redactKeys: ["session_token"],
+        },
+        metrics: {
+          enabled: true,
+          path: "prom-metrics",
+          allowUnauthenticated: true,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.auditLog, {
+      enabled: true,
+      includeRequestBody: true,
+      maxPayloadChars: 2048,
+      redactKeys: ["session_token"],
+    });
+    assert.deepEqual(config.metrics, {
+      enabled: true,
+      path: "/prom-metrics",
+      allowUnauthenticated: true,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid bearer auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-"));
   const configPath = join(dir, "config.json");
@@ -2543,6 +2607,32 @@ test("loadConfig rejects abuse controls with invalid CIDR entries", async () => 
     await assert.rejects(
       loadConfig(configPath),
       /abuseControls\.cidrAllowlist entries must be valid CIDR or IP values/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid metrics path", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-metrics-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        metrics: {
+          path: "",
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /metrics\.path must be a non-empty string/
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -3863,6 +3953,206 @@ test("listener enforces authorization policy for direct and meta-routed tool cal
   } finally {
     await listener.close();
   }
+});
+
+test("listener includes request IDs in error responses and headers", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "ops-secret" }],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "x-request-id": "req-unauthorized-1",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.headers.get("x-request-id"), "req-unauthorized-1");
+    const unauthorizedBody = await unauthorized.json();
+    assert.equal(unauthorizedBody.requestId, "req-unauthorized-1");
+
+    const badSession = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: "Bearer ops-secret",
+        "x-request-id": "req-bad-session-1",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 2 }),
+    });
+    assert.equal(badSession.status, 400);
+    assert.equal(badSession.headers.get("x-request-id"), "req-bad-session-1");
+    const badSessionBody = await badSession.json();
+    assert.equal(badSessionBody.error.data.requestId, "req-bad-session-1");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener serves prometheus metrics endpoint and tracks request counters", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      metrics: {
+        enabled: true,
+        path: "/metrics",
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+  await listener.start();
+  try {
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(health.status, 200);
+
+    const metrics = await fetch(`http://127.0.0.1:${port}/metrics`);
+    assert.equal(metrics.status, 200);
+    assert.ok(
+      (metrics.headers.get("content-type") ?? "").includes("text/plain")
+    );
+    const body = await metrics.text();
+    assert.match(body, /callmux_http_requests_total/);
+    assert.match(body, /path="\/health"/);
+    assert.match(body, /callmux_http_inflight_requests/);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener can require auth for metrics endpoint", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "ops-secret" }],
+      },
+      metrics: {
+        enabled: true,
+        path: "/metrics",
+        allowUnauthenticated: false,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/metrics`);
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/metrics`, {
+      headers: { Authorization: "Bearer ops-secret" },
+    });
+    assert.equal(authorized.status, 200);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener audit log redacts sensitive payload fields", async () => {
+  const { output } = await captureStderr(async () => {
+    const upstream = new UpstreamManager();
+    const cache = new CallCache(0, undefined, {}, 100);
+    const listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: {
+        servers: {},
+        auditLog: {
+          enabled: true,
+          includeRequestBody: true,
+          maxPayloadChars: 4096,
+        },
+      },
+      upstream,
+      cache,
+      allTools: [],
+      maxConcurrency: 10,
+    });
+
+    const port = 19876 + Math.floor(Math.random() * 1000);
+    (listener as any).options.port = port;
+    await listener.start();
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "callmux_call",
+            arguments: {
+              tool: "github__get_issue",
+              arguments: {
+                token: "super-secret-token",
+                nested: { api_key: "secret-value" },
+              },
+            },
+          },
+          id: 1,
+        }),
+      });
+      assert.equal(res.status, 400);
+    } finally {
+      await listener.close();
+    }
+  });
+
+  const auditLines = output
+    .split("\n")
+    .filter((line) => line.includes("\"event\":\"http_request\""));
+  assert.ok(auditLines.length > 0, "expected at least one audit request line");
+  const parsed = JSON.parse(auditLines[auditLines.length - 1]);
+  const serialized = JSON.stringify(parsed);
+  assert.ok(serialized.includes("[redacted]"));
+  assert.ok(!serialized.includes("super-secret-token"));
+  assert.ok(!serialized.includes("secret-value"));
 });
 
 test("listener enforces global abuse rate limit", async () => {

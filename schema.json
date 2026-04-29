@@ -89,6 +89,8 @@
     "auth": { "$ref": "#/$defs/authConfig" },
     "authorization": { "$ref": "#/$defs/authorizationConfig" },
     "abuseControls": { "$ref": "#/$defs/abuseControlsConfig" },
+    "auditLog": { "$ref": "#/$defs/auditLogConfig" },
+    "metrics": { "$ref": "#/$defs/metricsConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
       "default": false,
@@ -387,6 +389,49 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Allowed source CIDRs/IPs for listener requests"
+        }
+      },
+      "additionalProperties": false
+    },
+    "auditLogConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable structured audit logging"
+        },
+        "includeRequestBody": {
+          "type": "boolean",
+          "description": "Include redacted request payload details when available"
+        },
+        "maxPayloadChars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum serialized payload chars in audit log (0 = omit payload)"
+        },
+        "redactKeys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional payload keys to redact"
+        }
+      },
+      "additionalProperties": false
+    },
+    "metricsConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable Prometheus metrics endpoint"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Metrics endpoint path (default: /metrics)"
+        },
+        "allowUnauthenticated": {
+          "type": "boolean",
+          "description": "Allow unauthenticated metrics access"
         }
       },
       "additionalProperties": false

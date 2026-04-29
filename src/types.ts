@@ -125,6 +125,26 @@ export interface AbuseControlsConfig {
   cidrAllowlist?: string[];
 }
 
+export interface AuditLogConfig {
+  /** Enable structured audit logging */
+  enabled?: boolean;
+  /** Include redacted request payload details when available */
+  includeRequestBody?: boolean;
+  /** Max serialized payload chars to include in audit log (0 = omit payload) */
+  maxPayloadChars?: number;
+  /** Extra key patterns to redact in payload objects */
+  redactKeys?: string[];
+}
+
+export interface MetricsConfig {
+  /** Enable Prometheus metrics endpoint */
+  enabled?: boolean;
+  /** Endpoint path (default: /metrics) */
+  path?: string;
+  /** Allow unauthenticated access to metrics endpoint */
+  allowUnauthenticated?: boolean;
+}
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -156,6 +176,10 @@ export interface CallmuxConfig {
   authorization?: AuthorizationConfig;
   /** Listener abuse controls */
   abuseControls?: AbuseControlsConfig;
+  /** Listener audit log configuration */
+  auditLog?: AuditLogConfig;
+  /** Listener metrics endpoint configuration */
+  metrics?: MetricsConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */
   allowInsecureRemoteListener?: boolean;
 }

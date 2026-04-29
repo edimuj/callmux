@@ -3,6 +3,7 @@ import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
   AbuseControlsConfig,
+  AuditLogConfig,
   AuthConfig,
   AuthorizationConfig,
   AuthorizationRuleConfig,
@@ -10,6 +11,7 @@ import type {
   CachePolicyConfig,
   CallmuxConfig,
   ConfigFormat,
+  MetricsConfig,
   ServerConfig,
 } from "./types.js";
 import { parseScryptTokenHash } from "./auth.js";
@@ -277,6 +279,83 @@ function parseAbuseControlsConfig(
   };
 }
 
+function parseAuditLogConfig(
+  value: unknown,
+  optionName: string
+): AuditLogConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const includeRequestBody = parseBooleanOption(
+    value.includeRequestBody,
+    `${optionName}.includeRequestBody`
+  );
+  const maxPayloadChars =
+    value.maxPayloadChars === undefined
+      ? undefined
+      : parseNonNegativeInteger(value.maxPayloadChars, `${optionName}.maxPayloadChars`);
+  const redactKeys = parseStringArray(value.redactKeys, `${optionName}.redactKeys`);
+
+  if (
+    enabled === undefined &&
+    includeRequestBody === undefined &&
+    maxPayloadChars === undefined &&
+    redactKeys === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(includeRequestBody !== undefined ? { includeRequestBody } : {}),
+    ...(maxPayloadChars !== undefined ? { maxPayloadChars } : {}),
+    ...(redactKeys ? { redactKeys } : {}),
+  };
+}
+
+function parseMetricsConfig(
+  value: unknown,
+  optionName: string
+): MetricsConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const allowUnauthenticated = parseBooleanOption(
+    value.allowUnauthenticated,
+    `${optionName}.allowUnauthenticated`
+  );
+  const path =
+    value.path === undefined
+      ? undefined
+      : typeof value.path === "string" && value.path.trim().length > 0
+        ? value.path.startsWith("/")
+          ? value.path
+          : `/${value.path}`
+        : (() => {
+            throw new Error(`${optionName}.path must be a non-empty string`);
+          })();
+
+  if (
+    enabled === undefined &&
+    allowUnauthenticated === undefined &&
+    path === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(path ? { path } : {}),
+    ...(allowUnauthenticated !== undefined ? { allowUnauthenticated } : {}),
+  };
+}
+
 function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
@@ -533,6 +612,8 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
       parsed.abuseControls,
       "abuseControls"
     );
+    const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
+    const metrics = parseMetricsConfig(parsed.metrics, "metrics");
     return {
       cacheTtlSeconds:
         parsed.cacheTtlSeconds === undefined
@@ -612,6 +693,8 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
       ...(auth ? { auth } : {}),
       ...(authorization ? { authorization } : {}),
       ...(abuseControls ? { abuseControls } : {}),
+      ...(auditLog ? { auditLog } : {}),
+      ...(metrics ? { metrics } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {
             allowInsecureRemoteListener:

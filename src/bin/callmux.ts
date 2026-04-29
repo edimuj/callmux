@@ -162,6 +162,16 @@ Config file format:
       "principalMaxInFlight": 20,
       "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
     },
+    "auditLog": {
+      "enabled": true,
+      "includeRequestBody": true,
+      "maxPayloadChars": 4096
+    },
+    "metrics": {
+      "enabled": true,
+      "path": "/metrics",
+      "allowUnauthenticated": false
+    },
     "strictStartup": false
   }
 

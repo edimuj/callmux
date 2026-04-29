@@ -433,7 +433,7 @@ callmux (port 4860) ─┼─ Linear MCP (1 instance)
 }
 ```
 
-Supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count.
+Supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count, and `/metrics` exposes Prometheus metrics when enabled.
 
 By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expose on all interfaces (e.g., for Tailscale access from other machines).
 
@@ -626,6 +626,16 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
     "principalMaxInFlight": 20,
     "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
   },
+  "auditLog": {
+    "enabled": true,
+    "includeRequestBody": true,
+    "maxPayloadChars": 4096
+  },
+  "metrics": {
+    "enabled": true,
+    "path": "/metrics",
+    "allowUnauthenticated": false
+  },
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
@@ -650,6 +660,8 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `auth` | object | — | Listener authentication config (hashed bearer tokens) |
 | `authorization` | object | — | Listener authorization policy (principal + tool rules) |
 | `abuseControls` | object | — | Listener abuse controls (rate limits, in-flight caps, CIDR allowlist) |
+| `auditLog` | object | — | Structured per-request audit logging with payload redaction |
+| `metrics` | object | — | Prometheus metrics endpoint configuration |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -732,6 +744,27 @@ If `authorization` is configured, request auth (`auth`) should also be configure
 | `cidrAllowlist` | string[] | — | Allowed source CIDR/IP list (`127.0.0.1/32`, `10.0.0.0/8`, `::1/128`) |
 
 When limits are hit, listener endpoints return `429` with `Retry-After` (when rate-window retry is known).
+
+**Audit log** (listener mode):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `enabled` | boolean | — | Enable structured JSON audit events (default `true`) |
+| `includeRequestBody` | boolean | — | Include redacted payload details when available |
+| `maxPayloadChars` | integer | — | Max serialized payload chars in logs (`0` disables payload logging) |
+| `redactKeys` | string[] | — | Additional key names to redact (case-insensitive) |
+
+Audit records include correlation `requestId`, principal metadata, status code, and duration.
+
+**Metrics** (listener mode):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `enabled` | boolean | — | Enable Prometheus endpoint (default `true`) |
+| `path` | string | — | Metrics path (default `/metrics`) |
+| `allowUnauthenticated` | boolean | — | Allow unauthenticated access to metrics |
+
+HTTP responses include `x-request-id`, and error payloads include `requestId` for correlation.
 
 </details>
 
