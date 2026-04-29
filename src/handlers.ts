@@ -675,6 +675,7 @@ export function handleStatus(
 class Semaphore {
   private current = 0;
   private queue: Array<() => void> = [];
+  private queueHead = 0;
 
   constructor(private max: number) {}
 
@@ -689,10 +690,20 @@ class Semaphore {
   }
 
   release(): void {
-    const next = this.queue.shift();
+    const next = this.queue[this.queueHead];
     if (next) {
+      this.queueHead++;
+      // Periodically compact resolved waiters to avoid unbounded sparse arrays.
+      if (this.queueHead >= 64 && this.queueHead * 2 >= this.queue.length) {
+        this.queue = this.queue.slice(this.queueHead);
+        this.queueHead = 0;
+      }
       next();
     } else {
+      if (this.queueHead > 0) {
+        this.queue = [];
+        this.queueHead = 0;
+      }
       this.current--;
     }
   }

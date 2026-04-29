@@ -95,6 +95,7 @@ export class UpstreamManager {
   private clients = new Map<string, Client>();
   private transports = new Map<string, Transport>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
+  private unqualifiedToolMap = new Map<string, { server: string; tool: Tool } | null>();
   private exposedToolsByServer = new Map<string, Set<string>>();
   private failedConnections: UpstreamConnectionFailure[] = [];
   private serverInfoMap = new Map<string, ServerInfo>();
@@ -111,6 +112,7 @@ export class UpstreamManager {
     this.clients.clear();
     this.transports.clear();
     this.toolMap.clear();
+    this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();
@@ -312,6 +314,7 @@ export class UpstreamManager {
           ? `${name}__${tool.name}`
           : tool.name;
         this.toolMap.set(qualifiedName, { server: name, tool });
+        this.indexUnqualifiedTool(name, tool);
       }
 
       client.onclose = () => {
@@ -389,6 +392,19 @@ export class UpstreamManager {
     return errorResult("tool_resolution_failed", message);
   }
 
+  private indexUnqualifiedTool(server: string, tool: Tool): void {
+    const existing = this.unqualifiedToolMap.get(tool.name);
+    if (existing === undefined) {
+      this.unqualifiedToolMap.set(tool.name, { server, tool });
+      return;
+    }
+
+    if (existing === null) return;
+    if (existing.server !== server) {
+      this.unqualifiedToolMap.set(tool.name, null);
+    }
+  }
+
   resolveServer(
     toolName: string,
     serverHint?: string
@@ -425,19 +441,39 @@ export class UpstreamManager {
       return { client, actualName: entry.tool.name };
     }
 
-    const matches = Array.from(this.toolMap.values()).filter(
-      ({ tool }) => tool.name === toolName
-    );
+    const unqualified = this.unqualifiedToolMap.get(toolName);
+    if (unqualified === undefined) {
+      // Legacy fallback for harnesses that mutate toolMap directly in tests or integrations.
+      const matches = Array.from(this.toolMap.values()).filter(
+        ({ tool }) => tool.name === toolName
+      );
 
-    if (matches.length === 1) {
-      const match = matches[0];
-      const client = this.clients.get(match.server);
+      if (matches.length === 1) {
+        const match = matches[0];
+        const client = this.clients.get(match.server);
+        if (client) {
+          return { client, actualName: match.tool.name };
+        }
+      }
+
+      if (matches.length > 1) {
+        return {
+          error: this.resolutionError(
+            `tool "${toolName}" is ambiguous across multiple servers; specify "server" or use a qualified tool name`
+          ),
+        };
+      }
+      return null;
+    }
+
+    if (unqualified && unqualified !== null) {
+      const client = this.clients.get(unqualified.server);
       if (client) {
-        return { client, actualName: match.tool.name };
+        return { client, actualName: unqualified.tool.name };
       }
     }
 
-    if (matches.length > 1) {
+    if (unqualified === null) {
       return {
         error: this.resolutionError(
           `tool "${toolName}" is ambiguous across multiple servers; specify "server" or use a qualified tool name`
@@ -530,6 +566,7 @@ export class UpstreamManager {
     this.clients.clear();
     this.transports.clear();
     this.toolMap.clear();
+    this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();

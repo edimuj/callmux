@@ -1360,6 +1360,57 @@ test("UpstreamManager connect resets prior clients and tool mappings", async () 
   });
 });
 
+test("UpstreamManager reconnect rebuilds unqualified tool resolution index", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const toolName =
+      "command" in config && config.command === "shared"
+        ? "shared_tool"
+        : `${name}_tool`;
+    const tool = mockTool(toolName);
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult(`${name}:${toolName}`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({
+    alpha: { command: "shared" },
+    beta: { command: "shared" },
+  });
+
+  const ambiguous = await upstream.callTool("shared_tool");
+  assert.equal(ambiguous.isError, true);
+  assert.deepEqual(ambiguous.structuredContent, {
+    error: {
+      code: "tool_resolution_failed",
+      message:
+        'tool "shared_tool" is ambiguous across multiple servers; specify "server" or use a qualified tool name',
+    },
+  });
+
+  await upstream.connect({
+    gamma: { command: "shared" },
+  });
+
+  const resolved = await upstream.callTool("shared_tool");
+  assert.equal(resolved.isError, undefined);
+  assert.deepEqual(resolved.content, [{ type: "text", text: "gamma:shared_tool" }]);
+});
+
 test("UpstreamManager call timeout returns a structured tool error", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
