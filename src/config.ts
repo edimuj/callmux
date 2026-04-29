@@ -11,6 +11,15 @@ import type {
 } from "./types.js";
 import { parseScryptTokenHash } from "./auth.js";
 
+const SUPPORTED_OIDC_JWT_ALGORITHMS = new Set([
+  "RS256",
+  "RS384",
+  "RS512",
+  "ES256",
+  "ES384",
+  "ES512",
+]);
+
 function parseNonNegativeInteger(value: unknown, optionName: string): number {
   if (!Number.isInteger(value) || (value as number) < 0) {
     throw new Error(`${optionName} must be a non-negative integer`);
@@ -116,85 +125,172 @@ function parseCachePolicy(
   };
 }
 
+function parseBooleanOption(
+  value: unknown,
+  optionName: string
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${optionName} must be a boolean`);
+  }
+  return value;
+}
+
+function parseAuthAllowUnauthenticatedHealth(
+  value: unknown,
+  optionName: string
+): boolean | undefined {
+  return parseBooleanOption(value, `${optionName}.allowUnauthenticatedHealth`);
+}
+
 function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
     throw new Error(`${optionName} must be an object`);
   }
 
-  if (value.mode !== "bearer") {
-    throw new Error(`${optionName}.mode must be "bearer"`);
-  }
-
-  if (!Array.isArray(value.tokens)) {
-    throw new Error(`${optionName}.tokens must be an array`);
-  }
-
-  if (value.tokens.length === 0) {
-    throw new Error(`${optionName}.tokens must contain at least one token`);
-  }
-
-  const tokens = value.tokens.map((token, index): BearerAuthTokenConfig => {
-    if (!isRecord(token)) {
-      throw new Error(`${optionName}.tokens[${index}] must be an object`);
-    }
-    if (typeof token.id !== "string" || token.id.trim().length === 0) {
-      throw new Error(`${optionName}.tokens[${index}].id must be a non-empty string`);
+  if (value.mode === "bearer") {
+    if (!Array.isArray(value.tokens)) {
+      throw new Error(`${optionName}.tokens must be an array`);
     }
 
-    const hasToken = token.token !== undefined;
-    const hasHash = token.hash !== undefined;
-    if (hasToken && hasHash) {
-      throw new Error(
-        `${optionName}.tokens[${index}] cannot include both "token" and "hash"`
-      );
-    }
-    if (!hasToken && !hasHash) {
-      throw new Error(
-        `${optionName}.tokens[${index}] must include either "hash" or legacy "token"`
-      );
+    if (value.tokens.length === 0) {
+      throw new Error(`${optionName}.tokens must contain at least one token`);
     }
 
-    if (hasHash) {
-      if (typeof token.hash !== "string" || token.hash.length === 0) {
-        throw new Error(`${optionName}.tokens[${index}].hash must be a non-empty string`);
+    const tokens = value.tokens.map((token, index): BearerAuthTokenConfig => {
+      if (!isRecord(token)) {
+        throw new Error(`${optionName}.tokens[${index}] must be an object`);
       }
-      if (!parseScryptTokenHash(token.hash)) {
+      if (typeof token.id !== "string" || token.id.trim().length === 0) {
+        throw new Error(`${optionName}.tokens[${index}].id must be a non-empty string`);
+      }
+
+      const hasToken = token.token !== undefined;
+      const hasHash = token.hash !== undefined;
+      if (hasToken && hasHash) {
         throw new Error(
-          `${optionName}.tokens[${index}].hash must be a valid scrypt hash`
+          `${optionName}.tokens[${index}] cannot include both "token" and "hash"`
         );
+      }
+      if (!hasToken && !hasHash) {
+        throw new Error(
+          `${optionName}.tokens[${index}] must include either "hash" or legacy "token"`
+        );
+      }
+
+      if (hasHash) {
+        if (typeof token.hash !== "string" || token.hash.length === 0) {
+          throw new Error(`${optionName}.tokens[${index}].hash must be a non-empty string`);
+        }
+        if (!parseScryptTokenHash(token.hash)) {
+          throw new Error(
+            `${optionName}.tokens[${index}].hash must be a valid scrypt hash`
+          );
+        }
+        return {
+          id: token.id,
+          hash: token.hash,
+        };
+      }
+
+      if (typeof token.token !== "string" || token.token.length === 0) {
+        throw new Error(`${optionName}.tokens[${index}].token must be a non-empty string`);
       }
       return {
         id: token.id,
-        hash: token.hash,
+        token: token.token,
       };
-    }
+    });
 
-    if (typeof token.token !== "string" || token.token.length === 0) {
-      throw new Error(`${optionName}.tokens[${index}].token must be a non-empty string`);
-    }
+    const allowUnauthenticatedHealth = parseAuthAllowUnauthenticatedHealth(
+      value.allowUnauthenticatedHealth,
+      optionName
+    );
+
     return {
-      id: token.id,
-      token: token.token,
+      mode: "bearer",
+      tokens,
+      ...(allowUnauthenticatedHealth !== undefined
+        ? { allowUnauthenticatedHealth }
+        : {}),
     };
-  });
+  }
 
-  const allowUnauthenticatedHealth =
-    value.allowUnauthenticatedHealth === undefined
-      ? undefined
-      : typeof value.allowUnauthenticatedHealth === "boolean"
-        ? value.allowUnauthenticatedHealth
-        : (() => {
-            throw new Error(`${optionName}.allowUnauthenticatedHealth must be a boolean`);
-          })();
+  if (value.mode === "oidc_jwt") {
+    if (typeof value.issuer !== "string" || value.issuer.trim().length === 0) {
+      throw new Error(`${optionName}.issuer must be a non-empty string`);
+    }
+    if (typeof value.jwksUri !== "string" || value.jwksUri.trim().length === 0) {
+      throw new Error(`${optionName}.jwksUri must be a non-empty string`);
+    }
 
-  return {
-    mode: "bearer",
-    tokens,
-    ...(allowUnauthenticatedHealth !== undefined
-      ? { allowUnauthenticatedHealth }
-      : {}),
-  };
+    const audience = (() => {
+      if (typeof value.audience === "string" && value.audience.trim().length > 0) {
+        return value.audience;
+      }
+      if (
+        Array.isArray(value.audience) &&
+        value.audience.length > 0 &&
+        value.audience.every(
+          (entry) => typeof entry === "string" && entry.trim().length > 0
+        )
+      ) {
+        return value.audience as string[];
+      }
+      throw new Error(
+        `${optionName}.audience must be a non-empty string or non-empty string array`
+      );
+    })();
+
+    const algorithms = parseStringArray(value.algorithms, `${optionName}.algorithms`);
+    if (
+      algorithms &&
+      !algorithms.every((algorithm) => SUPPORTED_OIDC_JWT_ALGORITHMS.has(algorithm))
+    ) {
+      throw new Error(
+        `${optionName}.algorithms must contain only RS256, RS384, RS512, ES256, ES384, or ES512`
+      );
+    }
+    const allowUnauthenticatedHealth = parseAuthAllowUnauthenticatedHealth(
+      value.allowUnauthenticatedHealth,
+      optionName
+    );
+    const clockSkewSeconds =
+      value.clockSkewSeconds === undefined
+        ? undefined
+        : parseNonNegativeInteger(value.clockSkewSeconds, `${optionName}.clockSkewSeconds`);
+    const jwksCacheTtlSeconds =
+      value.jwksCacheTtlSeconds === undefined
+        ? undefined
+        : parseNonNegativeInteger(
+            value.jwksCacheTtlSeconds,
+            `${optionName}.jwksCacheTtlSeconds`
+          );
+    const jwksFetchTimeoutMs =
+      value.jwksFetchTimeoutMs === undefined
+        ? undefined
+        : parsePositiveInteger(
+            value.jwksFetchTimeoutMs,
+            `${optionName}.jwksFetchTimeoutMs`
+          );
+
+    return {
+      mode: "oidc_jwt",
+      issuer: value.issuer,
+      audience,
+      jwksUri: value.jwksUri,
+      ...(algorithms ? { algorithms } : {}),
+      ...(clockSkewSeconds !== undefined ? { clockSkewSeconds } : {}),
+      ...(jwksCacheTtlSeconds !== undefined ? { jwksCacheTtlSeconds } : {}),
+      ...(jwksFetchTimeoutMs !== undefined ? { jwksFetchTimeoutMs } : {}),
+      ...(allowUnauthenticatedHealth !== undefined
+        ? { allowUnauthenticatedHealth }
+        : {}),
+    };
+  }
+
+  throw new Error(`${optionName}.mode must be "bearer" or "oidc_jwt"`);
 }
 
 function parseServerConfig(value: unknown, serverName: string): ServerConfig {

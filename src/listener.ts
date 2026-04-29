@@ -22,6 +22,7 @@ import {
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
 import { verifyBearerToken } from "./auth.js";
+import { OidcJwtVerifier } from "./oidc.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
@@ -49,6 +50,7 @@ export class CallmuxListener {
   private allowRequestBodyMaxOverride: boolean;
   private preReadMaxBytes: number | undefined;
   private authConfig: CallmuxConfig["auth"];
+  private oidcVerifier: OidcJwtVerifier | undefined;
 
   constructor(options: ListenerOptions) {
     this.options = options;
@@ -57,6 +59,9 @@ export class CallmuxListener {
       options.config.requestBodyMaxBytes ?? DEFAULT_REQUEST_BODY_MAX_BYTES;
     this.allowRequestBodyMaxOverride =
       options.config.allowRequestBodyMaxOverride ?? false;
+    if (this.authConfig?.mode === "oidc_jwt") {
+      this.oidcVerifier = new OidcJwtVerifier(this.authConfig);
+    }
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture();
   }
@@ -98,7 +103,7 @@ export class CallmuxListener {
     const path = url.pathname;
 
     try {
-      if (!this.isAuthorized(req, path)) {
+      if (!(await this.isAuthorized(req, path))) {
         this.writeUnauthorized(res);
         return;
       }
@@ -296,7 +301,7 @@ export class CallmuxListener {
     }
   }
 
-  private isAuthorized(req: IncomingMessage, path: string): boolean {
+  private async isAuthorized(req: IncomingMessage, path: string): Promise<boolean> {
     const auth = this.authConfig;
     if (!auth) return true;
 
@@ -309,7 +314,12 @@ export class CallmuxListener {
     const token = parseBearerToken(rawAuthorization);
     if (!token) return false;
 
-    return auth.tokens.some((candidate) => verifyBearerToken(token, candidate));
+    if (auth.mode === "bearer") {
+      return auth.tokens.some((candidate) => verifyBearerToken(token, candidate));
+    }
+
+    if (!this.oidcVerifier) return false;
+    return this.oidcVerifier.verify(token);
   }
 
   private writeUnauthorized(res: ServerResponse): void {

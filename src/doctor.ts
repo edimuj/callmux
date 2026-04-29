@@ -225,7 +225,24 @@ function collectSecurityIssues(config: CallmuxConfig): string[] {
   }
 
   const auth = config.auth;
-  if (!auth || auth.mode !== "bearer") return issues;
+  if (!auth) return issues;
+
+  if (auth.mode === "oidc_jwt") {
+    const normalizedIssuer = auth.issuer.trim();
+    if (!normalizedIssuer.startsWith("https://")) {
+      issues.push(`auth.issuer should use https:// in production ("${auth.issuer}")`);
+    }
+
+    if (!isLocalUrl(auth.jwksUri) && !auth.jwksUri.startsWith("https://")) {
+      issues.push(`auth.jwksUri should use https:// in production ("${auth.jwksUri}")`);
+    }
+
+    if ((auth.algorithms ?? []).includes("none")) {
+      issues.push(`auth.algorithms must not include "none"`);
+    }
+
+    return issues;
+  }
 
   const tokenIds = new Set<string>();
   for (const token of auth.tokens) {
@@ -247,6 +264,16 @@ function collectSecurityIssues(config: CallmuxConfig): string[] {
   }
 
   return issues;
+}
+
+function isLocalUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
 }
 
 export function createDoctorFailureReport(

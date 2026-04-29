@@ -378,6 +378,13 @@ node --input-type=module -e 'import { scryptSync, randomBytes } from "node:crypt
 
 `callmux doctor` now flags plaintext `auth.tokens[].token` values so you can migrate safely.
 
+Listener auth also supports OIDC JWT validation:
+
+- `auth.mode = "oidc_jwt"`
+- `auth.issuer` and `auth.audience` claims are validated
+- signatures are verified via `auth.jwksUri`
+- optional controls: `auth.algorithms`, `auth.clockSkewSeconds`, `auth.jwksCacheTtlSeconds`, `auth.jwksFetchTimeoutMs`
+
 When binding `--listen` to a non-loopback host, callmux now fails startup if auth is missing unless `allowInsecureRemoteListener=true` (or `--allow-insecure-remote-listener`) is explicitly set.
 
 **Inline mode** for a single remote server:
@@ -650,10 +657,26 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 
 **Auth config** (listener mode):
 
+Bearer mode:
+
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `mode` | string | yes | Must be `"bearer"` |
 | `tokens` | object[] | yes | Accepted bearer tokens (`id` + `hash` recommended, legacy `token` supported for migration) |
+| `allowUnauthenticatedHealth` | boolean | — | Allow `/health` without auth |
+
+OIDC JWT mode:
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `mode` | string | yes | Must be `"oidc_jwt"` |
+| `issuer` | string | yes | Required `iss` claim value |
+| `audience` | string \| string[] | yes | Allowed `aud` claim value(s) |
+| `jwksUri` | string | yes | JWKS endpoint for signature verification |
+| `algorithms` | string[] | — | Allowed algorithms (`RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`), default `RS256` |
+| `clockSkewSeconds` | integer | — | `exp`/`nbf` clock-skew tolerance (default `30`) |
+| `jwksCacheTtlSeconds` | integer | — | JWKS cache TTL (default `300`) |
+| `jwksFetchTimeoutMs` | integer | — | JWKS fetch timeout (default `5000`) |
 | `allowUnauthenticatedHealth` | boolean | — | Allow `/health` without auth |
 
 </details>

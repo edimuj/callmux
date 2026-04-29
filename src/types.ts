@@ -74,7 +74,27 @@ export interface BearerAuthConfig {
   allowUnauthenticatedHealth?: boolean;
 }
 
-export type AuthConfig = BearerAuthConfig;
+export interface OidcJwtAuthConfig {
+  mode: "oidc_jwt";
+  /** Expected issuer claim (`iss`) */
+  issuer: string;
+  /** Expected audience claim (`aud`) */
+  audience: string | string[];
+  /** JWKS endpoint URL used for signature verification */
+  jwksUri: string;
+  /** Allowed JWT signature algorithms (default: ["RS256"]) */
+  algorithms?: string[];
+  /** Clock skew tolerance in seconds for exp/nbf checks (default: 30) */
+  clockSkewSeconds?: number;
+  /** JWKS cache TTL in seconds (default: 300) */
+  jwksCacheTtlSeconds?: number;
+  /** JWKS fetch timeout in milliseconds (default: 5000) */
+  jwksFetchTimeoutMs?: number;
+  /** Allow unauthenticated access to /health */
+  allowUnauthenticatedHealth?: boolean;
+}
+
+export type AuthConfig = BearerAuthConfig | OidcJwtAuthConfig;
 
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */

@@ -153,6 +153,20 @@ Config file format:
     "strictStartup": false
   }
 
+Auth modes:
+  bearer:
+    "auth": {
+      "mode": "bearer",
+      "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }]
+    }
+  oidc_jwt:
+    "auth": {
+      "mode": "oidc_jwt",
+      "issuer": "https://id.example.com",
+      "audience": "callmux",
+      "jwksUri": "https://id.example.com/.well-known/jwks.json"
+    }
+
 Also accepts MCP-compatible format:
   { "mcpServers": { ... } }
 

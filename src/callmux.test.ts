@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createSign, generateKeyPairSync } from "node:crypto";
 import { CallCache } from "./cache.js";
 import {
   configFromArgs,
@@ -62,6 +64,79 @@ function fakeMcpServer(
     env: {
       FAKE_MCP_NAME: name,
       ...env,
+    },
+  };
+}
+
+interface JwtKeyPair {
+  privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"];
+  jwk: Record<string, unknown>;
+}
+
+function createJwtKeyPair(kid: string): JwtKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const exported = publicKey.export({ format: "jwk" }) as Record<string, unknown>;
+  return {
+    privateKey,
+    jwk: {
+      ...exported,
+      kid,
+      use: "sig",
+      alg: "RS256",
+    },
+  };
+}
+
+function encodeBase64UrlJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value), "utf-8").toString("base64url");
+}
+
+function signJwtRs256(
+  key: JwtKeyPair,
+  payload: Record<string, unknown>
+): string {
+  const header = encodeBase64UrlJson({ alg: "RS256", typ: "JWT", kid: key.jwk.kid as string });
+  const payloadSegment = encodeBase64UrlJson(payload);
+  const signingInput = `${header}.${payloadSegment}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer.sign(key.privateKey).toString("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+async function startJwksServer(initialKeys: Record<string, unknown>[]): Promise<{
+  url: string;
+  setKeys: (keys: Record<string, unknown>[]) => void;
+  close: () => Promise<void>;
+}> {
+  let keys = initialKeys;
+  const server = createServer((_req: IncomingMessage, res: ServerResponse) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ keys }));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.once("error", reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to bind JWKS test server");
+  }
+
+  return {
+    url: `http://127.0.0.1:${address.port}/jwks`,
+    setKeys(nextKeys: Record<string, unknown>[]) {
+      keys = nextKeys;
+    },
+    close() {
+      return new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     },
   };
 }
@@ -1039,6 +1114,25 @@ test("runDoctor flags insecure plaintext auth tokens", async () => {
 
   assert.equal(report.ok, false);
   assert.match(report.issues[0], /plaintext token/);
+});
+
+test("runDoctor flags insecure oidc_jwt endpoints", async () => {
+  const report = await runDoctor("/tmp/callmux.json", {
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer: "http://id.example.com",
+        audience: "callmux",
+        jwksUri: "http://id.example.com/jwks.json",
+      },
+    },
+    format: "native",
+  });
+
+  assert.equal(report.ok, false);
+  assert.ok(report.issues.some((issue) => issue.includes("auth.issuer should use https://")));
+  assert.ok(report.issues.some((issue) => issue.includes("auth.jwksUri should use https://")));
 });
 
 test("runServerTest reports missing executables cleanly", async () => {
@@ -2175,6 +2269,46 @@ test("loadConfig parses legacy plaintext bearer auth config", async () => {
   }
 });
 
+test("loadConfig parses oidc_jwt auth config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-oidc-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "oidc_jwt",
+          issuer: "https://id.example.com",
+          audience: ["callmux", "agents"],
+          jwksUri: "https://id.example.com/jwks.json",
+          algorithms: ["RS256"],
+          clockSkewSeconds: 45,
+          jwksCacheTtlSeconds: 120,
+          jwksFetchTimeoutMs: 3500,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.auth, {
+      mode: "oidc_jwt",
+      issuer: "https://id.example.com",
+      audience: ["callmux", "agents"],
+      jwksUri: "https://id.example.com/jwks.json",
+      algorithms: ["RS256"],
+      clockSkewSeconds: 45,
+      jwksCacheTtlSeconds: 120,
+      jwksFetchTimeoutMs: 3500,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid bearer auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-"));
   const configPath = join(dir, "config.json");
@@ -2194,6 +2328,36 @@ test("loadConfig rejects invalid bearer auth config", async () => {
     );
 
     await assert.rejects(loadConfig(configPath), /auth\.tokens must contain at least one token/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects oidc_jwt auth with unsupported algorithms", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-oidc-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "oidc_jwt",
+          issuer: "https://id.example.com",
+          audience: "callmux",
+          jwksUri: "https://id.example.com/jwks.json",
+          algorithms: ["HS256"],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /auth\.algorithms must contain only RS256, RS384, RS512, ES256, ES384, or ES512/
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -3043,6 +3207,218 @@ test("listener accepts hashed bearer auth tokens", async () => {
     assert.equal(authorized.status, 200);
   } finally {
     await listener.close();
+  }
+});
+
+test("listener accepts valid oidc_jwt bearer tokens", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const key = createJwtKeyPair("kid-1");
+  const jwks = await startJwksServer([key.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const token = signJwtRs256(key, {
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+    nbf: nowSeconds - 30,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(authorized.status, 200);
+  } finally {
+    await listener.close();
+    await jwks.close();
+  }
+});
+
+test("listener rejects oidc_jwt token with invalid signature", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const trusted = createJwtKeyPair("kid-1");
+  const untrusted = createJwtKeyPair("kid-1");
+  const jwks = await startJwksServer([trusted.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const badToken = signJwtRs256(untrusted, {
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${badToken}` },
+    });
+    assert.equal(unauthorized.status, 401);
+  } finally {
+    await listener.close();
+    await jwks.close();
+  }
+});
+
+test("listener rejects expired oidc_jwt token", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const key = createJwtKeyPair("kid-1");
+  const jwks = await startJwksServer([key.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+        clockSkewSeconds: 0,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const expiredToken = signJwtRs256(key, {
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds - 5,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${expiredToken}` },
+    });
+    assert.equal(unauthorized.status, 401);
+  } finally {
+    await listener.close();
+    await jwks.close();
+  }
+});
+
+test("listener refreshes JWKS on kid rotation for oidc_jwt tokens", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const keyOne = createJwtKeyPair("kid-old");
+  const keyTwo = createJwtKeyPair("kid-new");
+  const jwks = await startJwksServer([keyOne.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+        jwksCacheTtlSeconds: 3600,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const tokenOne = signJwtRs256(keyOne, {
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+  });
+  const tokenTwo = signJwtRs256(keyTwo, {
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const first = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${tokenOne}` },
+    });
+    assert.equal(first.status, 200);
+
+    jwks.setKeys([keyTwo.jwk]);
+
+    const second = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${tokenTwo}` },
+    });
+    assert.equal(second.status, 200);
+  } finally {
+    await listener.close();
+    await jwks.close();
   }
 });
 
