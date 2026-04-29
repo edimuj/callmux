@@ -114,6 +114,17 @@ export interface AuthorizationConfig {
   rules: AuthorizationRuleConfig[];
 }
 
+export interface AbuseControlsConfig {
+  /** Max total requests per minute across all principals */
+  globalRequestsPerMinute?: number;
+  /** Max requests per minute for each principal */
+  principalRequestsPerMinute?: number;
+  /** Max concurrent in-flight requests per principal */
+  principalMaxInFlight?: number;
+  /** Optional source IP allowlist (CIDR or exact IP entries) */
+  cidrAllowlist?: string[];
+}
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -143,6 +154,8 @@ export interface CallmuxConfig {
   auth?: AuthConfig;
   /** Listener authorization policy configuration */
   authorization?: AuthorizationConfig;
+  /** Listener abuse controls */
+  abuseControls?: AbuseControlsConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */
   allowInsecureRemoteListener?: boolean;
 }

@@ -2411,6 +2411,38 @@ test("loadConfig parses authorization policy config", async () => {
   }
 });
 
+test("loadConfig parses abuse controls config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-abuse-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        abuseControls: {
+          globalRequestsPerMinute: 1000,
+          principalRequestsPerMinute: 100,
+          principalMaxInFlight: 10,
+          cidrAllowlist: ["127.0.0.1/32", "::1/128"],
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.abuseControls, {
+      globalRequestsPerMinute: 1000,
+      principalRequestsPerMinute: 100,
+      principalMaxInFlight: 10,
+      cidrAllowlist: ["127.0.0.1/32", "::1/128"],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid bearer auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-"));
   const configPath = join(dir, "config.json");
@@ -2485,6 +2517,32 @@ test("loadConfig rejects authorization policy with empty rules", async () => {
     await assert.rejects(
       loadConfig(configPath),
       /authorization\.rules must contain at least one rule/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects abuse controls with invalid CIDR entries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-abuse-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        abuseControls: {
+          cidrAllowlist: ["not-a-cidr"],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /abuseControls\.cidrAllowlist entries must be valid CIDR or IP values/
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -3802,6 +3860,211 @@ test("listener enforces authorization policy for direct and meta-routed tool cal
     assert.equal(allowedDirect.status, 200);
     const allowedDirectBody = await parseMcpResponseBody(allowedDirect);
     assert.equal(allowedDirectBody.result.isError, undefined);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener enforces global abuse rate limit", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      abuseControls: {
+        globalRequestsPerMinute: 1,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const first = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(first.status, 400);
+
+    const second = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 2 }),
+    });
+    assert.equal(second.status, 429);
+    assert.equal(second.headers.get("retry-after"), "60");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener enforces principal abuse rate limit independently per principal", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [
+          { id: "ops", token: "ops-secret" },
+          { id: "viewer", token: "viewer-secret" },
+        ],
+      },
+      abuseControls: {
+        principalRequestsPerMinute: 1,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const request = (token: string, id: number) =>
+      fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id }),
+      });
+
+    const firstOps = await request("ops-secret", 1);
+    assert.equal(firstOps.status, 400);
+
+    const secondOps = await request("ops-secret", 2);
+    assert.equal(secondOps.status, 429);
+
+    const viewer = await request("viewer-secret", 3);
+    assert.equal(viewer.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener enforces source IP CIDR allowlist", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const deniedListener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      abuseControls: {
+        cidrAllowlist: ["10.0.0.0/8"],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const deniedPort = 19876 + Math.floor(Math.random() * 1000);
+  (deniedListener as any).options.port = deniedPort;
+  await deniedListener.start();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${deniedPort}/health`);
+    assert.equal(denied.status, 403);
+  } finally {
+    await deniedListener.close();
+  }
+
+  const allowedListener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      abuseControls: {
+        cidrAllowlist: ["127.0.0.1/32"],
+      },
+    },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const allowedPort = 19876 + Math.floor(Math.random() * 1000);
+  (allowedListener as any).options.port = allowedPort;
+  await allowedListener.start();
+  try {
+    const allowed = await fetch(`http://127.0.0.1:${allowedPort}/health`);
+    assert.equal(allowed.status, 200);
+  } finally {
+    await allowedListener.close();
+  }
+});
+
+test("listener enforces principal in-flight abuse limit with backpressure", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "ops-secret" }],
+      },
+      abuseControls: {
+        principalMaxInFlight: 1,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const controller = new AbortController();
+    const first = await fetch(`http://127.0.0.1:${port}/sse`, {
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: "Bearer ops-secret",
+      },
+      signal: controller.signal,
+    });
+    assert.equal(first.status, 200);
+
+    const second = await fetch(`http://127.0.0.1:${port}/sse`, {
+      headers: {
+        Accept: "text/event-stream",
+        Authorization: "Bearer ops-secret",
+      },
+    });
+    assert.equal(second.status, 429);
+
+    controller.abort();
   } finally {
     await listener.close();
   }

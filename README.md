@@ -620,6 +620,12 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
       }
     ]
   },
+  "abuseControls": {
+    "globalRequestsPerMinute": 1200,
+    "principalRequestsPerMinute": 240,
+    "principalMaxInFlight": 20,
+    "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
+  },
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
@@ -643,6 +649,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
 | `auth` | object | — | Listener authentication config (hashed bearer tokens) |
 | `authorization` | object | — | Listener authorization policy (principal + tool rules) |
+| `abuseControls` | object | — | Listener abuse controls (rate limits, in-flight caps, CIDR allowlist) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -714,6 +721,17 @@ Authorization rule fields:
 | `tools` | string[] | — | Tool patterns (supports wildcards, including `server__tool` patterns like `github__get_*`) |
 
 If `authorization` is configured, request auth (`auth`) should also be configured so policy can evaluate an authenticated principal.
+
+**Abuse controls** (listener mode):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `globalRequestsPerMinute` | integer | — | Max total requests per minute |
+| `principalRequestsPerMinute` | integer | — | Max requests per minute per principal |
+| `principalMaxInFlight` | integer | — | Max concurrent in-flight requests per principal |
+| `cidrAllowlist` | string[] | — | Allowed source CIDR/IP list (`127.0.0.1/32`, `10.0.0.0/8`, `::1/128`) |
+
+When limits are hit, listener endpoints return `429` with `Retry-After` (when rate-window retry is known).
 
 </details>
 

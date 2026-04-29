@@ -2,6 +2,7 @@ import { readFile, access, mkdir, writeFile } from "node:fs/promises";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
+  AbuseControlsConfig,
   AuthConfig,
   AuthorizationConfig,
   AuthorizationRuleConfig,
@@ -12,6 +13,7 @@ import type {
   ServerConfig,
 } from "./types.js";
 import { parseScryptTokenHash } from "./auth.js";
+import { isValidCidrOrIp } from "./abuse.js";
 
 const SUPPORTED_OIDC_JWT_ALGORITHMS = new Set([
   "RS256",
@@ -211,6 +213,67 @@ function parseAuthorizationConfig(
   return {
     ...(defaultEffect ? { defaultEffect } : {}),
     rules,
+  };
+}
+
+function parseAbuseControlsConfig(
+  value: unknown,
+  optionName: string
+): AbuseControlsConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const globalRequestsPerMinute =
+    value.globalRequestsPerMinute === undefined
+      ? undefined
+      : parsePositiveInteger(
+          value.globalRequestsPerMinute,
+          `${optionName}.globalRequestsPerMinute`
+        );
+  const principalRequestsPerMinute =
+    value.principalRequestsPerMinute === undefined
+      ? undefined
+      : parsePositiveInteger(
+          value.principalRequestsPerMinute,
+          `${optionName}.principalRequestsPerMinute`
+        );
+  const principalMaxInFlight =
+    value.principalMaxInFlight === undefined
+      ? undefined
+      : parsePositiveInteger(
+          value.principalMaxInFlight,
+          `${optionName}.principalMaxInFlight`
+        );
+  const cidrAllowlist = parseStringArray(
+    value.cidrAllowlist,
+    `${optionName}.cidrAllowlist`
+  );
+  if (cidrAllowlist && !cidrAllowlist.every((entry) => isValidCidrOrIp(entry))) {
+    throw new Error(
+      `${optionName}.cidrAllowlist entries must be valid CIDR or IP values`
+    );
+  }
+
+  if (
+    globalRequestsPerMinute === undefined &&
+    principalRequestsPerMinute === undefined &&
+    principalMaxInFlight === undefined &&
+    cidrAllowlist === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(globalRequestsPerMinute !== undefined
+      ? { globalRequestsPerMinute }
+      : {}),
+    ...(principalRequestsPerMinute !== undefined
+      ? { principalRequestsPerMinute }
+      : {}),
+    ...(principalMaxInFlight !== undefined ? { principalMaxInFlight } : {}),
+    ...(cidrAllowlist ? { cidrAllowlist } : {}),
   };
 }
 
@@ -466,6 +529,10 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
       parsed.authorization,
       "authorization"
     );
+    const abuseControls = parseAbuseControlsConfig(
+      parsed.abuseControls,
+      "abuseControls"
+    );
     return {
       cacheTtlSeconds:
         parsed.cacheTtlSeconds === undefined
@@ -544,6 +611,7 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
         : {}),
       ...(auth ? { auth } : {}),
       ...(authorization ? { authorization } : {}),
+      ...(abuseControls ? { abuseControls } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {
             allowInsecureRemoteListener:

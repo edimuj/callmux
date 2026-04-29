@@ -29,6 +29,7 @@ import {
   type AuthorizationPrincipal,
 } from "./authorization.js";
 import { errorResult } from "./results.js";
+import { AbuseController } from "./abuse.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
@@ -58,6 +59,7 @@ export class CallmuxListener {
   private authConfig: CallmuxConfig["auth"];
   private oidcVerifier: OidcJwtVerifier | undefined;
   private authzContext = new AsyncLocalStorage<AuthorizationPrincipal | undefined>();
+  private abuseController: AbuseController | undefined;
 
   constructor(options: ListenerOptions) {
     this.options = options;
@@ -68,6 +70,9 @@ export class CallmuxListener {
       options.config.allowRequestBodyMaxOverride ?? false;
     if (this.authConfig?.mode === "oidc_jwt") {
       this.oidcVerifier = new OidcJwtVerifier(this.authConfig);
+    }
+    if (options.config.abuseControls) {
+      this.abuseController = new AbuseController(options.config.abuseControls);
     }
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture();
@@ -114,6 +119,24 @@ export class CallmuxListener {
       if (principal === null) {
         this.writeUnauthorized(res);
         return;
+      }
+
+      if (!this.isSourceIpAllowed(req)) {
+        this.writeForbidden(res, "Source IP is not allowed");
+        return;
+      }
+
+      const abuseLease = this.acquireAbuseLease(req, path, principal);
+      if (!abuseLease.allowed) {
+        this.writeTooManyRequests(
+          res,
+          abuseLease.reason,
+          abuseLease.retryAfterSeconds
+        );
+        return;
+      }
+      if (abuseLease.release) {
+        this.attachLeaseRelease(res, abuseLease.release);
       }
 
       await this.authzContext.run(principal ?? undefined, async () => {
@@ -461,6 +484,82 @@ export class CallmuxListener {
       "WWW-Authenticate": 'Bearer realm="callmux"',
     });
     res.end(JSON.stringify({ error: "Unauthorized" }));
+  }
+
+  private writeForbidden(res: ServerResponse, message: string): void {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: message }));
+  }
+
+  private writeTooManyRequests(
+    res: ServerResponse,
+    message: string,
+    retryAfterSeconds?: number
+  ): void {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (retryAfterSeconds !== undefined) {
+      headers["Retry-After"] = String(retryAfterSeconds);
+    }
+    res.writeHead(429, headers);
+    res.end(
+      JSON.stringify({
+        error: "Too many requests",
+        reason: message,
+      })
+    );
+  }
+
+  private isSourceIpAllowed(req: IncomingMessage): boolean {
+    if (!this.abuseController) return true;
+    const remoteAddress = req.socket.remoteAddress;
+    return this.abuseController.isIpAllowed(remoteAddress);
+  }
+
+  private acquireAbuseLease(
+    req: IncomingMessage,
+    path: string,
+    principal: AuthorizationPrincipal | undefined
+  ): {
+    allowed: boolean;
+    reason: string;
+    retryAfterSeconds?: number;
+    release?: () => void;
+  } {
+    if (!this.abuseController) {
+      return { allowed: true, reason: "No abuse controller configured" };
+    }
+
+    const method = (req.method ?? "GET").toUpperCase();
+    const shouldApply =
+      (path === "/mcp" && method === "POST") ||
+      (path === "/messages" && method === "POST") ||
+      (path === "/sse" && method === "GET");
+    if (!shouldApply) {
+      return { allowed: true, reason: "Endpoint excluded from abuse controls" };
+    }
+
+    const { result, lease } = this.abuseController.acquire(principal);
+    return {
+      allowed: result.allowed,
+      reason: result.reason,
+      ...(result.retryAfterSeconds !== undefined
+        ? { retryAfterSeconds: result.retryAfterSeconds }
+        : {}),
+      ...(lease ? { release: lease.release } : {}),
+    };
+  }
+
+  private attachLeaseRelease(res: ServerResponse, release: () => void): void {
+    let released = false;
+    const releaseOnce = () => {
+      if (released) return;
+      released = true;
+      release();
+    };
+    res.once("finish", releaseOnce);
+    res.once("close", releaseOnce);
   }
 
   private computePreReadMaxBytes(): number | undefined {

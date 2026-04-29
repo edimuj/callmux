@@ -156,6 +156,12 @@ Config file format:
         { "id": "ops", "effect": "allow", "principals": ["bearer:ops"], "tools": ["*"] }
       ]
     },
+    "abuseControls": {
+      "globalRequestsPerMinute": 1200,
+      "principalRequestsPerMinute": 240,
+      "principalMaxInFlight": 20,
+      "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
+    },
     "strictStartup": false
   }
 

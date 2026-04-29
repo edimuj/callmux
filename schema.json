@@ -88,6 +88,7 @@
     },
     "auth": { "$ref": "#/$defs/authConfig" },
     "authorization": { "$ref": "#/$defs/authorizationConfig" },
+    "abuseControls": { "$ref": "#/$defs/abuseControlsConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
       "default": false,
@@ -360,6 +361,32 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/authorizationRuleConfig" },
           "description": "Ordered authorization policy rules"
+        }
+      },
+      "additionalProperties": false
+    },
+    "abuseControlsConfig": {
+      "type": "object",
+      "properties": {
+        "globalRequestsPerMinute": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max total requests per minute across all principals"
+        },
+        "principalRequestsPerMinute": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max requests per minute for each principal"
+        },
+        "principalMaxInFlight": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max concurrent in-flight requests per principal"
+        },
+        "cidrAllowlist": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Allowed source CIDRs/IPs for listener requests"
         }
       },
       "additionalProperties": false
