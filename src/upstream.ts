@@ -102,6 +102,20 @@ export class UpstreamManager {
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
 
+  private async resetConnectionState(): Promise<void> {
+    await Promise.all(
+      Array.from(this.clients.entries()).map(([name, client]) =>
+        this.closeQuietly(client, this.transports.get(name))
+      )
+    );
+    this.clients.clear();
+    this.transports.clear();
+    this.toolMap.clear();
+    this.exposedToolsByServer.clear();
+    this.serverInfoMap.clear();
+    this.serverConcurrency.clear();
+  }
+
   private async closeQuietly(client?: Client, transport?: Transport): Promise<void> {
     if (client) {
       try {
@@ -235,6 +249,8 @@ export class UpstreamManager {
     servers: Record<string, ServerConfig>,
     options: UpstreamConnectOptions = {}
   ): Promise<UpstreamConnection[]> {
+    await this.resetConnectionState();
+
     const entries = Object.entries(servers);
     const multiServer = entries.length > 1;
     const maxConcurrency = options.maxConcurrency ?? 20;

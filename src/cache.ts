@@ -121,6 +121,8 @@ export class CallCache {
   private entries = new Map<string, CacheEntry>();
   private ttlMs: number;
   private maxEntries: number;
+  private pruneIntervalMs: number;
+  private nextPruneAt = 0;
   private globalPolicy?: CachePolicyConfig;
   private serverPolicies: Map<string, CachePolicyConfig>;
 
@@ -132,6 +134,7 @@ export class CallCache {
   ) {
     this.ttlMs = ttlSeconds * 1000;
     this.maxEntries = maxEntries;
+    this.pruneIntervalMs = this.ttlMs > 0 ? Math.min(this.ttlMs, 1_000) : 0;
     this.globalPolicy = globalPolicy;
     this.serverPolicies = new Map(
       Object.entries(serverPolicies ?? {}).filter(([, policy]) => policy !== undefined)
@@ -191,6 +194,12 @@ export class CallCache {
     }
   }
 
+  private maybePruneExpired(now = Date.now()): void {
+    if (this.pruneIntervalMs <= 0 || now < this.nextPruneAt) return;
+    this.pruneExpired(now);
+    this.nextPruneAt = now + this.pruneIntervalMs;
+  }
+
   private evictOldest(): void {
     while (this.entries.size > this.maxEntries) {
       const oldest = this.entries.keys().next().value as string | undefined;
@@ -206,12 +215,16 @@ export class CallCache {
   ): CallToolResult | null {
     if (this.ttlMs <= 0) return null;
     if (!this.shouldCache(tool, server)) return null;
-
-    this.pruneExpired();
+    const now = Date.now();
+    this.maybePruneExpired(now);
 
     const key = this.key(tool, args, server);
     const entry = this.entries.get(key);
     if (!entry) return null;
+    if (now > entry.expiresAt) {
+      this.entries.delete(key);
+      return null;
+    }
 
     this.entries.delete(key);
     this.entries.set(key, entry);
@@ -227,14 +240,14 @@ export class CallCache {
     if (this.ttlMs <= 0) return;
     if (!this.shouldCache(tool, server)) return;
     if (result.isError) return;
-
-    this.pruneExpired();
+    const now = Date.now();
+    this.maybePruneExpired(now);
 
     this.entries.set(this.key(tool, args, server), {
       tool,
       server,
       result,
-      expiresAt: Date.now() + this.ttlMs,
+      expiresAt: now + this.ttlMs,
     });
     this.evictOldest();
   }

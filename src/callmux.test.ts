@@ -1288,6 +1288,51 @@ test("UpstreamManager strict startup fails when any server fails", async () => {
   assert.equal(closed, true);
 });
 
+test("UpstreamManager connect resets prior clients and tool mappings", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  let firstClosed = false;
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const tool = mockTool(`${name}_tool`);
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {
+          if (name === "first") firstClosed = true;
+        },
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({ first: { command: "first" } });
+  assert.deepEqual(upstream.getServerNames(), ["first"]);
+  assert.equal(firstClosed, false);
+
+  await upstream.connect({ second: { command: "second" } });
+  assert.equal(firstClosed, true);
+  assert.deepEqual(upstream.getServerNames(), ["second"]);
+
+  const oldTool = await upstream.callTool("first_tool");
+  assert.equal(oldTool.isError, true);
+  assert.deepEqual(oldTool.structuredContent, {
+    error: {
+      code: "tool_not_found",
+      message: 'tool "first_tool" not found',
+      details: { tool: "first_tool" },
+    },
+  });
+});
+
 test("UpstreamManager call timeout returns a structured tool error", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
@@ -2708,6 +2753,39 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
       body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
     });
     assert.equal(res.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener rejects oversized /mcp payloads with 413", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const oversized = "x".repeat(1024 * 1024 + 256);
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: oversized,
+    });
+    assert.equal(res.status, 413);
+    const body = await res.json();
+    assert.equal(body.error, "Payload too large");
   } finally {
     await listener.close();
   }

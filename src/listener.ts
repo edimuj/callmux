@@ -22,6 +22,8 @@ import {
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
 
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024; // 1 MiB
+
 interface SessionEntry {
   transport: Transport;
   server: Server;
@@ -97,6 +99,11 @@ export class CallmuxListener {
         res.end(JSON.stringify({ error: "Not found" }));
       }
     } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Payload too large" }));
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[callmux] HTTP error: ${message}\n`);
       if (!res.headersSent) {
@@ -109,7 +116,7 @@ export class CallmuxListener {
   // ─── Streamable HTTP ────────────────────────────────────────────
 
   private async handleStreamableHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = await readBody(req);
+    const body = await readBody(req, MAX_REQUEST_BODY_BYTES);
     const parsed = body ? JSON.parse(body) : undefined;
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
@@ -178,7 +185,7 @@ export class CallmuxListener {
       return;
     }
 
-    const body = await readBody(req);
+    const body = await readBody(req, MAX_REQUEST_BODY_BYTES);
     const parsed = body ? JSON.parse(body) : undefined;
     await session.transport.handlePostMessage(req, res, parsed);
   }
@@ -231,11 +238,32 @@ export class CallmuxListener {
 
 // ─── Helpers ───────────────────────────────────────────────────
 
-function readBody(req: IncomingMessage): Promise<string> {
+class PayloadTooLargeError extends Error {
+  constructor(limitBytes: number) {
+    super(`payload exceeds ${limitBytes} bytes`);
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    let totalBytes = 0;
+    let exceeded = false;
+    req.on("data", (chunk: Buffer) => {
+      if (exceeded) return;
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        exceeded = true;
+        reject(new PayloadTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (exceeded) return;
+      resolve(Buffer.concat(chunks).toString("utf-8"));
+    });
     req.on("error", reject);
   });
 }
