@@ -217,19 +217,28 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["id", "token"],
+            "required": ["id"],
             "properties": {
               "id": {
                 "type": "string",
                 "minLength": 1,
                 "description": "Stable token identifier for audit/logging"
               },
+              "hash": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Scrypt hash of bearer token"
+              },
               "token": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Bearer token value"
+                "description": "Bearer token value (legacy migration mode)"
               }
             },
+            "oneOf": [
+              { "required": ["hash"], "not": { "required": ["token"] } },
+              { "required": ["token"], "not": { "required": ["hash"] } }
+            ],
             "additionalProperties": false
           }
         },

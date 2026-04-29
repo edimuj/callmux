@@ -147,7 +147,7 @@ Config file format:
     "allowInsecureRemoteListener": false,
     "auth": {
       "mode": "bearer",
-      "tokens": [{ "id": "ops", "token": "replace-me" }],
+      "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
       "allowUnauthenticatedHealth": false
     },
     "strictStartup": false

@@ -46,6 +46,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
+import { hashBearerToken } from "./auth.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -1022,6 +1023,22 @@ test("runDoctor reports empty config as healthy", async () => {
   assert.equal(report.ok, true);
   assert.equal(report.serverCount, 0);
   assert.deepEqual(report.issues, []);
+});
+
+test("runDoctor flags insecure plaintext auth tokens", async () => {
+  const report = await runDoctor("/tmp/callmux.json", {
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "legacy-secret" }],
+      },
+    },
+    format: "native",
+  });
+
+  assert.equal(report.ok, false);
+  assert.match(report.issues[0], /plaintext token/);
 });
 
 test("runServerTest reports missing executables cleanly", async () => {
@@ -2102,6 +2119,37 @@ test("loadConfig parses request body limits from file", async () => {
 test("loadConfig parses bearer auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-"));
   const configPath = join(dir, "config.json");
+  const hash = hashBearerToken("secret-token");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "dev", hash }],
+          allowUnauthenticatedHealth: true,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.auth, {
+      mode: "bearer",
+      tokens: [{ id: "dev", hash }],
+      allowUnauthenticatedHealth: true,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses legacy plaintext bearer auth config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-legacy-"));
+  const configPath = join(dir, "config.json");
 
   try {
     await writeFile(
@@ -2113,7 +2161,6 @@ test("loadConfig parses bearer auth config", async () => {
         auth: {
           mode: "bearer",
           tokens: [{ id: "dev", token: "secret-token" }],
-          allowUnauthenticatedHealth: true,
         },
       })
     );
@@ -2122,7 +2169,6 @@ test("loadConfig parses bearer auth config", async () => {
     assert.deepEqual(config.auth, {
       mode: "bearer",
       tokens: [{ id: "dev", token: "secret-token" }],
-      allowUnauthenticatedHealth: true,
     });
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -2148,6 +2194,33 @@ test("loadConfig rejects invalid bearer auth config", async () => {
     );
 
     await assert.rejects(loadConfig(configPath), /auth\.tokens must contain at least one token/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects bearer auth tokens with both hash and token", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-both-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "dev", hash: hashBearerToken("secret"), token: "secret" }],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /cannot include both "token" and "hash"/
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -2931,6 +3004,43 @@ test("listener requires bearer auth for /health by default when auth is configur
     assert.equal(authorized.status, 200);
     const body = await authorized.json();
     assert.equal(body.status, "ok");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener accepts hashed bearer auth tokens", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", hash: hashBearerToken("top-secret") }],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: "Bearer top-secret" },
+    });
+    assert.equal(authorized.status, 200);
   } finally {
     await listener.close();
   }

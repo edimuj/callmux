@@ -5,6 +5,10 @@ import { UpstreamManager } from "./upstream.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { isHttpServerConfig } from "./types.js";
 import type { CallmuxConfig, ConfigFormat, ServerConfig } from "./types.js";
+import {
+  isPlaintextBearerTokenConfig,
+  parseScryptTokenHash,
+} from "./auth.js";
 
 type DoctorReportFormat = ConfigFormat | "missing" | "invalid";
 
@@ -192,9 +196,12 @@ export async function runDoctor(
     })
   );
 
-  const issues = servers.flatMap((server) =>
+  const issues = [
+    ...collectSecurityIssues(loaded.config),
+    ...servers.flatMap((server) =>
     server.issues.map((issue) => `${server.name}: ${issue}`)
-  );
+  ),
+  ];
 
   return {
     ok: issues.length === 0,
@@ -206,6 +213,40 @@ export async function runDoctor(
     issues,
     servers,
   };
+}
+
+function collectSecurityIssues(config: CallmuxConfig): string[] {
+  const issues: string[] = [];
+
+  if (config.allowInsecureRemoteListener) {
+    issues.push(
+      "allowInsecureRemoteListener is enabled (remote listener startup can bypass auth)"
+    );
+  }
+
+  const auth = config.auth;
+  if (!auth || auth.mode !== "bearer") return issues;
+
+  const tokenIds = new Set<string>();
+  for (const token of auth.tokens) {
+    if (tokenIds.has(token.id)) {
+      issues.push(`auth.tokens contains duplicate token id "${token.id}"`);
+    }
+    tokenIds.add(token.id);
+
+    if (isPlaintextBearerTokenConfig(token)) {
+      issues.push(
+        `auth.tokens["${token.id}"] uses plaintext token; migrate to hash`
+      );
+      continue;
+    }
+
+    if (!parseScryptTokenHash(token.hash)) {
+      issues.push(`auth.tokens["${token.id}"] has invalid scrypt hash format`);
+    }
+  }
+
+  return issues;
 }
 
 export function createDoctorFailureReport(

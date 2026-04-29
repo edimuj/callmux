@@ -366,8 +366,17 @@ Inbound request payload size defaults to `1048576` bytes (1 MiB) in listener mod
 Listener auth supports static bearer tokens:
 
 - `auth.mode = "bearer"`
-- `auth.tokens = [{ id, token }]`
+- `auth.tokens = [{ id, hash }]` (recommended)
+- `auth.tokens = [{ id, token }]` (legacy migration mode)
 - optional `auth.allowUnauthenticatedHealth = true`
+
+Generate a scrypt hash for config values:
+
+```bash
+node --input-type=module -e 'import { scryptSync, randomBytes } from "node:crypto"; const t=process.argv[1]; if(!t){ throw new Error("token required"); } const N=16384,r=8,p=1; const salt=randomBytes(16); const maxmem=256*N*r+1048576; const dk=scryptSync(t, salt, 32, { N, r, p, maxmem }); console.log(["scrypt",N,r,p,salt.toString("base64url"),dk.toString("base64url")].join("$"));' "replace-with-token"
+```
+
+`callmux doctor` now flags plaintext `auth.tokens[].token` values so you can migrate safely.
 
 When binding `--listen` to a non-loopback host, callmux now fails startup if auth is missing unless `allowInsecureRemoteListener=true` (or `--allow-insecure-remote-listener`) is explicitly set.
 
@@ -584,7 +593,7 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
   "allowInsecureRemoteListener": false,
   "auth": {
     "mode": "bearer",
-    "tokens": [{ "id": "ops", "token": "replace-me" }],
+    "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
     "allowUnauthenticatedHealth": false
   },
   "strictStartup": false,
@@ -608,7 +617,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
 | `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
-| `auth` | object | — | Listener authentication config (bearer tokens) |
+| `auth` | object | — | Listener authentication config (hashed bearer tokens) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -644,7 +653,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `mode` | string | yes | Must be `"bearer"` |
-| `tokens` | object[] | yes | Accepted bearer tokens (`id`, `token`) |
+| `tokens` | object[] | yes | Accepted bearer tokens (`id` + `hash` recommended, legacy `token` supported for migration) |
 | `allowUnauthenticatedHealth` | boolean | — | Allow `/health` without auth |
 
 </details>

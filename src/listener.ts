@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -21,6 +21,7 @@ import {
   handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
+import { verifyBearerToken } from "./auth.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
@@ -308,7 +309,7 @@ export class CallmuxListener {
     const token = parseBearerToken(rawAuthorization);
     if (!token) return false;
 
-    return auth.tokens.some((candidate) => constantTimeEquals(token, candidate.token));
+    return auth.tokens.some((candidate) => verifyBearerToken(token, candidate));
   }
 
   private writeUnauthorized(res: ServerResponse): void {
@@ -455,13 +456,6 @@ function headerValue(header: string | string[] | undefined): string | undefined 
 function parseBearerToken(authorization: string): string | undefined {
   const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
   return match?.[1];
-}
-
-function constantTimeEquals(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function isLoopbackHost(host: string): boolean {

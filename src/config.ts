@@ -3,11 +3,13 @@ import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
   AuthConfig,
+  BearerAuthTokenConfig,
   CachePolicyConfig,
   CallmuxConfig,
   ConfigFormat,
   ServerConfig,
 } from "./types.js";
+import { parseScryptTokenHash } from "./auth.js";
 
 function parseNonNegativeInteger(value: unknown, optionName: string): number {
   if (!Number.isInteger(value) || (value as number) < 0) {
@@ -132,13 +134,42 @@ function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undef
     throw new Error(`${optionName}.tokens must contain at least one token`);
   }
 
-  const tokens = value.tokens.map((token, index) => {
+  const tokens = value.tokens.map((token, index): BearerAuthTokenConfig => {
     if (!isRecord(token)) {
       throw new Error(`${optionName}.tokens[${index}] must be an object`);
     }
     if (typeof token.id !== "string" || token.id.trim().length === 0) {
       throw new Error(`${optionName}.tokens[${index}].id must be a non-empty string`);
     }
+
+    const hasToken = token.token !== undefined;
+    const hasHash = token.hash !== undefined;
+    if (hasToken && hasHash) {
+      throw new Error(
+        `${optionName}.tokens[${index}] cannot include both "token" and "hash"`
+      );
+    }
+    if (!hasToken && !hasHash) {
+      throw new Error(
+        `${optionName}.tokens[${index}] must include either "hash" or legacy "token"`
+      );
+    }
+
+    if (hasHash) {
+      if (typeof token.hash !== "string" || token.hash.length === 0) {
+        throw new Error(`${optionName}.tokens[${index}].hash must be a non-empty string`);
+      }
+      if (!parseScryptTokenHash(token.hash)) {
+        throw new Error(
+          `${optionName}.tokens[${index}].hash must be a valid scrypt hash`
+        );
+      }
+      return {
+        id: token.id,
+        hash: token.hash,
+      };
+    }
+
     if (typeof token.token !== "string" || token.token.length === 0) {
       throw new Error(`${optionName}.tokens[${index}].token must be a non-empty string`);
     }

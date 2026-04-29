@@ -48,12 +48,23 @@ export interface CachePolicyConfig {
   denyTools?: string[];
 }
 
-export interface BearerAuthTokenConfig {
+export interface BearerAuthTokenHashConfig {
   /** Stable token identifier for audit/logging */
   id: string;
-  /** Bearer token value */
+  /** Scrypt hash of bearer token */
+  hash: string;
+}
+
+export interface BearerAuthTokenPlaintextConfig {
+  /** Stable token identifier for audit/logging */
+  id: string;
+  /** Bearer token value (legacy migration mode) */
   token: string;
 }
+
+export type BearerAuthTokenConfig =
+  | BearerAuthTokenHashConfig
+  | BearerAuthTokenPlaintextConfig;
 
 export interface BearerAuthConfig {
   mode: "bearer";
