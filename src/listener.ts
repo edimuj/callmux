@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -47,14 +47,17 @@ export class CallmuxListener {
   private globalRequestBodyMaxBytes: number;
   private allowRequestBodyMaxOverride: boolean;
   private preReadMaxBytes: number | undefined;
+  private authConfig: CallmuxConfig["auth"];
 
   constructor(options: ListenerOptions) {
     this.options = options;
+    this.authConfig = options.config.auth;
     this.globalRequestBodyMaxBytes =
       options.config.requestBodyMaxBytes ?? DEFAULT_REQUEST_BODY_MAX_BYTES;
     this.allowRequestBodyMaxOverride =
       options.config.allowRequestBodyMaxOverride ?? false;
     this.preReadMaxBytes = this.computePreReadMaxBytes();
+    this.validateSecurityPosture();
   }
 
   async start(): Promise<void> {
@@ -94,6 +97,11 @@ export class CallmuxListener {
     const path = url.pathname;
 
     try {
+      if (!this.isAuthorized(req, path)) {
+        this.writeUnauthorized(res);
+        return;
+      }
+
       if (path === "/mcp") {
         await this.handleStreamableHttp(req, res);
       } else if (path === "/sse" && req.method === "GET") {
@@ -269,6 +277,48 @@ export class CallmuxListener {
     return server;
   }
 
+  private validateSecurityPosture(): void {
+    const host = this.options.host ?? "127.0.0.1";
+    const isRemote = !isLoopbackHost(host);
+    const allowInsecureRemoteListener =
+      this.options.config.allowInsecureRemoteListener ?? false;
+    if (isRemote && !this.authConfig && !allowInsecureRemoteListener) {
+      throw new Error(
+        `Refusing insecure remote listener on "${host}". Configure "auth" or set allowInsecureRemoteListener=true to bypass (unsafe).`
+      );
+    }
+
+    if (isRemote && !this.authConfig && allowInsecureRemoteListener) {
+      process.stderr.write(
+        `[callmux] WARNING: insecure remote listener enabled on "${host}" (no auth configured)\n`
+      );
+    }
+  }
+
+  private isAuthorized(req: IncomingMessage, path: string): boolean {
+    const auth = this.authConfig;
+    if (!auth) return true;
+
+    if (path === "/health" && auth.allowUnauthenticatedHealth) {
+      return true;
+    }
+
+    const rawAuthorization = headerValue(req.headers.authorization);
+    if (!rawAuthorization) return false;
+    const token = parseBearerToken(rawAuthorization);
+    if (!token) return false;
+
+    return auth.tokens.some((candidate) => constantTimeEquals(token, candidate.token));
+  }
+
+  private writeUnauthorized(res: ServerResponse): void {
+    res.writeHead(401, {
+      "Content-Type": "application/json",
+      "WWW-Authenticate": 'Bearer realm="callmux"',
+    });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+  }
+
   private computePreReadMaxBytes(): number | undefined {
     const limits: number[] = [this.globalRequestBodyMaxBytes];
     for (const server of Object.values(this.options.config.servers)) {
@@ -400,6 +450,27 @@ function inferServerFromQualifiedToolName(toolName: string): string | undefined 
 function headerValue(header: string | string[] | undefined): string | undefined {
   if (Array.isArray(header)) return header[0];
   return header;
+}
+
+function parseBearerToken(authorization: string): string | undefined {
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+  return match?.[1];
+}
+
+function constantTimeEquals(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length !== rightBuffer.length) return false;
+  return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "localhost"
+  );
 }
 
 function readBody(

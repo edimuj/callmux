@@ -48,6 +48,23 @@ export interface CachePolicyConfig {
   denyTools?: string[];
 }
 
+export interface BearerAuthTokenConfig {
+  /** Stable token identifier for audit/logging */
+  id: string;
+  /** Bearer token value */
+  token: string;
+}
+
+export interface BearerAuthConfig {
+  mode: "bearer";
+  /** Tokens accepted by listener auth */
+  tokens: BearerAuthTokenConfig[];
+  /** Allow unauthenticated access to /health */
+  allowUnauthenticatedHealth?: boolean;
+}
+
+export type AuthConfig = BearerAuthConfig;
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -73,6 +90,10 @@ export interface CallmuxConfig {
   requestBodyMaxBytes?: number;
   /** Allow per-request override via x-callmux-max-body-bytes header */
   allowRequestBodyMaxOverride?: boolean;
+  /** Listener authentication configuration */
+  auth?: AuthConfig;
+  /** Allow insecure remote listener (non-loopback host) without auth */
+  allowInsecureRemoteListener?: boolean;
 }
 
 export type ConfigFormat = "native" | "mcpCompatible";

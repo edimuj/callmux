@@ -85,6 +85,12 @@
       "type": "boolean",
       "default": false,
       "description": "Allow per-request x-callmux-max-body-bytes override header"
+    },
+    "auth": { "$ref": "#/$defs/authConfig" },
+    "allowInsecureRemoteListener": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow non-loopback listener startup without auth (unsafe, not recommended)"
     }
   },
   "additionalProperties": false,
@@ -192,6 +198,45 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Never cache matching tools (exact names or 'prefix*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    },
+    "authConfig": {
+      "type": "object",
+      "description": "Listener authentication configuration",
+      "required": ["mode", "tokens"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["bearer"],
+          "description": "Authentication mode"
+        },
+        "tokens": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "token"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable token identifier for audit/logging"
+              },
+              "token": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Bearer token value"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "allowUnauthenticatedHealth": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow unauthenticated access to /health"
         }
       },
       "additionalProperties": false

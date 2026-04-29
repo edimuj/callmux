@@ -89,6 +89,7 @@ Options:
   --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
   --request-body-max-bytes <n> Max inbound request payload bytes (0 = unlimited, default: 1048576)
   --allow-request-body-override Allow per-request x-callmux-max-body-bytes override header
+  --allow-insecure-remote-listener Allow remote --listen without auth (unsafe)
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --listen <port>       Run as shared HTTP/SSE server (multiple clients connect via URL)
   --host <addr>         Bind address for --listen (default: 127.0.0.1)
@@ -143,6 +144,12 @@ Config file format:
     "callTimeoutMs": 30000,
     "requestBodyMaxBytes": 1048576,
     "allowRequestBodyMaxOverride": false,
+    "allowInsecureRemoteListener": false,
+    "auth": {
+      "mode": "bearer",
+      "tokens": [{ "id": "ops", "token": "replace-me" }],
+      "allowUnauthenticatedHealth": false
+    },
     "strictStartup": false
   }
 

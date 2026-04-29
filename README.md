@@ -363,6 +363,14 @@ Startup connect/list-tools work and downstream calls both have finite timeouts. 
 
 Inbound request payload size defaults to `1048576` bytes (1 MiB) in listener mode. Configure globally with `requestBodyMaxBytes`, override per downstream server with `servers.<name>.requestBodyMaxBytes`, or disable with `0`. Optional per-request overrides are available via `x-callmux-max-body-bytes` when `allowRequestBodyMaxOverride` is enabled.
 
+Listener auth supports static bearer tokens:
+
+- `auth.mode = "bearer"`
+- `auth.tokens = [{ id, token }]`
+- optional `auth.allowUnauthenticatedHealth = true`
+
+When binding `--listen` to a non-loopback host, callmux now fails startup if auth is missing unless `allowInsecureRemoteListener=true` (or `--allow-insecure-remote-listener`) is explicitly set.
+
 **Inline mode** for a single remote server:
 
 ```bash
@@ -512,6 +520,7 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `--call-timeout <ms>` | Downstream tool call timeout |
 | `--request-body-max-bytes <n>` | Max inbound request payload bytes (0 = unlimited) |
 | `--allow-request-body-override` | Allow `x-callmux-max-body-bytes` per-request override |
+| `--allow-insecure-remote-listener` | Allow remote listener startup without auth (unsafe) |
 | `--strict-startup` | Fail startup if any downstream server fails |
 | `--listen <port>` | Run as shared HTTP/SSE server (multiple clients) |
 | `--host <addr>` | Bind address for `--listen` (default: `127.0.0.1`) |
@@ -572,6 +581,12 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
   "callTimeoutMs": 30000,
   "requestBodyMaxBytes": 1048576,
   "allowRequestBodyMaxOverride": false,
+  "allowInsecureRemoteListener": false,
+  "auth": {
+    "mode": "bearer",
+    "tokens": [{ "id": "ops", "token": "replace-me" }],
+    "allowUnauthenticatedHealth": false
+  },
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80
@@ -592,6 +607,8 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
+| `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
+| `auth` | object | — | Listener authentication config (bearer tokens) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
@@ -621,6 +638,14 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
 | `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | — | Per-server cache allow/deny rules |
+
+**Auth config** (listener mode):
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `mode` | string | yes | Must be `"bearer"` |
+| `tokens` | object[] | yes | Accepted bearer tokens (`id`, `token`) |
+| `allowUnauthenticatedHealth` | boolean | — | Allow `/health` without auth |
 
 </details>
 

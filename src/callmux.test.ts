@@ -511,6 +511,16 @@ test("configFromArgs parses request body limit flags", () => {
   assert.equal(config.allowRequestBodyMaxOverride, true);
 });
 
+test("configFromArgs parses insecure remote listener override flag", () => {
+  const config = configFromArgs([
+    "--allow-insecure-remote-listener",
+    "--",
+    "node",
+    "server.js",
+  ]);
+  assert.equal(config.allowInsecureRemoteListener, true);
+});
+
 test("configFromArgs parses --env KEY=VALUE pairs", () => {
   const config = configFromArgs([
     "--env",
@@ -2089,6 +2099,60 @@ test("loadConfig parses request body limits from file", async () => {
   }
 });
 
+test("loadConfig parses bearer auth config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "dev", token: "secret-token" }],
+          allowUnauthenticatedHealth: true,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.auth, {
+      mode: "bearer",
+      tokens: [{ id: "dev", token: "secret-token" }],
+      allowUnauthenticatedHealth: true,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid bearer auth config", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [],
+        },
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /auth\.tokens must contain at least one token/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects invalid metaOnly type", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-meta-"));
   const configPath = join(dir, "config.json");
@@ -2833,6 +2897,78 @@ test("listener /health returns ok with session count", async () => {
   }
 });
 
+test("listener requires bearer auth for /health by default when auth is configured", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "top-secret" }],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: "Bearer top-secret" },
+    });
+    assert.equal(authorized.status, 200);
+    const body = await authorized.json();
+    assert.equal(body.status, "ok");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener allows unauthenticated /health when configured", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "top-secret" }],
+        allowUnauthenticatedHealth: true,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(res.status, 200);
+  } finally {
+    await listener.close();
+  }
+});
+
 test("listener /mcp returns 400 for non-initialize request without session", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
@@ -2861,6 +2997,82 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
   } finally {
     await listener.close();
   }
+});
+
+test("listener requires bearer auth for /mcp", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "top-secret" }],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 19876 + Math.floor(Math.random() * 1000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: "Bearer top-secret",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(authorized.status, 400);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener refuses insecure remote startup without auth", () => {
+  assert.throws(
+    () =>
+      new CallmuxListener({
+        port: 4860,
+        host: "0.0.0.0",
+        config: { servers: {} },
+        upstream: new UpstreamManager(),
+        cache: new CallCache(0),
+        allTools: [],
+        maxConcurrency: 10,
+      }),
+    /Refusing insecure remote listener/
+  );
+});
+
+test("listener allows insecure remote startup only when explicitly overridden", () => {
+  const listener = new CallmuxListener({
+    port: 4860,
+    host: "0.0.0.0",
+    config: { servers: {}, allowInsecureRemoteListener: true },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  assert.ok(listener);
 });
 
 test("listener rejects oversized /mcp payloads with 413", async () => {

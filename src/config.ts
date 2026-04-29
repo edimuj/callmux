@@ -2,6 +2,7 @@ import { readFile, access, mkdir, writeFile } from "node:fs/promises";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
+  AuthConfig,
   CachePolicyConfig,
   CallmuxConfig,
   ConfigFormat,
@@ -113,6 +114,58 @@ function parseCachePolicy(
   };
 }
 
+function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  if (value.mode !== "bearer") {
+    throw new Error(`${optionName}.mode must be "bearer"`);
+  }
+
+  if (!Array.isArray(value.tokens)) {
+    throw new Error(`${optionName}.tokens must be an array`);
+  }
+
+  if (value.tokens.length === 0) {
+    throw new Error(`${optionName}.tokens must contain at least one token`);
+  }
+
+  const tokens = value.tokens.map((token, index) => {
+    if (!isRecord(token)) {
+      throw new Error(`${optionName}.tokens[${index}] must be an object`);
+    }
+    if (typeof token.id !== "string" || token.id.trim().length === 0) {
+      throw new Error(`${optionName}.tokens[${index}].id must be a non-empty string`);
+    }
+    if (typeof token.token !== "string" || token.token.length === 0) {
+      throw new Error(`${optionName}.tokens[${index}].token must be a non-empty string`);
+    }
+    return {
+      id: token.id,
+      token: token.token,
+    };
+  });
+
+  const allowUnauthenticatedHealth =
+    value.allowUnauthenticatedHealth === undefined
+      ? undefined
+      : typeof value.allowUnauthenticatedHealth === "boolean"
+        ? value.allowUnauthenticatedHealth
+        : (() => {
+            throw new Error(`${optionName}.allowUnauthenticatedHealth must be a boolean`);
+          })();
+
+  return {
+    mode: "bearer",
+    tokens,
+    ...(allowUnauthenticatedHealth !== undefined
+      ? { allowUnauthenticatedHealth }
+      : {}),
+  };
+}
+
 function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   if (!isRecord(value)) {
     throw new Error(`servers.${serverName} must be an object`);
@@ -210,6 +263,7 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
 } {
   const parseSharedFields = () => {
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
+    const auth = parseAuthConfig(parsed.auth, "auth");
     return {
       cacheTtlSeconds:
         parsed.cacheTtlSeconds === undefined
@@ -283,6 +337,19 @@ function parseConfigDocument(parsed: Record<string, unknown>): {
                 ? parsed.allowRequestBodyMaxOverride
                 : (() => {
                     throw new Error("allowRequestBodyMaxOverride must be a boolean");
+                  })(),
+          }
+        : {}),
+      ...(auth ? { auth } : {}),
+      ...(parsed.allowInsecureRemoteListener !== undefined
+        ? {
+            allowInsecureRemoteListener:
+              typeof parsed.allowInsecureRemoteListener === "boolean"
+                ? parsed.allowInsecureRemoteListener
+                : (() => {
+                    throw new Error(
+                      "allowInsecureRemoteListener must be a boolean"
+                    );
                   })(),
           }
         : {}),
@@ -428,6 +495,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
   let descriptionMaxLength: number | undefined;
   let requestBodyMaxBytes: number | undefined;
   let allowRequestBodyMaxOverride = false;
+  let allowInsecureRemoteListener = false;
   let tools: string[] | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
@@ -491,6 +559,8 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       i++;
     } else if (args[i] === "--allow-request-body-override") {
       allowRequestBodyMaxOverride = true;
+    } else if (args[i] === "--allow-insecure-remote-listener") {
+      allowInsecureRemoteListener = true;
     } else if (args[i] === "--url") {
       url = readOptionValue(args, i, optionsLimit, "--url");
       i++;
@@ -546,6 +616,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
       ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
       ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
+      ...(allowInsecureRemoteListener ? { allowInsecureRemoteListener } : {}),
     };
   }
 
@@ -576,5 +647,6 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
     ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
+    ...(allowInsecureRemoteListener ? { allowInsecureRemoteListener } : {}),
   };
 }
