@@ -447,14 +447,15 @@ export class UpstreamManager {
     }
 
     try {
-      return await withTimeout(
-        resolved.client.callTool({
+      const result = await resolved.client.callTool(
+        {
           name: resolved.actualName,
           arguments: args,
-        }) as Promise<CallToolResult>,
-        this.callTimeoutMs,
-        `tool "${toolName}"`
+        },
+        undefined,
+        this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
       );
+      return result as unknown as CallToolResult;
     } catch (error) {
       return errorResult("tool_call_failed", errorMessage(error), {
         tool: toolName,

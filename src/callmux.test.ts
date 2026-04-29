@@ -184,6 +184,38 @@ test("per-server concurrency limits parallel calls to that server", async () => 
   assert.equal(maxConcurrent, 1);
 });
 
+test("per-server concurrency limits qualified parallel tool calls without server hint", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency(server: string) {
+      return server === "fragile" ? 1 : undefined;
+    },
+  };
+
+  await handleParallel(
+    upstream as never,
+    new CallCache(0),
+    {
+      calls: [
+        { tool: "fragile__a", arguments: {} },
+        { tool: "fragile__b", arguments: {} },
+        { tool: "fragile__c", arguments: {} },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 1);
+});
+
 test("batch respects per-server concurrency limit", async () => {
   let maxConcurrent = 0;
   let current = 0;
@@ -204,6 +236,40 @@ test("batch respects per-server concurrency limit", async () => {
     {
       server: "limited",
       tool: "process",
+      items: [
+        { arguments: { id: 1 } },
+        { arguments: { id: 2 } },
+        { arguments: { id: 3 } },
+        { arguments: { id: 4 } },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 2);
+});
+
+test("batch respects per-server concurrency limit for qualified tool without server hint", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency(server: string) {
+      return server === "limited" ? 2 : undefined;
+    },
+  };
+
+  await handleBatch(
+    upstream as never,
+    new CallCache(0),
+    {
+      tool: "limited__process",
       items: [
         { arguments: { id: 1 } },
         { arguments: { id: 2 } },
@@ -1224,18 +1290,23 @@ test("UpstreamManager strict startup fails when any server fails", async () => {
 
 test("UpstreamManager call timeout returns a structured tool error", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
-    clients: Map<string, { callTool: () => Promise<CallToolResult> }>;
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
     toolMap: Map<string, { server: string; tool: { name: string } }>;
     exposedToolsByServer: Map<string, Set<string>>;
     callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
   };
+  let observedTimeout: number | undefined;
 
   upstream.clients = new Map([
     [
       "github",
       {
-        async callTool() {
-          await new Promise((resolve) => setTimeout(resolve, 50));
+        async callTool(_params: unknown, _schema?: unknown, options?: { timeout?: number }) {
+          observedTimeout = options?.timeout;
+          const timeout = options?.timeout ?? 1;
+          await new Promise((_resolve, reject) =>
+            setTimeout(() => reject(new Error(`timed out after ${timeout}ms`)), timeout)
+          );
           return textResult("late");
         },
       },
@@ -1248,11 +1319,12 @@ test("UpstreamManager call timeout returns a structured tool error", async () =>
 
   const result = await upstream.callTool("get_issue", { id: 1 });
 
+  assert.equal(observedTimeout, 5);
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, {
     error: {
       code: "tool_call_failed",
-      message: 'tool "get_issue" timed out after 5ms',
+      message: "timed out after 5ms",
       details: { tool: "get_issue" },
     },
   });

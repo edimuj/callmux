@@ -283,6 +283,18 @@ function validateCacheClearArgs(
   };
 }
 
+function inferServerFromQualifiedTool(
+  tool: string,
+  explicitServer?: string
+): string | undefined {
+  if (explicitServer) return explicitServer;
+
+  const separator = tool.indexOf("__");
+  if (separator <= 0) return undefined;
+
+  return tool.slice(0, separator);
+}
+
 export async function handleParallel(
   upstream: UpstreamManager,
   cache: CallCache,
@@ -313,7 +325,8 @@ export async function handleParallel(
   };
 
   const promises = calls.map(async (call) => {
-    const serverSem = getServerSemaphore(call.server);
+    const serverForLimit = inferServerFromQualifiedTool(call.tool, call.server);
+    const serverSem = getServerSemaphore(serverForLimit);
     await globalSemaphore.acquire();
     if (serverSem) await serverSem.acquire();
     const callStart = Date.now();
@@ -362,7 +375,10 @@ export async function handleBatch(
   const startTime = Date.now();
   const { server, tool, items } = parsedArgs;
 
-  const serverLimit = server ? upstream.getServerConcurrency(server) : undefined;
+  const serverForLimit = inferServerFromQualifiedTool(tool, server);
+  const serverLimit = serverForLimit
+    ? upstream.getServerConcurrency(serverForLimit)
+    : undefined;
   const effectiveLimit = serverLimit !== undefined
     ? Math.min(maxConcurrency, serverLimit)
     : maxConcurrency;
