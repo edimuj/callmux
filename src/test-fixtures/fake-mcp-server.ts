@@ -11,6 +11,8 @@ interface ToolDefinition {
   description?: string;
 }
 
+type CallMode = "ok" | "throw" | "tool_error" | "exit" | "hang";
+
 function numberFromEnv(name: string): number {
   const value = process.env[name];
   if (!value) return 0;
@@ -36,6 +38,17 @@ const startDelayMs = numberFromEnv("FAKE_MCP_START_DELAY_MS");
 const callDelayMs = numberFromEnv("FAKE_MCP_CALL_DELAY_MS");
 const failStart = process.env.FAKE_MCP_FAIL_START === "1";
 const failCall = process.env.FAKE_MCP_FAIL_CALL === "1";
+const callModeEnv = process.env.FAKE_MCP_CALL_MODE;
+const callMode: CallMode = (
+  callModeEnv === "ok" ||
+  callModeEnv === "throw" ||
+  callModeEnv === "tool_error" ||
+  callModeEnv === "exit" ||
+  callModeEnv === "hang"
+)
+  ? callModeEnv
+  : (failCall ? "throw" : "ok");
+const toolErrorMessage = process.env.FAKE_MCP_TOOL_ERROR_MESSAGE ?? "fake tool error";
 
 const server = new McpServer(
   {
@@ -52,7 +65,17 @@ for (const tool of tools) {
     },
   }, async (args) => {
     if (callDelayMs > 0) await delay(callDelayMs);
-    if (failCall) throw new Error("fake callTool failure");
+    if (callMode === "hang") {
+      return await new Promise<CallToolResult>(() => {});
+    }
+    if (callMode === "exit") {
+      process.exit(1);
+    }
+    if (callMode === "throw") throw new Error("fake callTool failure");
+    if (callMode === "tool_error") return {
+      isError: true,
+      content: [{ type: "text", text: toolErrorMessage }],
+    };
     return textResult(
       JSON.stringify({
         server: process.env.FAKE_MCP_NAME ?? "fake-mcp-server",

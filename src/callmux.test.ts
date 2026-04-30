@@ -1736,6 +1736,98 @@ test("fake MCP fixture verifies startup timeout", async () => {
   }
 });
 
+test("fake MCP fixture can return downstream tool errors without transport failure", async () => {
+  const upstream = new UpstreamManager();
+
+  try {
+    const connections = await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]),
+        FAKE_MCP_CALL_MODE: "tool_error",
+        FAKE_MCP_TOOL_ERROR_MESSAGE: "downstream tool validation failed",
+      }),
+    });
+
+    assert.equal(connections.length, 1);
+    const result = await upstream.callTool("get_item", { id: 1 });
+    assert.equal(result.isError, true);
+    assert.equal(
+      (result.content[0] as { text: string }).text,
+      "downstream tool validation failed"
+    );
+  } finally {
+    await upstream.close();
+  }
+});
+
+test("fake MCP fixture surfaces thrown downstream exceptions as structured callmux errors", async () => {
+  const upstream = new UpstreamManager();
+
+  try {
+    const connections = await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]),
+        FAKE_MCP_CALL_MODE: "throw",
+      }),
+    });
+
+    assert.equal(connections.length, 1);
+    const result = await upstream.callTool("get_item", { id: 1 });
+    assert.equal(result.isError, true);
+    if (result.structuredContent) {
+      assert.equal(
+        (result.structuredContent as {
+          error: { code: string; details?: { tool?: string } };
+        }).error.code,
+        "tool_call_failed"
+      );
+      assert.equal(
+        (result.structuredContent as {
+          error: { code: string; details?: { tool?: string } };
+        }).error.details?.tool,
+        "get_item"
+      );
+      assert.match(
+        ((result.structuredContent as {
+          error: { message: string };
+        }).error.message),
+        /fake callTool failure/
+      );
+    } else {
+      assert.match((result.content[0] as { text: string }).text, /fake callTool failure/);
+    }
+  } finally {
+    await upstream.close();
+  }
+});
+
+test("fake MCP fixture hanging calls are converted into timeout errors", async () => {
+  const upstream = new UpstreamManager(25);
+
+  try {
+    const connections = await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]),
+        FAKE_MCP_CALL_MODE: "hang",
+      }),
+    });
+
+    assert.equal(connections.length, 1);
+    const result = await upstream.callTool("get_item", { id: 1 });
+    assert.equal(result.isError, true);
+    assert.equal(
+      (result.structuredContent as { error: { code: string } }).error.code,
+      "tool_call_failed"
+    );
+    assert.match(
+      ((result.structuredContent as { error: { message: string } }).error.message),
+      /timed out/i
+    );
+  } finally {
+    await upstream.close();
+  }
+});
+
 // ─── HTTP/SSE transport config tests ──────────────────────────
 
 test("configFromArgs parses --url for HTTP transport", () => {
