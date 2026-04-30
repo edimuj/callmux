@@ -341,6 +341,36 @@ Defaults:
 - `maxBytes` defaults to `1000000` (1 MB) when omitted.
 - Hard cap for `maxBytes` is `10000000` (10 MB).
 
+#### Inline Text Composition (No File Write Step)
+
+For long multi-line text where you want to skip writing a temp file, use `$text`:
+
+```json
+{
+  "tool": "github__create_issue",
+  "arguments": {
+    "title": "Stream B",
+    "body": {
+      "$text": {
+        "lines": [
+          "## Summary",
+          "",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| A | B |"
+        ]
+      }
+    }
+  }
+}
+```
+
+`$text` forms:
+- `{"$text":"literal string"}`
+- `{"$text":{"lines":["line1","line2"],"join":"\n"}}` (`join` defaults to newline)
+
+Like `$file`, `$text` is resolved by callmux before forwarding, so downstream MCP servers receive a normal string.
+
 ### `callmux_status`
 
 Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.

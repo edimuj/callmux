@@ -495,6 +495,58 @@ export class UpstreamManager {
       return content;
     }
 
+    if ("$text" in value) {
+      const allowedKeys = new Set(["$text"]);
+      const unexpectedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
+      if (unexpectedKeys.length > 0) {
+        throw new Error(
+          `invalid $text reference at ${path}: unexpected keys [${unexpectedKeys.join(", ")}]`
+        );
+      }
+
+      const textSpec = value.$text;
+      if (typeof textSpec === "string") {
+        return textSpec;
+      }
+
+      if (!isPlainObject(textSpec)) {
+        throw new Error(
+          `invalid $text reference at ${path}: "$text" must be a string or { lines, join? } object`
+        );
+      }
+
+      const allowedTextSpecKeys = new Set(["lines", "join"]);
+      const unexpectedTextSpecKeys = Object.keys(textSpec).filter(
+        (key) => !allowedTextSpecKeys.has(key)
+      );
+      if (unexpectedTextSpecKeys.length > 0) {
+        throw new Error(
+          `invalid $text reference at ${path}: unexpected $text keys [${unexpectedTextSpecKeys.join(", ")}]`
+        );
+      }
+
+      if (!("lines" in textSpec) || !Array.isArray(textSpec.lines)) {
+        throw new Error(
+          `invalid $text reference at ${path}: "$text.lines" must be an array of strings`
+        );
+      }
+
+      if (!textSpec.lines.every((line) => typeof line === "string")) {
+        throw new Error(
+          `invalid $text reference at ${path}: "$text.lines" must contain only strings`
+        );
+      }
+
+      const join = textSpec.join ?? "\n";
+      if (typeof join !== "string") {
+        throw new Error(
+          `invalid $text reference at ${path}: "$text.join" must be a string`
+        );
+      }
+
+      return textSpec.lines.join(join);
+    }
+
     const resolvedEntries = await Promise.all(
       Object.entries(value).map(async ([key, nested]) => [
         key,

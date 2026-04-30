@@ -1797,6 +1797,125 @@ test("UpstreamManager enforces $file maxBytes with optional override", async () 
   }
 });
 
+test("UpstreamManager resolves $text line composition with default newline join", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  const result = await upstream.callTool("create_issue", {
+    title: "Inline text",
+    body: {
+      $text: {
+        lines: ["## Summary", "", "- first", "- second"],
+      },
+    },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(capturedArguments?.title, "Inline text");
+  assert.equal(capturedArguments?.body, "## Summary\n\n- first\n- second");
+});
+
+test("UpstreamManager resolves $text line composition with custom join", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  const result = await upstream.callTool("create_issue", {
+    body: {
+      $text: {
+        lines: ["a", "b", "c"],
+        join: " | ",
+      },
+    },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.equal(capturedArguments?.body, "a | b | c");
+});
+
+test("UpstreamManager validates $text reference shape and returns structured errors", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool() {
+          return textResult("unexpected");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  const result = await upstream.callTool("create_issue", {
+    body: {
+      $text: {
+        lines: ["ok", 42],
+      },
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "tool_call_failed"
+  );
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /\$text\.lines.*only strings/
+  );
+});
+
 test("fake MCP fixture supports real stdio listTools and callTool", async () => {
   const upstream = new UpstreamManager();
 
