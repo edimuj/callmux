@@ -263,6 +263,13 @@ function collectSecurityIssues(config: CallmuxConfig): string[] {
       continue;
     }
 
+    if (!("hash" in token)) {
+      issues.push(
+        `auth.tokens["${token.id}"] should resolve to a hash/token during config load`
+      );
+      continue;
+    }
+
     if (!parseScryptTokenHash(token.hash)) {
       issues.push(`auth.tokens["${token.id}"] has invalid scrypt hash format`);
     }

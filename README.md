@@ -371,8 +371,17 @@ Listener auth supports static bearer tokens:
 
 - `auth.mode = "bearer"`
 - `auth.tokens = [{ id, hash }]` (recommended)
+- `auth.tokens = [{ id, hashRef: "env:CALLMUX_HASH" }]` (secret adapters)
+- `auth.tokens = [{ id, hashRef: "file:./secrets/callmux.hash" }]` (secret adapters)
 - `auth.tokens = [{ id, token }]` (legacy migration mode)
 - optional `auth.allowUnauthenticatedHealth = true`
+
+`hashRef`/`tokenRef` secret references currently support:
+
+- `env:<VARIABLE_NAME>`
+- `file:<PATH>` (relative paths resolve from the config file directory)
+
+`tokenRef` values are converted to in-memory scrypt hashes at config load time.
 
 Generate a scrypt hash for config values:
 
@@ -447,6 +456,23 @@ url = "http://localhost:4860/mcp"
 ```
 
 callmux supports both Streamable HTTP (`/mcp`) and legacy SSE (`/sse`). The `/health` endpoint reports server status and active session count, and `/metrics` exposes Prometheus metrics when enabled.
+
+In shared listener mode launched from a config file (`--config` or autodiscovered config), you can hot-reload runtime security settings with `SIGHUP`:
+
+```bash
+kill -HUP <callmux-pid>
+```
+
+Reload is intentionally non-structural. Changes to servers/tool wiring are ignored until full restart, while runtime controls are reloaded:
+
+- `auth`
+- `authorization`
+- `abuseControls`
+- `auditLog`
+- `metrics`
+- `requestBodyMaxBytes`
+- `allowRequestBodyMaxOverride`
+- `allowInsecureRemoteListener`
 
 By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expose on all interfaces (e.g., for Tailscale access from other machines).
 
@@ -778,6 +804,11 @@ Audit records include correlation `requestId`, principal metadata, status code, 
 | `allowUnauthenticated` | boolean | — | Allow unauthenticated access to metrics |
 
 HTTP responses include `x-request-id`, and error payloads include `requestId` for correlation.
+
+Enterprise hardening references:
+
+- Threat model: `docs/security/2026-04-30-enterprise-threat-model.md`
+- Release profiles: `docs/security/2026-04-30-release-profiles.md`
 
 </details>
 

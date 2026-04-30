@@ -55,6 +55,13 @@ export interface BearerAuthTokenHashConfig {
   hash: string;
 }
 
+export interface BearerAuthTokenHashRefConfig {
+  /** Stable token identifier for audit/logging */
+  id: string;
+  /** Secret reference for scrypt hash (`env:NAME` or `file:/path`) */
+  hashRef: string;
+}
+
 export interface BearerAuthTokenPlaintextConfig {
   /** Stable token identifier for audit/logging */
   id: string;
@@ -62,9 +69,18 @@ export interface BearerAuthTokenPlaintextConfig {
   token: string;
 }
 
+export interface BearerAuthTokenPlaintextRefConfig {
+  /** Stable token identifier for audit/logging */
+  id: string;
+  /** Secret reference for plaintext token (`env:NAME` or `file:/path`) */
+  tokenRef: string;
+}
+
 export type BearerAuthTokenConfig =
   | BearerAuthTokenHashConfig
-  | BearerAuthTokenPlaintextConfig;
+  | BearerAuthTokenHashRefConfig
+  | BearerAuthTokenPlaintextConfig
+  | BearerAuthTokenPlaintextRefConfig;
 
 export interface BearerAuthConfig {
   mode: "bearer";

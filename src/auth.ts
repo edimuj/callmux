@@ -137,6 +137,9 @@ function verifyBearerToken(
   if ("hash" in configuredToken) {
     return verifyBearerTokenHash(token, configuredToken.hash);
   }
+  if (!("token" in configuredToken)) {
+    return false;
+  }
 
   const left = Buffer.from(token);
   const right = Buffer.from(configuredToken.token);

@@ -47,7 +47,7 @@ import {
 import { runSetup } from "../setup.js";
 import * as p from "@clack/prompts";
 import { UpstreamManager } from "../upstream.js";
-import type { ServerConfig } from "../types.js";
+import type { CallmuxConfig, ServerConfig } from "../types.js";
 
 const HELP = `
 callmux — Multiplexer for MCP tool calls
@@ -93,6 +93,7 @@ Options:
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --listen <port>       Run as shared HTTP/SSE server (multiple clients connect via URL)
   --host <addr>         Bind address for --listen (default: 127.0.0.1)
+                         Send SIGHUP to reload runtime security config (when using a config file)
   --help, -h            Show this help
   --version, -v         Show version
 
@@ -147,7 +148,10 @@ Config file format:
     "allowInsecureRemoteListener": false,
     "auth": {
       "mode": "bearer",
-      "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
+      "tokens": [
+        { "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" },
+        { "id": "ops", "hashRef": "env:CALLMUX_OPS_HASH" }
+      ],
       "allowUnauthenticatedHealth": false
     },
     "authorization": {
@@ -263,6 +267,51 @@ function extractFlag(
   }
 
   return { remainingArgs, present };
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableValue(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, stableValue(nested)])
+    );
+  }
+  return value;
+}
+
+function isNonStructuralReloadCompatible(
+  current: CallmuxConfig,
+  next: CallmuxConfig
+): boolean {
+  const immutableCurrent = stableValue({
+    servers: current.servers,
+    cacheTtlSeconds: current.cacheTtlSeconds ?? 0,
+    cachePolicy: current.cachePolicy,
+    maxConcurrency: current.maxConcurrency ?? 20,
+    connectTimeoutMs: current.connectTimeoutMs,
+    callTimeoutMs: current.callTimeoutMs,
+    strictStartup: current.strictStartup ?? false,
+    maxCacheEntries: current.maxCacheEntries ?? 1000,
+    metaOnly: current.metaOnly ?? false,
+    descriptionMaxLength: current.descriptionMaxLength,
+  });
+  const immutableNext = stableValue({
+    servers: next.servers,
+    cacheTtlSeconds: next.cacheTtlSeconds ?? 0,
+    cachePolicy: next.cachePolicy,
+    maxConcurrency: next.maxConcurrency ?? 20,
+    connectTimeoutMs: next.connectTimeoutMs,
+    callTimeoutMs: next.callTimeoutMs,
+    strictStartup: next.strictStartup ?? false,
+    maxCacheEntries: next.maxCacheEntries ?? 1000,
+    metaOnly: next.metaOnly ?? false,
+    descriptionMaxLength: next.descriptionMaxLength,
+  });
+  return JSON.stringify(immutableCurrent) === JSON.stringify(immutableNext);
 }
 
 async function readTextFileIfExists(path: string): Promise<string> {
@@ -795,16 +844,19 @@ async function main(): Promise<void> {
     }
   }
 
-  let config;
+  let config: CallmuxConfig;
+  let activeConfigPath: string | undefined;
 
   if (extracted.configPath) {
     config = await loadConfig(extracted.configPath);
+    activeConfigPath = resolve(extracted.configPath);
   } else if (filteredArgs.includes("--")) {
     config = configFromArgs(filteredArgs);
   } else {
     const defaultPath = await findDefaultConfig();
     if (defaultPath) {
       config = await loadConfig(defaultPath);
+      activeConfigPath = resolve(defaultPath);
     } else {
       console.error("Error: specify --config <path> or -- <command> [args...]");
       console.error("Or create ~/.config/callmux/config.json");
@@ -851,6 +903,30 @@ async function main(): Promise<void> {
       try { await proxy.close(); } catch {}
       process.exit(0);
     };
+
+    if (activeConfigPath) {
+      process.on("SIGHUP", async () => {
+        try {
+          const nextConfig = await loadConfig(activeConfigPath!);
+          if (!isNonStructuralReloadCompatible(config, nextConfig)) {
+            process.stderr.write(
+              `[callmux] SIGHUP reload ignored: structural config changes detected in ${activeConfigPath}\n`
+            );
+            return;
+          }
+          listener.applyRuntimeConfig(nextConfig);
+          config = nextConfig;
+          process.stderr.write(
+            `[callmux] Reloaded runtime security config from ${activeConfigPath}\n`
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(
+            `[callmux] SIGHUP reload failed (${activeConfigPath}): ${message}\n`
+          );
+        }
+      });
+    }
 
     process.on("SIGINT", () => { shutdown("SIGINT"); });
     process.on("SIGTERM", () => { shutdown("SIGTERM"); });

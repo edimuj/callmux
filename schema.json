@@ -227,15 +227,27 @@
           "minLength": 1,
           "description": "Scrypt hash of bearer token"
         },
+        "hashRef": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Secret reference for hash (`env:NAME` or `file:/path`)"
+        },
         "token": {
           "type": "string",
           "minLength": 1,
           "description": "Bearer token value (legacy migration mode)"
+        },
+        "tokenRef": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Secret reference for plaintext token (`env:NAME` or `file:/path`)"
         }
       },
       "oneOf": [
-        { "required": ["hash"], "not": { "required": ["token"] } },
-        { "required": ["token"], "not": { "required": ["hash"] } }
+        { "required": ["hash"], "not": { "anyOf": [{ "required": ["token"] }, { "required": ["hashRef"] }, { "required": ["tokenRef"] }] } },
+        { "required": ["hashRef"], "not": { "anyOf": [{ "required": ["token"] }, { "required": ["hash"] }, { "required": ["tokenRef"] }] } },
+        { "required": ["token"], "not": { "anyOf": [{ "required": ["hash"] }, { "required": ["hashRef"] }, { "required": ["tokenRef"] }] } },
+        { "required": ["tokenRef"], "not": { "anyOf": [{ "required": ["token"] }, { "required": ["hash"] }, { "required": ["hashRef"] }] } }
       ],
       "additionalProperties": false
     },

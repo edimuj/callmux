@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile, access, mkdir, writeFile } from "node:fs/promises";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -14,7 +15,7 @@ import type {
   MetricsConfig,
   ServerConfig,
 } from "./types.js";
-import { parseScryptTokenHash } from "./auth.js";
+import { hashBearerToken, parseScryptTokenHash } from "./auth.js";
 import { isValidCidrOrIp } from "./abuse.js";
 
 const SUPPORTED_OIDC_JWT_ALGORITHMS = new Set([
@@ -147,6 +148,47 @@ function parseAuthAllowUnauthenticatedHealth(
   optionName: string
 ): boolean | undefined {
   return parseBooleanOption(value, `${optionName}.allowUnauthenticatedHealth`);
+}
+
+function resolveSecretRefValue(
+  ref: unknown,
+  optionName: string,
+  configBaseDir?: string
+): string {
+  if (typeof ref !== "string" || ref.trim().length === 0) {
+    throw new Error(`${optionName} must be a non-empty string`);
+  }
+
+  if (ref.startsWith("env:")) {
+    const envName = ref.slice(4).trim();
+    if (envName.length === 0) {
+      throw new Error(`${optionName} env reference must include a variable name`);
+    }
+    const value = process.env[envName];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`${optionName} references missing or empty environment variable "${envName}"`);
+    }
+    return value;
+  }
+
+  if (ref.startsWith("file:")) {
+    const rawPath = ref.slice(5).trim();
+    if (rawPath.length === 0) {
+      throw new Error(`${optionName} file reference must include a path`);
+    }
+    const resolvedPath = configBaseDir
+      ? resolve(configBaseDir, rawPath)
+      : resolve(rawPath);
+    const value = readFileSync(resolvedPath, "utf-8").trim();
+    if (value.length === 0) {
+      throw new Error(`${optionName} resolved to an empty value from file "${resolvedPath}"`);
+    }
+    return value;
+  }
+
+  throw new Error(
+    `${optionName} must use supported secret refs: env:<NAME> or file:<PATH>`
+  );
 }
 
 function parseAuthorizationConfig(
@@ -356,7 +398,11 @@ function parseMetricsConfig(
   };
 }
 
-function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undefined {
+function parseAuthConfig(
+  value: unknown,
+  optionName: string,
+  configBaseDir?: string
+): AuthConfig | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
     throw new Error(`${optionName} must be an object`);
@@ -381,38 +427,66 @@ function parseAuthConfig(value: unknown, optionName: string): AuthConfig | undef
 
       const hasToken = token.token !== undefined;
       const hasHash = token.hash !== undefined;
-      if (hasToken && hasHash) {
+      const hasTokenRef = token.tokenRef !== undefined;
+      const hasHashRef = token.hashRef !== undefined;
+      const configuredCount = Number(hasToken) + Number(hasHash) + Number(hasTokenRef) + Number(hasHashRef);
+      if (configuredCount > 1) {
         throw new Error(
-          `${optionName}.tokens[${index}] cannot include both "token" and "hash"`
+          `${optionName}.tokens[${index}] must include exactly one of "hash", "hashRef", "token", or "tokenRef"`
         );
       }
-      if (!hasToken && !hasHash) {
+      if (configuredCount === 0) {
         throw new Error(
-          `${optionName}.tokens[${index}] must include either "hash" or legacy "token"`
+          `${optionName}.tokens[${index}] must include one of "hash", "hashRef", "token", or "tokenRef"`
         );
       }
 
-      if (hasHash) {
-        if (typeof token.hash !== "string" || token.hash.length === 0) {
-          throw new Error(`${optionName}.tokens[${index}].hash must be a non-empty string`);
-        }
-        if (!parseScryptTokenHash(token.hash)) {
+      if (hasHash || hasHashRef) {
+        const hashValue = hasHash
+          ? token.hash
+          : resolveSecretRefValue(
+              token.hashRef,
+              `${optionName}.tokens[${index}].hashRef`,
+              configBaseDir
+            );
+        if (typeof hashValue !== "string" || hashValue.length === 0) {
           throw new Error(
-            `${optionName}.tokens[${index}].hash must be a valid scrypt hash`
+            `${optionName}.tokens[${index}].${hasHash ? "hash" : "hashRef"} must resolve to a non-empty string`
+          );
+        }
+        if (!parseScryptTokenHash(hashValue)) {
+          throw new Error(
+            `${optionName}.tokens[${index}].${hasHash ? "hash" : "hashRef"} must be a valid scrypt hash`
           );
         }
         return {
           id: token.id,
-          hash: token.hash,
+          hash: hashValue,
         };
       }
 
-      if (typeof token.token !== "string" || token.token.length === 0) {
-        throw new Error(`${optionName}.tokens[${index}].token must be a non-empty string`);
+      const plaintextToken = hasToken
+        ? token.token
+        : resolveSecretRefValue(
+            token.tokenRef,
+            `${optionName}.tokens[${index}].tokenRef`,
+            configBaseDir
+          );
+      if (typeof plaintextToken !== "string" || plaintextToken.length === 0) {
+        throw new Error(
+          `${optionName}.tokens[${index}].${hasToken ? "token" : "tokenRef"} must resolve to a non-empty string`
+        );
       }
+      if (hasToken) {
+        return {
+          id: token.id,
+          token: plaintextToken,
+        };
+      }
+
       return {
         id: token.id,
-        token: token.token,
+        hash: hashBearerToken(plaintextToken),
       };
     });
 
@@ -597,13 +671,17 @@ function parseServers(
   );
 }
 
-function parseConfigDocument(parsed: Record<string, unknown>): {
+function parseConfigDocument(
+  parsed: Record<string, unknown>,
+  sourcePath?: string
+): {
   config: CallmuxConfig;
   format: ConfigFormat;
 } {
+  const configBaseDir = sourcePath ? dirname(resolve(sourcePath)) : undefined;
   const parseSharedFields = () => {
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
-    const auth = parseAuthConfig(parsed.auth, "auth");
+    const auth = parseAuthConfig(parsed.auth, "auth", configBaseDir);
     const authorization = parseAuthorizationConfig(
       parsed.authorization,
       "authorization"
@@ -781,18 +859,20 @@ export function getDefaultConfigPath(): string {
  * }
  */
 export async function loadConfig(configPath: string): Promise<CallmuxConfig> {
-  const raw = await readFile(resolve(configPath), "utf-8");
+  const resolvedPath = resolve(configPath);
+  const raw = await readFile(resolvedPath, "utf-8");
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return parseConfigDocument(parsed).config;
+  return parseConfigDocument(parsed, resolvedPath).config;
 }
 
 export async function loadConfigWithMetadata(configPath: string): Promise<{
   config: CallmuxConfig;
   format: ConfigFormat;
 }> {
-  const raw = await readFile(resolve(configPath), "utf-8");
+  const resolvedPath = resolve(configPath);
+  const raw = await readFile(resolvedPath, "utf-8");
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return parseConfigDocument(parsed);
+  return parseConfigDocument(parsed, resolvedPath);
 }
 
 export async function loadManagedConfig(
