@@ -744,8 +744,8 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
     "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
   },
   "auditLog": {
-    "enabled": true,
-    "includeRequestBody": true,
+    "enabled": false,
+    "includeRequestBody": false,
     "maxPayloadChars": 4096
   },
   "metrics": {
@@ -866,8 +866,8 @@ When limits are hit, listener endpoints return `429` with `Retry-After` (when ra
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
-| `enabled` | boolean | — | Enable structured JSON audit events (default `true`) |
-| `includeRequestBody` | boolean | — | Include redacted payload details when available |
+| `enabled` | boolean | — | Enable structured JSON audit events (default `false`) |
+| `includeRequestBody` | boolean | — | Include redacted payload details when available (default `false`) |
 | `maxPayloadChars` | integer | — | Max serialized payload chars in logs (`0` disables payload logging) |
 | `redactKeys` | string[] | — | Additional key names to redact (case-insensitive) |
 

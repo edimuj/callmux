@@ -28,6 +28,11 @@ interface AbuseLease {
   release: () => void;
 }
 
+interface AcquireOptions {
+  includeGlobalRate?: boolean;
+  includePrincipalLimits?: boolean;
+}
+
 function normalizeIpAddress(ip: string): string {
   const trimmed = ip.trim().toLowerCase();
   if (trimmed.startsWith("::ffff:")) {
@@ -198,13 +203,16 @@ export class AbuseController {
   }
 
   acquire(
-    principal: AuthorizationPrincipal | undefined
+    principal: AuthorizationPrincipal | undefined,
+    options: AcquireOptions = {}
   ): { result: AbuseLimitResult; lease?: AbuseLease } {
     const now = Date.now();
     const principalKey = principalRateKey(principal);
+    const includeGlobalRate = options.includeGlobalRate ?? true;
+    const includePrincipalLimits = options.includePrincipalLimits ?? true;
 
     const globalLimit = this.config.globalRequestsPerMinute;
-    if (globalLimit && globalLimit > 0) {
+    if (includeGlobalRate && globalLimit && globalLimit > 0) {
       const result = this.consumeRate(
         this.globalRates,
         "global",
@@ -217,7 +225,7 @@ export class AbuseController {
     }
 
     const principalLimit = this.config.principalRequestsPerMinute;
-    if (principalLimit && principalLimit > 0) {
+    if (includePrincipalLimits && principalLimit && principalLimit > 0) {
       const result = this.consumeRate(
         this.principalRates,
         principalKey,
@@ -230,7 +238,7 @@ export class AbuseController {
     }
 
     const inFlightLimit = this.config.principalMaxInFlight;
-    if (inFlightLimit && inFlightLimit > 0) {
+    if (includePrincipalLimits && inFlightLimit && inFlightLimit > 0) {
       const current = this.principalInflight.get(principalKey) ?? 0;
       if (current >= inFlightLimit) {
         return {

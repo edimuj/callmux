@@ -5,6 +5,8 @@ import type { AuthorizationPrincipal } from "./authorization.js";
 const DEFAULT_CLOCK_SKEW_SECONDS = 30;
 const DEFAULT_JWKS_CACHE_TTL_SECONDS = 300;
 const DEFAULT_JWKS_FETCH_TIMEOUT_MS = 5000;
+const DEFAULT_UNKNOWN_KID_TTL_MS = 10_000;
+const DEFAULT_FORCED_REFRESH_INTERVAL_MS = 10_000;
 
 const ALGORITHM_TO_VERIFY_HASH: Record<string, string> = {
   RS256: "RSA-SHA256",
@@ -125,6 +127,8 @@ export class OidcJwtVerifier {
   private allowedAlgorithms: Set<string>;
   private cachedJwks: CachedJwks | undefined;
   private inflightFetch: Promise<CachedJwks | undefined> | undefined;
+  private unknownKidCache = new Map<string, number>();
+  private forcedRefreshBlockedUntilMs = 0;
 
   constructor(config: OidcJwtAuthConfig) {
     this.config = config;
@@ -148,12 +152,24 @@ export class OidcJwtVerifier {
       return undefined;
     }
 
-    const jwk =
-      (await this.getJwkByKid(kid, false)) ??
-      (await this.getJwkByKid(kid, true));
-    if (!jwk) return undefined;
+    const cachedJwk = await this.getJwkByKid(kid, false);
+    if (cachedJwk) {
+      this.unknownKidCache.delete(kid);
+      if (!verifyJwtSignature(parsed, algorithm, cachedJwk)) {
+        return undefined;
+      }
+      return principal;
+    }
+    if (this.isUnknownKidCached(kid)) return undefined;
 
-    if (!verifyJwtSignature(parsed, algorithm, jwk)) {
+    const refreshedJwk = await this.getJwkByKid(kid, true);
+    if (!refreshedJwk) {
+      this.unknownKidCache.set(kid, Date.now() + DEFAULT_UNKNOWN_KID_TTL_MS);
+      return undefined;
+    }
+    this.unknownKidCache.delete(kid);
+
+    if (!verifyJwtSignature(parsed, algorithm, refreshedJwk)) {
       return undefined;
     }
 
@@ -191,6 +207,9 @@ export class OidcJwtVerifier {
     kid: string,
     forceRefresh: boolean
   ): Promise<Record<string, unknown> | undefined> {
+    if (forceRefresh && this.cachedJwks && this.cachedJwks.keysByKid.has(kid)) {
+      return this.cachedJwks.keysByKid.get(kid);
+    }
     const cache = await this.loadJwks(forceRefresh);
     if (!cache) return undefined;
     return cache.keysByKid.get(kid);
@@ -206,13 +225,19 @@ export class OidcJwtVerifier {
       return this.cachedJwks;
     }
 
-    if (this.inflightFetch && !forceRefresh) {
+    if (forceRefresh && now < this.forcedRefreshBlockedUntilMs) {
+      return this.cachedJwks;
+    }
+
+    if (this.inflightFetch) {
       return this.inflightFetch;
     }
 
     const fetchPromise = this.fetchJwks();
-    if (!forceRefresh) {
-      this.inflightFetch = fetchPromise;
+    this.inflightFetch = fetchPromise;
+    if (forceRefresh) {
+      this.forcedRefreshBlockedUntilMs =
+        now + DEFAULT_FORCED_REFRESH_INTERVAL_MS;
     }
 
     try {
@@ -222,10 +247,18 @@ export class OidcJwtVerifier {
       }
       return this.cachedJwks;
     } finally {
-      if (!forceRefresh) {
-        this.inflightFetch = undefined;
-      }
+      this.inflightFetch = undefined;
     }
+  }
+
+  private isUnknownKidCached(kid: string): boolean {
+    const expiresAt = this.unknownKidCache.get(kid);
+    if (!expiresAt) return false;
+    if (Date.now() >= expiresAt) {
+      this.unknownKidCache.delete(kid);
+      return false;
+    }
+    return true;
   }
 
   private async fetchJwks(): Promise<CachedJwks | undefined> {
@@ -305,10 +338,13 @@ function verifyJwtSignature(
 
   try {
     const key = createPublicKey({ key: jwk, format: "jwk" });
+    const keyInput = algorithm.startsWith("ES")
+      ? { key, dsaEncoding: "ieee-p1363" as const }
+      : key;
     return verifySignature(
       verifyAlgorithm,
       Buffer.from(parsed.signingInput, "utf-8"),
-      key,
+      keyInput,
       parsed.signature
     );
   } catch {

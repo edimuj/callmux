@@ -180,6 +180,25 @@ export class CallmuxListener {
     this.attachRequestCompletion(res, context);
 
     try {
+      if (!this.isSourceIpAllowed(req)) {
+        this.writeForbidden(res, context, "Source IP is not allowed");
+        return;
+      }
+
+      const preAuthAbuseLease = this.acquireAbuseLease(req, path, undefined, {
+        includeGlobalRate: true,
+        includePrincipalLimits: false,
+      });
+      if (!preAuthAbuseLease.allowed) {
+        this.writeTooManyRequests(
+          res,
+          context,
+          preAuthAbuseLease.reason,
+          preAuthAbuseLease.retryAfterSeconds
+        );
+        return;
+      }
+
       const principal = await this.authenticateRequest(req, path);
       if (principal === null) {
         this.writeUnauthorized(res, context);
@@ -187,23 +206,21 @@ export class CallmuxListener {
       }
       context.principal = principal ?? undefined;
 
-      if (!this.isSourceIpAllowed(req)) {
-        this.writeForbidden(res, context, "Source IP is not allowed");
-        return;
-      }
-
-      const abuseLease = this.acquireAbuseLease(req, path, principal);
-      if (!abuseLease.allowed) {
+      const postAuthAbuseLease = this.acquireAbuseLease(req, path, principal, {
+        includeGlobalRate: false,
+        includePrincipalLimits: true,
+      });
+      if (!postAuthAbuseLease.allowed) {
         this.writeTooManyRequests(
           res,
           context,
-          abuseLease.reason,
-          abuseLease.retryAfterSeconds
+          postAuthAbuseLease.reason,
+          postAuthAbuseLease.retryAfterSeconds
         );
         return;
       }
-      if (abuseLease.release) {
-        this.attachLeaseRelease(res, abuseLease.release);
+      if (postAuthAbuseLease.release) {
+        this.attachLeaseRelease(res, postAuthAbuseLease.release);
       }
 
       await this.authzContext.run(principal ?? undefined, async () => {
@@ -264,7 +281,11 @@ export class CallmuxListener {
         ? undefined
         : requestedLimit;
     const { body, bytes } = await readBody(req, readLimit);
-    const parsed = body ? JSON.parse(body) : undefined;
+    const parsed = this.parseJsonBody(body);
+    if (parsed === INVALID_JSON_BODY) {
+      this.writeJsonRpcError(res, 400, context, -32700, "Parse error");
+      return;
+    }
     const jsonRpcId = this.extractJsonRpcId(parsed);
     context.payload = parsed;
     const effectiveLimit = this.resolveEffectiveRequestBodyMaxBytes(parsed, requestedLimit);
@@ -382,7 +403,14 @@ export class CallmuxListener {
         ? undefined
         : requestedLimit;
     const { body, bytes } = await readBody(req, readLimit);
-    const parsed = body ? JSON.parse(body) : undefined;
+    const parsed = this.parseJsonBody(body);
+    if (parsed === INVALID_JSON_BODY) {
+      this.writeJson(res, 400, context, {
+        error: "Invalid JSON body",
+        requestId: context.requestId,
+      });
+      return;
+    }
     context.payload = parsed;
     const effectiveLimit = this.resolveEffectiveRequestBodyMaxBytes(parsed, requestedLimit);
     if (effectiveLimit !== undefined && bytes > effectiveLimit) {
@@ -792,7 +820,11 @@ export class CallmuxListener {
   private acquireAbuseLease(
     req: IncomingMessage,
     path: string,
-    principal: AuthorizationPrincipal | undefined
+    principal: AuthorizationPrincipal | undefined,
+    options: {
+      includeGlobalRate: boolean;
+      includePrincipalLimits: boolean;
+    }
   ): {
     allowed: boolean;
     reason: string;
@@ -812,7 +844,7 @@ export class CallmuxListener {
       return { allowed: true, reason: "Endpoint excluded from abuse controls" };
     }
 
-    const { result, lease } = this.abuseController.acquire(principal);
+    const { result, lease } = this.abuseController.acquire(principal, options);
     return {
       allowed: result.allowed,
       reason: result.reason,
@@ -899,40 +931,53 @@ export class CallmuxListener {
     const args = parsed.params.arguments;
 
     const targets = new Set<string>();
-    const addTarget = (target: unknown): void => {
-      if (typeof target === "string" && target.length > 0) {
-        targets.add(target);
+    const addResolvedToolTarget = (
+      toolName: unknown,
+      serverHint: unknown
+    ): void => {
+      if (typeof serverHint === "string" && serverHint.length > 0) {
+        targets.add(serverHint);
+        return;
       }
-    };
-    const addQualifiedToolTarget = (toolName: unknown): void => {
-      if (typeof toolName !== "string") return;
-      const target = inferServerFromQualifiedToolName(toolName);
-      if (target) targets.add(target);
+      if (typeof toolName !== "string" || toolName.length === 0) return;
+      const qualified = inferServerFromQualifiedToolName(toolName);
+      if (qualified) {
+        targets.add(qualified);
+        return;
+      }
+      const resolved = this.options.upstream.resolveServer(toolName);
+      if (!resolved || "error" in resolved) return;
+      targets.add(resolved.server);
     };
 
     if (name === "callmux_call" && isRecord(args)) {
-      addTarget(args.server);
-      addQualifiedToolTarget(args.tool);
+      addResolvedToolTarget(args.tool, args.server);
     } else if (name === "callmux_batch" && isRecord(args)) {
-      addTarget(args.server);
-      addQualifiedToolTarget(args.tool);
+      addResolvedToolTarget(args.tool, args.server);
     } else if (name === "callmux_parallel" && isRecord(args) && Array.isArray(args.calls)) {
       for (const call of args.calls) {
         if (!isRecord(call)) continue;
-        addTarget(call.server);
-        addQualifiedToolTarget(call.tool);
+        addResolvedToolTarget(call.tool, call.server);
       }
     } else if (name === "callmux_pipeline" && isRecord(args) && Array.isArray(args.steps)) {
       for (const step of args.steps) {
         if (!isRecord(step)) continue;
-        addTarget(step.server);
-        addQualifiedToolTarget(step.tool);
+        addResolvedToolTarget(step.tool, step.server);
       }
     } else {
-      addQualifiedToolTarget(name);
+      addResolvedToolTarget(name, undefined);
     }
 
     return Array.from(targets);
+  }
+
+  private parseJsonBody(body: string | undefined): unknown {
+    if (!body) return undefined;
+    try {
+      return JSON.parse(body);
+    } catch {
+      return INVALID_JSON_BODY;
+    }
   }
 }
 
@@ -971,6 +1016,8 @@ function parseBearerToken(authorization: string): string | undefined {
   const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
   return match?.[1];
 }
+
+const INVALID_JSON_BODY = Symbol("invalid_json_body");
 
 function extractStructuredErrorMessage(result: unknown): string {
   if (!isRecord(result)) return "";

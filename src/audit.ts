@@ -29,8 +29,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeConfig(config: AuditLogConfig | undefined): Required<AuditLogConfig> {
   return {
-    enabled: config?.enabled ?? true,
-    includeRequestBody: config?.includeRequestBody ?? true,
+    enabled: config?.enabled ?? false,
+    includeRequestBody: config?.includeRequestBody ?? false,
     maxPayloadChars: config?.maxPayloadChars ?? DEFAULT_MAX_PAYLOAD_CHARS,
     redactKeys: config?.redactKeys ?? [],
   };

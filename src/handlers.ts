@@ -296,6 +296,27 @@ function inferServerFromQualifiedTool(
   return tool.slice(0, separator);
 }
 
+function resolveServerForConcurrency(
+  upstream: UpstreamManager,
+  tool: string,
+  explicitServer?: string
+): string | undefined {
+  const inferred = inferServerFromQualifiedTool(tool, explicitServer);
+  if (inferred) return inferred;
+
+  const maybeResolve = (upstream as unknown as {
+    resolveServer?: (
+      toolName: string,
+      serverHint?: string
+    ) => { server: string } | { error: CallToolResult } | null;
+  }).resolveServer;
+  if (typeof maybeResolve !== "function") return undefined;
+
+  const resolved = maybeResolve.call(upstream, tool, explicitServer);
+  if (!resolved || "error" in resolved) return undefined;
+  return resolved.server;
+}
+
 type DryRunMode = "call" | "parallel" | "batch" | "pipeline";
 
 interface DryRunCall {
@@ -456,6 +477,10 @@ export async function handleParallel(
 
   const startTime = Date.now();
   const { calls } = parsedArgs;
+  const callsWithLimits = calls.map((call) => ({
+    call,
+    serverForLimit: resolveServerForConcurrency(upstream, call.tool, call.server),
+  }));
 
   const globalSemaphore = new Semaphore(maxConcurrency);
   const serverSemaphores = new Map<string, Semaphore>();
@@ -471,8 +496,7 @@ export async function handleParallel(
     return sem;
   };
 
-  const promises = calls.map(async (call) => {
-    const serverForLimit = inferServerFromQualifiedTool(call.tool, call.server);
+  const promises = callsWithLimits.map(async ({ call, serverForLimit }) => {
     const serverSem = getServerSemaphore(serverForLimit);
     await globalSemaphore.acquire();
     if (serverSem) await serverSem.acquire();
@@ -522,7 +546,7 @@ export async function handleBatch(
   const startTime = Date.now();
   const { server, tool, items } = parsedArgs;
 
-  const serverForLimit = inferServerFromQualifiedTool(tool, server);
+  const serverForLimit = resolveServerForConcurrency(upstream, tool, server);
   const serverLimit = serverForLimit
     ? upstream.getServerConcurrency(serverForLimit)
     : undefined;

@@ -109,13 +109,49 @@ function signJwtRs256(
   return `${signingInput}.${signature}`;
 }
 
+function createEs256JwtKeyPair(kid: string): JwtKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", {
+    namedCurve: "P-256",
+  });
+  const exported = publicKey.export({ format: "jwk" }) as Record<string, unknown>;
+  return {
+    privateKey,
+    jwk: {
+      ...exported,
+      kid,
+      use: "sig",
+      alg: "ES256",
+    },
+  };
+}
+
+function signJwtEs256(
+  key: JwtKeyPair,
+  payload: Record<string, unknown>
+): string {
+  const header = encodeBase64UrlJson({ alg: "ES256", typ: "JWT", kid: key.jwk.kid as string });
+  const payloadSegment = encodeBase64UrlJson(payload);
+  const signingInput = `${header}.${payloadSegment}`;
+  const signer = createSign("SHA256");
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer.sign({
+    key: key.privateKey,
+    dsaEncoding: "ieee-p1363",
+  }).toString("base64url");
+  return `${signingInput}.${signature}`;
+}
+
 async function startJwksServer(initialKeys: Record<string, unknown>[]): Promise<{
   url: string;
   setKeys: (keys: Record<string, unknown>[]) => void;
+  getRequestCount: () => number;
   close: () => Promise<void>;
 }> {
   let keys = initialKeys;
+  let requestCount = 0;
   const server = createServer((_req: IncomingMessage, res: ServerResponse) => {
+    requestCount++;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ keys }));
   });
@@ -134,6 +170,9 @@ async function startJwksServer(initialKeys: Record<string, unknown>[]): Promise<
     url: `http://127.0.0.1:${address.port}/jwks`,
     setKeys(nextKeys: Record<string, unknown>[]) {
       keys = nextKeys;
+    },
+    getRequestCount() {
+      return requestCount;
     },
     close() {
       return new Promise<void>((resolve) => {
@@ -329,6 +368,41 @@ test("per-server concurrency limits qualified parallel tool calls without server
   assert.equal(maxConcurrent, 1);
 });
 
+test("per-server concurrency limits unique unqualified parallel tool calls", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency(server: string) {
+      return server === "fragile" ? 1 : undefined;
+    },
+    resolveServer(toolName: string) {
+      return { client: {}, actualName: toolName, server: "fragile" };
+    },
+  };
+
+  await handleParallel(
+    upstream as never,
+    new CallCache(0),
+    {
+      calls: [
+        { tool: "a", arguments: {} },
+        { tool: "b", arguments: {} },
+        { tool: "c", arguments: {} },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 1);
+});
+
 test("batch respects per-server concurrency limit", async () => {
   let maxConcurrent = 0;
   let current = 0;
@@ -383,6 +457,43 @@ test("batch respects per-server concurrency limit for qualified tool without ser
     new CallCache(0),
     {
       tool: "limited__process",
+      items: [
+        { arguments: { id: 1 } },
+        { arguments: { id: 2 } },
+        { arguments: { id: 3 } },
+        { arguments: { id: 4 } },
+      ],
+    },
+    10
+  );
+
+  assert.equal(maxConcurrent, 2);
+});
+
+test("batch respects per-server concurrency limit for unique unqualified tool", async () => {
+  let maxConcurrent = 0;
+  let current = 0;
+  const upstream = {
+    async callTool() {
+      current++;
+      if (current > maxConcurrent) maxConcurrent = current;
+      await new Promise((r) => setTimeout(r, 20));
+      current--;
+      return textResult("ok");
+    },
+    getServerConcurrency(server: string) {
+      return server === "limited" ? 2 : undefined;
+    },
+    resolveServer(toolName: string) {
+      return { client: {}, actualName: toolName, server: "limited" };
+    },
+  };
+
+  await handleBatch(
+    upstream as never,
+    new CallCache(0),
+    {
+      tool: "process",
       items: [
         { arguments: { id: 1 } },
         { arguments: { id: 2 } },
@@ -4440,7 +4551,7 @@ test("listener /health returns ok with session count", async () => {
   });
 
   // Use a random port
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4475,7 +4586,7 @@ test("listener requires bearer auth for /health by default when auth is configur
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4514,7 +4625,7 @@ test("listener accepts hashed bearer auth tokens", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4566,7 +4677,7 @@ test("listener accepts valid oidc_jwt bearer tokens", async () => {
     nbf: nowSeconds - 30,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4574,6 +4685,57 @@ test("listener accepts valid oidc_jwt bearer tokens", async () => {
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(unauthorized.status, 401);
 
+    const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(authorized.status, 200);
+  } finally {
+    await listener.close();
+    await jwks.close();
+  }
+});
+
+test("listener accepts valid ES256 oidc_jwt bearer tokens", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const key = createEs256JwtKeyPair("kid-es-1");
+  const jwks = await startJwksServer([key.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+        algorithms: ["ES256"],
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const token = signJwtEs256(key, {
+    sub: "user-es-1",
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+    nbf: nowSeconds - 30,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
     const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -4619,7 +4781,7 @@ test("listener rejects oidc_jwt token with invalid signature", async () => {
     exp: nowSeconds + 300,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4669,7 +4831,7 @@ test("listener rejects expired oidc_jwt token", async () => {
     exp: nowSeconds - 5,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4726,7 +4888,7 @@ test("listener refreshes JWKS on kid rotation for oidc_jwt tokens", async () => 
     exp: nowSeconds + 300,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4742,6 +4904,65 @@ test("listener refreshes JWKS on kid rotation for oidc_jwt tokens", async () => 
       headers: { Authorization: `Bearer ${tokenTwo}` },
     });
     assert.equal(second.status, 200);
+  } finally {
+    await listener.close();
+    await jwks.close();
+  }
+});
+
+test("listener throttles forced JWKS refreshes on repeated unknown kid misses", async () => {
+  const issuer = "https://issuer.example.test";
+  const audience = "callmux";
+  const trusted = createJwtKeyPair("kid-trusted");
+  const unknown = createJwtKeyPair("kid-unknown");
+  const jwks = await startJwksServer([trusted.jwk]);
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "oidc_jwt",
+        issuer,
+        audience,
+        jwksUri: jwks.url,
+        jwksCacheTtlSeconds: 3600,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const badToken = signJwtRs256(unknown, {
+    sub: "user-unknown",
+    iss: issuer,
+    aud: audience,
+    exp: nowSeconds + 300,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const first = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${badToken}` },
+    });
+    assert.equal(first.status, 401);
+
+    const second = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: `Bearer ${badToken}` },
+    });
+    assert.equal(second.status, 401);
+
+    const jwksRequests = jwks.getRequestCount();
+    assert.ok(jwksRequests <= 2, `expected <= 2 JWKS fetches, got ${jwksRequests}`);
   } finally {
     await listener.close();
     await jwks.close();
@@ -4769,7 +4990,7 @@ test("listener allows unauthenticated /health when configured", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4795,7 +5016,7 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4815,6 +5036,46 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
       body.error?.message,
       "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id."
     );
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener /mcp returns JSON-RPC parse error for invalid JSON", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      },
+      body: "{ invalid json",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as {
+      error?: { code?: number; message?: string };
+      id?: unknown;
+    };
+    assert.equal(body.error?.code, -32700);
+    assert.equal(body.error?.message, "Parse error");
+    assert.equal(body.id, null);
   } finally {
     await listener.close();
   }
@@ -4840,7 +5101,7 @@ test("listener requires bearer auth for /mcp", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -4913,7 +5174,7 @@ test("listener enforces authorization policy for direct and meta-routed tool cal
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5028,7 +5289,7 @@ test("listener includes request IDs in error responses and headers", async () =>
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
   await listener.start();
   try {
@@ -5092,7 +5353,7 @@ test("listener serves prometheus metrics endpoint and tracks request counters", 
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
   await listener.start();
   try {
@@ -5137,7 +5398,7 @@ test("listener can require auth for metrics endpoint", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
   await listener.start();
   try {
@@ -5174,7 +5435,7 @@ test("listener audit log redacts sensitive payload fields", async () => {
       maxConcurrency: 10,
     });
 
-    const port = 19876 + Math.floor(Math.random() * 1000);
+    const port = 30000 + Math.floor(Math.random() * 20000);
     (listener as any).options.port = port;
     await listener.start();
     try {
@@ -5236,7 +5497,7 @@ test("listener enforces global abuse rate limit", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5255,6 +5516,60 @@ test("listener enforces global abuse rate limit", async () => {
     });
     assert.equal(second.status, 429);
     assert.equal(second.headers.get("retry-after"), "60");
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener applies global abuse rate limits before authentication work", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "ops-secret" }],
+      },
+      abuseControls: {
+        globalRequestsPerMinute: 1,
+      },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const first = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: "Bearer definitely-invalid-token",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+    });
+    assert.equal(first.status, 401);
+
+    const second = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        Authorization: "Bearer definitely-invalid-token",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 2 }),
+    });
+    assert.equal(second.status, 429);
   } finally {
     await listener.close();
   }
@@ -5286,7 +5601,7 @@ test("listener enforces principal abuse rate limit independently per principal",
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5334,7 +5649,7 @@ test("listener enforces source IP CIDR allowlist", async () => {
     maxConcurrency: 10,
   });
 
-  const deniedPort = 19876 + Math.floor(Math.random() * 1000);
+  const deniedPort = 30000 + Math.floor(Math.random() * 20000);
   (deniedListener as any).options.port = deniedPort;
   await deniedListener.start();
   try {
@@ -5359,7 +5674,7 @@ test("listener enforces source IP CIDR allowlist", async () => {
     maxConcurrency: 10,
   });
 
-  const allowedPort = 19876 + Math.floor(Math.random() * 1000);
+  const allowedPort = 30000 + Math.floor(Math.random() * 20000);
   (allowedListener as any).options.port = allowedPort;
   await allowedListener.start();
   try {
@@ -5393,7 +5708,7 @@ test("listener enforces principal in-flight abuse limit with backpressure", asyn
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5465,7 +5780,7 @@ test("listener rejects oversized /mcp payloads with 413", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5502,7 +5817,7 @@ test("listener allows per-request payload override when enabled", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5545,7 +5860,7 @@ test("listener rejects per-request payload override when disabled", async () => 
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5586,7 +5901,7 @@ test("listener applies per-server payload limit for targeted tools", async () =>
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5600,6 +5915,65 @@ test("listener applies per-server payload limit for targeted tools", async () =>
         params: {
           name: "github__get_issue",
           arguments: { payload: "x".repeat(6_000) },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(res.status, 413);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener applies per-server payload limit for unique unqualified callmux_call tool", async () => {
+  const upstream = new UpstreamManager();
+  (upstream as unknown as {
+    resolveServer: (
+      toolName: string
+    ) => { client: unknown; actualName: string; server: string } | null;
+  }).resolveServer = (toolName: string) => {
+    if (toolName === "get_issue") {
+      return { client: {}, actualName: "get_issue", server: "github" };
+    }
+    return null;
+  };
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {
+        github: { command: "node", args: ["server.js"], requestBodyMaxBytes: 1024 },
+      },
+      requestBodyMaxBytes: 100_000,
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "callmux_call",
+          arguments: {
+            tool: "get_issue",
+            arguments: { payload: "x".repeat(6_000) },
+          },
         },
         id: 1,
       }),
@@ -5625,7 +5999,7 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();
@@ -5689,7 +6063,7 @@ test("listener SSE endpoint establishes connection", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 19876 + Math.floor(Math.random() * 1000);
+  const port = 30000 + Math.floor(Math.random() * 20000);
   (listener as any).options.port = port;
 
   await listener.start();

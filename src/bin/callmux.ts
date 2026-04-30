@@ -167,8 +167,8 @@ Config file format:
       "cidrAllowlist": ["127.0.0.1/32", "::1/128"]
     },
     "auditLog": {
-      "enabled": true,
-      "includeRequestBody": true,
+      "enabled": false,
+      "includeRequestBody": false,
       "maxPayloadChars": 4096
     },
     "metrics": {
