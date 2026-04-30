@@ -810,6 +810,7 @@ export function handleStatus(
   const parsed = isRecord(args) ? args : {};
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
   const includeDescriptions = parsed.descriptions === true;
+  const includeRecommendations = parsed.recommendations !== false;
   const descriptionMaxLength =
     typeof parsed.descriptionMaxLength === "number" && parsed.descriptionMaxLength > 0
       ? parsed.descriptionMaxLength
@@ -895,6 +896,44 @@ export function handleStatus(
     ...failedServers.map((failure) => failure.name),
   ])].sort();
 
+  const recommendations: Array<{ when: string; use: string; note: string }> = [];
+  if (metaOnly) {
+    recommendations.push({
+      when: "Single downstream call in meta-only mode",
+      use: "callmux_call",
+      note: "Call one proxied tool by name with optional server hint.",
+    });
+  }
+  recommendations.push(
+    {
+      when: "Independent calls to different tools",
+      use: "callmux_parallel",
+      note: "Run unrelated calls concurrently.",
+    },
+    {
+      when: "Same tool repeated with different arguments",
+      use: "callmux_batch",
+      note: "Fan out one tool across many input items.",
+    },
+    {
+      when: "Later call depends on earlier output",
+      use: "callmux_pipeline",
+      note: "Map prior results into next-step arguments.",
+    },
+    {
+      when: "Validate routing/arguments before execution",
+      use: "callmux_dry_run",
+      note: "Resolve refs and detect ambiguity without running downstream tools.",
+    }
+  );
+  if (wrappedServers.length > 1 && !serverFilter) {
+    recommendations.push({
+      when: "Avoid ambiguity across multiple wrapped servers",
+      use: "server hint or qualified tool names",
+      note: "Set server in meta-calls or use names like github__get_issue.",
+    });
+  }
+
   return jsonResult({
     status: failedServers.length > 0 ? "degraded" : "ok",
     mode: metaOnly ? "meta-only" : "standard",
@@ -906,6 +945,7 @@ export function handleStatus(
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
     maxConcurrency,
+    ...(includeRecommendations ? { recommendations } : {}),
   });
 }
 

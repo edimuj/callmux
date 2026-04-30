@@ -235,6 +235,11 @@ export const META_TOOLS: Tool[] = [
             "Max chars per tool description. Truncated values end with '...'. " +
             "0 or omit = no limit. Only applies when descriptions is true.",
         },
+        recommendations: {
+          type: "boolean",
+          description:
+            "Include lightweight guidance on which callmux meta-tool to use for common patterns (default true).",
+        },
       },
       additionalProperties: false,
     },

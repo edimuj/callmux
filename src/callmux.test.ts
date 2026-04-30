@@ -1648,13 +1648,124 @@ test("UpstreamManager call timeout returns a structured tool error", async () =>
 
   assert.equal(observedTimeout, 5);
   assert.equal(result.isError, true);
-  assert.deepEqual(result.structuredContent, {
-    error: {
-      code: "tool_call_failed",
-      message: "timed out after 5ms",
-      details: { tool: "get_issue" },
-    },
-  });
+  const structured = result.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(structured.error.code, "tool_call_failed");
+  assert.equal(structured.error.message, "timed out after 5ms");
+  assert.equal(structured.error.details?.tool, "get_issue");
+  assert.equal(structured.error.details?.category, "timeout");
+  assert.equal(structured.error.details?.retryable, true);
+  assert.match(String(structured.error.details?.rootCause ?? ""), /timed out after 5ms/i);
+});
+
+test("UpstreamManager normalizes noisy transport/protocol tool-call failures", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "tokenlean",
+      {
+        async callTool() {
+          throw new Error(
+            "tool call error: tool call failed for `callmux/tokenlean__tl_advise` " +
+            "Caused by: Transport send error: Transport " +
+            "[rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker>] " +
+            "error: Deserialize error: data did not match any variant of untagged enum JsonRpcMessage"
+          );
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["tokenlean__tl_advise", { server: "tokenlean", tool: { name: "tl_advise" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["tokenlean", new Set(["tl_advise"])]]);
+
+  const result = await upstream.callTool("tokenlean__tl_advise", { goal: "x" });
+  const structured = result.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(result.isError, true);
+  assert.equal(structured.error.code, "tool_call_failed");
+  assert.match(structured.error.message, /downstream protocol error/i);
+  assert.match(structured.error.message, /JsonRpcMessage/i);
+  assert.equal(structured.error.details?.category, "protocol");
+  assert.equal(structured.error.details?.retryable, true);
+  assert.match(String(structured.error.details?.rootCause ?? ""), /JsonRpcMessage/i);
+});
+
+test("UpstreamManager classifies downstream authorization failures", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "remote",
+      {
+        async callTool() {
+          throw new Error("Transport send error: unauthorized (401) from downstream");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["read_secure_doc", { server: "remote", tool: { name: "read_secure_doc" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["remote", new Set(["read_secure_doc"])]]);
+
+  const result = await upstream.callTool("read_secure_doc", {});
+  const structured = result.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(result.isError, true);
+  assert.equal(structured.error.code, "tool_call_failed");
+  assert.match(structured.error.message, /downstream authorization error/i);
+  assert.equal(structured.error.details?.category, "authorization");
+  assert.equal(structured.error.details?.retryable, false);
+});
+
+test("UpstreamManager classifies downstream session failures as retryable", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "remote",
+      {
+        async callTool() {
+          throw new Error("unknown session: 6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["resume", { server: "remote", tool: { name: "resume" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["remote", new Set(["resume"])]]);
+
+  const result = await upstream.callTool("resume");
+  const structured = result.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(result.isError, true);
+  assert.equal(structured.error.code, "tool_call_failed");
+  assert.match(structured.error.message, /downstream session error/i);
+  assert.equal(structured.error.details?.category, "session");
+  assert.equal(structured.error.details?.retryable, true);
 });
 
 test("UpstreamManager resolves $file references before forwarding tool arguments", async () => {
@@ -2632,6 +2743,57 @@ test("handleStatus returns descriptions when requested", () => {
 
   assert.equal(content.servers[0].tools[0].name, "get_issue");
   assert.equal(content.servers[0].tools[0].description, "Get a specific issue by number");
+});
+
+test("handleStatus includes recommendations by default", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "linear", tool: mockTool("get_issue") },
+  ]);
+
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    true,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
+
+  const content = result.structuredContent as {
+    recommendations?: Array<{ when: string; use: string; note: string }>;
+  };
+  assert.ok(Array.isArray(content.recommendations));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_parallel"));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_batch"));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_pipeline"));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_dry_run"));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_call"));
+  assert.ok(
+    content.recommendations!.some((r) => r.use === "server hint or qualified tool names")
+  );
+});
+
+test("handleStatus can disable recommendations", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    { recommendations: false }
+  );
+
+  const content = result.structuredContent as {
+    recommendations?: Array<{ when: string; use: string; note: string }>;
+  };
+  assert.equal(content.recommendations, undefined);
 });
 
 test("handleStatus truncates descriptions to maxLength", () => {

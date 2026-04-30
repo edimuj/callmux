@@ -77,6 +77,173 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type ToolCallFailureCategory =
+  | "timeout"
+  | "protocol"
+  | "transport"
+  | "session"
+  | "authorization"
+  | "unknown";
+
+interface NormalizedToolCallFailure {
+  message: string;
+  category: ToolCallFailureCategory;
+  rootCause: string;
+  retryable: boolean;
+}
+
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function collectErrorMessages(error: unknown): string[] {
+  const seen = new Set<unknown>();
+  const out: string[] = [];
+
+  function visit(value: unknown): void {
+    if (value === null || value === undefined) return;
+    if (seen.has(value)) return;
+    if (typeof value === "object") seen.add(value);
+
+    if (value instanceof Error) {
+      if (value.message) out.push(value.message);
+      visit((value as { cause?: unknown }).cause);
+      return;
+    }
+
+    if (typeof value === "string") {
+      out.push(value);
+      return;
+    }
+
+    if (isPlainObject(value)) {
+      const maybeMessage = value.message;
+      if (typeof maybeMessage === "string") {
+        out.push(maybeMessage);
+      }
+      visit(value.cause);
+      return;
+    }
+
+    out.push(String(value));
+  }
+
+  visit(error);
+  return out.map((message) => normalizeWhitespace(message)).filter((message) => message.length > 0);
+}
+
+function stripErrorNoise(message: string): string {
+  return message
+    .replace(/tool call error:\s*/gi, "")
+    .replace(/tool call failed for [`'"].+?[`'"]\s*:?/gi, "")
+    .replace(/caused by:\s*/gi, "")
+    .replace(/transport send error:\s*/gi, "")
+    .replace(/\[[^\]]*?\]\s*error:\s*/gi, "")
+    .replace(/transport\s+error:\s*/gi, "")
+    .replace(/deserialize error:\s*/gi, "")
+    .replace(/^\s*:\s*/, "")
+    .trim();
+}
+
+function classifyToolCallFailure(text: string): ToolCallFailureCategory {
+  const lower = text.toLowerCase();
+  if (
+    lower.includes("timed out") ||
+    lower.includes("timeout") ||
+    lower.includes("deadline exceeded")
+  ) {
+    return "timeout";
+  }
+  if (
+    lower.includes("jsonrpcmessage") ||
+    lower.includes("json-rpc") ||
+    lower.includes("jsonrpc") ||
+    lower.includes("deserialize error") ||
+    lower.includes("parse error") ||
+    lower.includes("invalid response frame")
+  ) {
+    return "protocol";
+  }
+  if (
+    lower.includes("unauthorized") ||
+    lower.includes("forbidden") ||
+    lower.includes("permission denied") ||
+    lower.includes("authentication failed")
+  ) {
+    return "authorization";
+  }
+  if (
+    lower.includes("transport send error") ||
+    lower.includes("connection reset") ||
+    lower.includes("socket hang up") ||
+    lower.includes("broken pipe") ||
+    lower.includes("econnrefused") ||
+    lower.includes("econnreset") ||
+    lower.includes("ehostunreach")
+  ) {
+    return "transport";
+  }
+  if (
+    lower.includes("session not found") ||
+    lower.includes("unknown session") ||
+    lower.includes("session closed") ||
+    lower.includes("session expired")
+  ) {
+    return "session";
+  }
+  return "unknown";
+}
+
+function defaultCategoryMessage(category: ToolCallFailureCategory): string {
+  switch (category) {
+    case "timeout":
+      return "downstream call timed out";
+    case "protocol":
+      return "downstream protocol error";
+    case "transport":
+      return "downstream transport error";
+    case "session":
+      return "downstream session error";
+    case "authorization":
+      return "downstream authorization error";
+    default:
+      return "downstream tool call failed";
+  }
+}
+
+function isRetryableToolCallFailure(category: ToolCallFailureCategory): boolean {
+  return (
+    category === "timeout" ||
+    category === "transport" ||
+    category === "session" ||
+    category === "protocol"
+  );
+}
+
+function normalizeToolCallFailure(error: unknown): NormalizedToolCallFailure {
+  const rawMessages = collectErrorMessages(error);
+  const joined = rawMessages.join(" | ");
+  const category = classifyToolCallFailure(joined);
+
+  const rootCandidates = rawMessages
+    .flatMap((message) => message.split(/\s+\|\s+|\n+/))
+    .map((message) => stripErrorNoise(message))
+    .filter((message) => message.length > 0);
+  const rootCause = rootCandidates[rootCandidates.length - 1] ?? "unknown failure";
+
+  let message = rootCause;
+  if (category !== "unknown" && !rootCause.toLowerCase().includes("timed out")) {
+    message = `${defaultCategoryMessage(category)}: ${rootCause}`;
+  }
+
+  return {
+    message,
+    category,
+    rootCause,
+    retryable: isRetryableToolCallFailure(category),
+  };
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -781,9 +948,13 @@ export class UpstreamManager {
       );
       return result as unknown as CallToolResult;
     } catch (error) {
-      return errorResult("tool_call_failed", errorMessage(error), {
+      const normalized = normalizeToolCallFailure(error);
+      return errorResult("tool_call_failed", normalized.message, {
         tool: toolName,
         ...(serverHint ? { server: serverHint } : {}),
+        category: normalized.category,
+        rootCause: normalized.rootCause,
+        retryable: normalized.retryable,
       });
     }
   }

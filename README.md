@@ -393,11 +393,13 @@ Like `$file`, `$text` is resolved by callmux before forwarding, so downstream MC
 
 ### `callmux_status`
 
-Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.
+Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, mode, and lightweight `recommendations` for choosing the right meta-tool. Pass `descriptions: true` for tool discovery in meta-only mode.
 
 ```json
-{ "server": "github", "descriptions": true, "descriptionMaxLength": 80 }
+{ "server": "github", "descriptions": true, "descriptionMaxLength": 80, "recommendations": true }
 ```
+
+Set `"recommendations": false` to omit guidance from status responses when you need the smallest payload.
 
 If you run multiple callmux instances in one session, set `CALLMUX_NAMESPACE` on each process (for example `mcp__server1__`, `mcp__callmux__`) so errors and status output clearly identify which instance handled a call.
 
