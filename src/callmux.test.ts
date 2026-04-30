@@ -1656,6 +1656,147 @@ test("UpstreamManager call timeout returns a structured tool error", async () =>
   });
 });
 
+test("UpstreamManager resolves $file references before forwarding tool arguments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-file-ref-ok-"));
+  const bodyPath = join(dir, "body.md");
+  await writeFile(bodyPath, "# Hello\n\nFrom file.\n", "utf8");
+
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  try {
+    const result = await upstream.callTool("create_issue", {
+      title: "Issue title",
+      body: { $file: bodyPath },
+      nested: {
+        template: { $file: bodyPath },
+      },
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(capturedArguments?.title, "Issue title");
+    assert.equal(capturedArguments?.body, "# Hello\n\nFrom file.\n");
+    assert.equal(
+      (capturedArguments?.nested as { template: string }).template,
+      "# Hello\n\nFrom file.\n"
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("UpstreamManager returns structured error when $file path is missing", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool() {
+          return textResult("unexpected");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  const result = await upstream.callTool("create_issue", {
+    body: { $file: "/tmp/definitely-does-not-exist-callmux.md" },
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "tool_call_failed"
+  );
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /ENOENT|no such file/i
+  );
+});
+
+test("UpstreamManager enforces $file maxBytes with optional override", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-file-ref-max-"));
+  const bodyPath = join(dir, "big.md");
+  await writeFile(bodyPath, "0123456789", "utf8");
+
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  try {
+    const tooSmall = await upstream.callTool("create_issue", {
+      body: { $file: bodyPath, maxBytes: 4 },
+    });
+    assert.equal(tooSmall.isError, true);
+    assert.equal(
+      (tooSmall.structuredContent as { error: { code: string } }).error.code,
+      "tool_call_failed"
+    );
+    assert.match(
+      (tooSmall.structuredContent as { error: { message: string } }).error.message,
+      /exceeds maxBytes/
+    );
+
+    const success = await upstream.callTool("create_issue", {
+      body: { $file: bodyPath, maxBytes: 16 },
+    });
+    assert.equal(success.isError, undefined);
+    assert.equal(capturedArguments?.body, "0123456789");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("fake MCP fixture supports real stdio listTools and callTool", async () => {
   const upstream = new UpstreamManager();
 

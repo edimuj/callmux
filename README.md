@@ -315,6 +315,32 @@ Call a single downstream tool by name. Primary invocation path in [meta-only mod
 
 If `server` is wrong, callmux now returns a structured `tool_resolution_failed` error with the instance identity and available server names for faster rerouting.
 
+#### File References For Long String Arguments
+
+Any argument object can use a `$file` reference. callmux reads the file and replaces the object with file content before forwarding to the downstream MCP tool:
+
+```json
+{
+  "tool": "github__create_issue",
+  "arguments": {
+    "title": "Stream A: Whistleblower",
+    "body": { "$file": "/tmp/stream-a-body.md" }
+  }
+}
+```
+
+Optional `maxBytes` override is supported per reference:
+
+```json
+{
+  "body": { "$file": "/tmp/stream-a-body.md", "maxBytes": 2000000 }
+}
+```
+
+Defaults:
+- `maxBytes` defaults to `1000000` (1 MB) when omitted.
+- Hard cap for `maxBytes` is `10000000` (10 MB).
+
 ### `callmux_status`
 
 Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, and mode. Pass `descriptions: true` for tool discovery in meta-only mode.

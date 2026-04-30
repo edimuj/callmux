@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { readFile, stat } from "node:fs/promises";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
@@ -18,6 +19,8 @@ import type {
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
+const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
 
 export async function mapBounded<T, R>(
   items: T[],
@@ -64,6 +67,10 @@ interface UpstreamConnectOptions {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function withTimeout<T>(
@@ -427,6 +434,76 @@ export class UpstreamManager {
     }
   }
 
+  private async resolveFileReferences(
+    value: unknown,
+    path: string
+  ): Promise<unknown> {
+    if (Array.isArray(value)) {
+      return Promise.all(
+        value.map((item, index) => this.resolveFileReferences(item, `${path}[${index}]`))
+      );
+    }
+
+    if (!isPlainObject(value)) {
+      return value;
+    }
+
+    if ("$file" in value) {
+      const allowedKeys = new Set(["$file", "maxBytes"]);
+      const unexpectedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
+      if (unexpectedKeys.length > 0) {
+        throw new Error(
+          `invalid $file reference at ${path}: unexpected keys [${unexpectedKeys.join(", ")}]`
+        );
+      }
+
+      const filePath = value.$file;
+      if (typeof filePath !== "string" || filePath.trim().length === 0) {
+        throw new Error(`invalid $file reference at ${path}: "$file" must be a non-empty string`);
+      }
+
+      const requestedMaxBytesRaw = value.maxBytes;
+      let requestedMaxBytes: number | undefined;
+      if (requestedMaxBytesRaw !== undefined) {
+        if (
+          typeof requestedMaxBytesRaw !== "number" ||
+          !Number.isInteger(requestedMaxBytesRaw) ||
+          requestedMaxBytesRaw <= 0 ||
+          requestedMaxBytesRaw > HARD_FILE_REF_MAX_BYTES
+        ) {
+          throw new Error(
+            `invalid $file reference at ${path}: "maxBytes" must be a positive integer <= ${HARD_FILE_REF_MAX_BYTES}`
+          );
+        }
+        requestedMaxBytes = requestedMaxBytesRaw;
+      }
+      const maxBytes = requestedMaxBytes ?? DEFAULT_FILE_REF_MAX_BYTES;
+
+      const fileStats = await stat(filePath);
+      if (fileStats.size > maxBytes) {
+        throw new Error(
+          `file reference at ${path} exceeds maxBytes (${fileStats.size} > ${maxBytes}): ${filePath}`
+        );
+      }
+
+      const content = await readFile(filePath, "utf8");
+      if (Buffer.byteLength(content, "utf8") > maxBytes) {
+        throw new Error(
+          `file reference at ${path} exceeds maxBytes after read: ${filePath}`
+        );
+      }
+      return content;
+    }
+
+    const resolvedEntries = await Promise.all(
+      Object.entries(value).map(async ([key, nested]) => [
+        key,
+        await this.resolveFileReferences(nested, `${path}.${key}`),
+      ] as const)
+    );
+    return Object.fromEntries(resolvedEntries);
+  }
+
   resolveServer(
     toolName: string,
     serverHint?: string
@@ -539,10 +616,13 @@ export class UpstreamManager {
     }
 
     try {
+      const resolvedArgs = args
+        ? await this.resolveFileReferences(args, "arguments")
+        : args;
       const result = await resolved.client.callTool(
         {
           name: resolved.actualName,
-          arguments: args,
+          arguments: resolvedArgs as Record<string, unknown> | undefined,
         },
         undefined,
         this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
