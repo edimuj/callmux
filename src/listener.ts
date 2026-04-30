@@ -18,6 +18,7 @@ import {
   handleBatch,
   handlePipeline,
   handleCall,
+  handleDryRun,
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
@@ -429,6 +430,8 @@ export class CallmuxListener {
           return handleCall(upstream, cache, args);
         case "callmux_cache_clear":
           return handleCacheClear(cache, args);
+        case "callmux_dry_run":
+          return handleDryRun(upstream, cache, args);
         case "callmux_status":
           return handleStatus(
             upstream,
@@ -605,6 +608,44 @@ export class CallmuxListener {
     };
 
     if (name === "callmux_status" || name === "callmux_cache_clear") {
+      return [];
+    }
+
+    if (name === "callmux_dry_run") {
+      if (!isRecord(args)) return [];
+      const mode = args.mode;
+      if ((mode === undefined || mode === "call") && typeof args.tool === "string") {
+        const target = resolveTarget(args.tool, args.server);
+        if (target === undefined) return undefined;
+        if (target === null) return [];
+        return [target];
+      }
+      if ((mode === undefined || mode === "parallel") && Array.isArray(args.calls)) {
+        const targets: string[] = [];
+        for (const call of args.calls) {
+          if (!isRecord(call)) continue;
+          const target = resolveTarget(call.tool, call.server);
+          if (!target) return undefined;
+          targets.push(target);
+        }
+        return targets;
+      }
+      if ((mode === undefined || mode === "batch") && typeof args.tool === "string") {
+        const target = resolveTarget(args.tool, args.server);
+        if (target === undefined) return undefined;
+        if (target === null) return [];
+        return [target];
+      }
+      if ((mode === undefined || mode === "pipeline") && Array.isArray(args.steps)) {
+        const targets: string[] = [];
+        for (const step of args.steps) {
+          if (!isRecord(step)) continue;
+          const target = resolveTarget(step.tool, step.server);
+          if (!target) return undefined;
+          targets.push(target);
+        }
+        return targets;
+      }
       return [];
     }
 

@@ -132,6 +132,70 @@ export const META_TOOLS: Tool[] = [
     },
   },
   {
+    name: "callmux_dry_run",
+    description:
+      "Validate and preview callmux calls without executing downstream tools. " +
+      "Resolves server routing and argument references ($file/$jsonFile/$yamlFile/$text), " +
+      "returns planned calls, cache-hit candidates, and per-call errors.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        mode: {
+          type: "string",
+          description: 'Optional explicit mode: "call", "parallel", "batch", or "pipeline".',
+        },
+        tool: { type: "string", description: "Tool name for call/batch mode" },
+        server: { type: "string", description: "Optional server hint for call/batch mode" },
+        arguments: { type: "object", description: "Arguments for call mode" },
+        calls: {
+          type: "array",
+          description: "Parallel mode calls",
+          items: {
+            type: "object",
+            properties: {
+              server: { type: "string" },
+              tool: { type: "string" },
+              arguments: { type: "object" },
+            },
+            required: ["tool"],
+            additionalProperties: false,
+          },
+        },
+        items: {
+          type: "array",
+          description: "Batch mode argument items",
+          items: {
+            type: "object",
+            properties: {
+              arguments: { type: "object" },
+            },
+            required: ["arguments"],
+            additionalProperties: false,
+          },
+        },
+        steps: {
+          type: "array",
+          description: "Pipeline mode steps",
+          items: {
+            type: "object",
+            properties: {
+              server: { type: "string" },
+              tool: { type: "string" },
+              arguments: { type: "object" },
+              inputMapping: {
+                type: "object",
+                additionalProperties: { type: "string" },
+              },
+            },
+            required: ["tool"],
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "callmux_cache_clear",
     description: "Clear the callmux result cache. Optionally scope by tool name and/or server.",
     inputSchema: {

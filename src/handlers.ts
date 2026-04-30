@@ -296,6 +296,152 @@ function inferServerFromQualifiedTool(
   return tool.slice(0, separator);
 }
 
+type DryRunMode = "call" | "parallel" | "batch" | "pipeline";
+
+interface DryRunCall {
+  tool: string;
+  server?: string;
+  arguments?: Record<string, unknown>;
+  source:
+    | { mode: "call" }
+    | { mode: "parallel"; index: number }
+    | { mode: "batch"; index: number }
+    | { mode: "pipeline"; step: number; hasInputMapping: boolean };
+}
+
+function validateDryRunArgs(
+  args: unknown
+): { mode: DryRunMode; calls: DryRunCall[] } | CallToolResult {
+  if (!isRecord(args)) {
+    return errorResult("invalid_arguments", "dry run arguments must be an object", {
+      field: "arguments",
+    });
+  }
+
+  const modeRaw = args.mode;
+  const mode = modeRaw === undefined
+    ? undefined
+    : validateToolName(modeRaw, "mode");
+  if (mode !== undefined && typeof mode !== "string") return mode;
+
+  const normalizedMode = mode as DryRunMode | undefined;
+  if (
+    normalizedMode !== undefined &&
+    normalizedMode !== "call" &&
+    normalizedMode !== "parallel" &&
+    normalizedMode !== "batch" &&
+    normalizedMode !== "pipeline"
+  ) {
+    return errorResult(
+      "invalid_arguments",
+      '"mode" must be one of "call", "parallel", "batch", or "pipeline"',
+      { field: "mode" }
+    );
+  }
+
+  const inferredMode: DryRunMode | undefined = normalizedMode
+    ?? (Array.isArray(args.calls)
+      ? "parallel"
+      : Array.isArray(args.items)
+        ? "batch"
+        : Array.isArray(args.steps)
+          ? "pipeline"
+          : typeof args.tool === "string"
+            ? "call"
+            : undefined);
+
+  if (!inferredMode) {
+    return errorResult(
+      "invalid_arguments",
+      'unable to infer dry run mode; provide "mode" or one of: calls/items/steps/tool',
+      { field: "mode" }
+    );
+  }
+
+  if (inferredMode === "call") {
+    const tool = validateToolName(args.tool, "tool");
+    if (typeof tool !== "string") return tool;
+    const server =
+      args.server === undefined ? undefined : validateToolName(args.server, "server");
+    if (server !== undefined && typeof server !== "string") return server;
+    const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
+    if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+    return {
+      mode: "call",
+      calls: [{
+        tool,
+        ...(typeof server === "string" ? { server } : {}),
+        ...(parsedArgs ? { arguments: parsedArgs } : {}),
+        source: { mode: "call" },
+      }],
+    };
+  }
+
+  if (inferredMode === "parallel") {
+    const validated = validateParallelArgs(args);
+    if (isToolErrorResult(validated)) return validated;
+    return {
+      mode: "parallel",
+      calls: validated.calls.map((call, index) => ({
+        ...call,
+        source: { mode: "parallel", index },
+      })),
+    };
+  }
+
+  if (inferredMode === "batch") {
+    const validated = validateBatchArgs(args);
+    if (isToolErrorResult(validated)) return validated;
+    return {
+      mode: "batch",
+      calls: validated.items.map((item, index) => ({
+        tool: validated.tool,
+        ...(validated.server ? { server: validated.server } : {}),
+        arguments: item.arguments,
+        source: { mode: "batch", index },
+      })),
+    };
+  }
+
+  const validated = validatePipelineArgs(args);
+  if (isToolErrorResult(validated)) return validated;
+  return {
+    mode: "pipeline",
+    calls: validated.steps.map((step, stepIndex) => ({
+      tool: step.tool,
+      ...(step.server ? { server: step.server } : {}),
+      ...(step.arguments ? { arguments: step.arguments } : {}),
+      source: {
+        mode: "pipeline",
+        step: stepIndex,
+        hasInputMapping: !!step.inputMapping,
+      },
+    })),
+  };
+}
+
+function extractStructuredError(result: CallToolResult): {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+} {
+  const structured = result.structuredContent as
+    | { error?: { code?: unknown; message?: unknown; details?: unknown } }
+    | undefined;
+  const maybe = structured?.error;
+  if (maybe && typeof maybe.message === "string") {
+    return {
+      code: typeof maybe.code === "string" ? maybe.code : "unknown_error",
+      message: maybe.message,
+      ...(isRecord(maybe.details) ? { details: maybe.details } : {}),
+    };
+  }
+  return {
+    code: "unknown_error",
+    message: extractText(result) || "unknown error",
+  };
+}
+
 export async function handleParallel(
   upstream: UpstreamManager,
   cache: CallCache,
@@ -491,6 +637,80 @@ export async function handlePipeline(
     steps: stepResults,
     finalResult: stepResults[stepResults.length - 1]?.result,
     totalDurationMs: Date.now() - startTime,
+  });
+}
+
+export async function handleDryRun(
+  upstream: UpstreamManager,
+  cache: CallCache,
+  args: unknown
+): Promise<CallToolResult> {
+  const parsed = validateDryRunArgs(args);
+  if (isToolErrorResult(parsed)) return parsed;
+
+  const items: Array<Record<string, unknown>> = [];
+  let estimatedResolvedArgumentBytes = 0;
+  let cacheHitCandidates = 0;
+  let invalidCalls = 0;
+
+  for (const call of parsed.calls) {
+    const prepare = await upstream.prepareToolCall(
+      call.tool,
+      call.arguments,
+      call.server
+    );
+
+    if ("error" in prepare) {
+      invalidCalls++;
+      items.push({
+        source: call.source,
+        tool: call.tool,
+        ...(call.server ? { server: call.server } : {}),
+        error: extractStructuredError(prepare.error),
+      });
+      continue;
+    }
+
+    const cacheHit = cache.get(call.tool, call.arguments, call.server) !== null;
+    if (cacheHit) cacheHitCandidates++;
+
+    const resolvedArguments = prepare.resolvedArguments;
+    const resolvedArgumentBytes = resolvedArguments
+      ? Buffer.byteLength(JSON.stringify(resolvedArguments), "utf8")
+      : 0;
+    estimatedResolvedArgumentBytes += resolvedArgumentBytes;
+
+    items.push({
+      source: call.source,
+      tool: call.tool,
+      ...(call.server ? { serverHint: call.server } : {}),
+      resolved: {
+        server: prepare.server,
+        actualTool: prepare.actualName,
+        qualifiedTool: `${prepare.server}__${prepare.actualName}`,
+      },
+      ...(resolvedArguments ? { resolvedArguments } : {}),
+      resolvedArgumentBytes,
+      cacheHitCandidate: cacheHit,
+      ...(call.source.mode === "pipeline" && call.source.hasInputMapping
+        ? { note: "inputMapping not applied in dry run (depends on previous step output)" }
+        : {}),
+    });
+  }
+
+  const totalCalls = parsed.calls.length;
+  const validCalls = totalCalls - invalidCalls;
+  return successResult({
+    mode: parsed.mode,
+    valid: invalidCalls === 0,
+    items,
+    summary: {
+      totalCalls,
+      validCalls,
+      invalidCalls,
+      cacheHitCandidates,
+      estimatedResolvedArgumentBytes,
+    },
   });
 }
 

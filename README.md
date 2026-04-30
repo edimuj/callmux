@@ -22,7 +22,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
-| 40+ tools bloating the system prompt | 6 meta-tools via meta-only mode |
+| 40+ tools bloating the system prompt | 7 meta-tools via meta-only mode |
 | 6 sessions × 5 servers = 30 processes | 1 shared callmux + 5 servers |
 
 <p align="center">
@@ -47,7 +47,7 @@ On machines running multiple agent sessions, callmux's [shared server mode](#sha
 - **Batch operations** -- same tool, many items, one call (bulk create, bulk fetch)
 - **Pipelining** -- chain tools where each step feeds into the next via input mapping
 - **Caching** -- TTL-based result cache with wildcard allow/deny policies, per-server overrides
-- **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 6 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
+- **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 7 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
 - **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
 - **Tool scoping** -- whitelist which tools each server exposes. Gives any MCP client per-server tool filtering, even if the client doesn't support it natively (Codex, Cursor, Windsurf, etc.)
 - **Shared server mode** -- run callmux once with `--listen <port>`, connect all sessions via URL. One set of downstream servers shared across every agent session on the machine
@@ -297,6 +297,20 @@ Chain tools where each step feeds into the next.
 }
 ```
 
+### `callmux_dry_run`
+
+Validate and preview calls without executing downstream tools. Resolves routing and argument references (`$file`, `$jsonFile`, `$yamlFile`, `$text`), then returns planned calls, cache-hit candidates, and per-call errors.
+
+```json
+{
+  "mode": "parallel",
+  "calls": [
+    { "tool": "github__create_issue", "arguments": { "title": "A" } },
+    { "tool": "github__create_issue", "arguments": { "title": "B" } }
+  ]
+}
+```
+
 ### `callmux_cache_clear`
 
 Invalidate cached results. Scope by tool, server, or clear everything.
@@ -340,6 +354,12 @@ Optional `maxBytes` override is supported per reference:
 Defaults:
 - `maxBytes` defaults to `1000000` (1 MB) when omitted.
 - Hard cap for `maxBytes` is `10000000` (10 MB).
+
+For structured arguments, use parsed file references:
+- `{"$jsonFile":"/tmp/payload.json"}`
+- `{"$yamlFile":"/tmp/payload.yaml"}`
+
+Both support optional `maxBytes` like `$file`.
 
 #### Inline Text Composition (No File Write Step)
 
@@ -538,7 +558,7 @@ By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expos
 
 By default, callmux exposes all downstream tools alongside its meta-tools. With multiple servers this can mean 50-100+ tool definitions in the system prompt on every API turn.
 
-**Meta-only mode** hides all proxied tools and exposes only the 6 meta-tools (`callmux_parallel`, `callmux_batch`, `callmux_pipeline`, `callmux_call`, `callmux_cache_clear`, `callmux_status`). The agent discovers available tools via `callmux_status` and invokes them through `callmux_call` or the batch/parallel meta-tools.
+**Meta-only mode** hides all proxied tools and exposes only the 7 meta-tools (`callmux_parallel`, `callmux_batch`, `callmux_pipeline`, `callmux_call`, `callmux_dry_run`, `callmux_cache_clear`, `callmux_status`). The agent discovers available tools via `callmux_status` and invokes them through `callmux_call` or the batch/parallel meta-tools.
 
 ```json
 {
@@ -550,10 +570,10 @@ By default, callmux exposes all downstream tools alongside its meta-tools. With 
 
 | | Standard mode | Meta-only mode |
 |:---|:---|:---|
-| Tools in listing | All downstream + 6 meta-tools | 6 meta-tools only |
+| Tools in listing | All downstream + 7 meta-tools | 7 meta-tools only |
 | Single tool call | Direct by name | `callmux_call` |
 | Tool discovery | Automatic (in listing) | `callmux_status` with `descriptions: true` |
-| System prompt size | Grows with server count | Fixed at 6 tools |
+| System prompt size | Grows with server count | Fixed at 7 tools |
 
 Enable via config (`"metaOnly": true`), CLI flag (`--meta-only`), or the setup wizard.
 

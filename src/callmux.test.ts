@@ -41,12 +41,13 @@ import {
   runDoctor,
   runServerTest,
 } from "./doctor.js";
-import { handleBatch, handleCall, handleCacheClear, handleParallel, handlePipeline, handleStatus } from "./handlers.js";
+import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
 import { mapBounded, UpstreamManager } from "./upstream.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
+import { errorResult } from "./results.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
@@ -1736,7 +1737,7 @@ test("UpstreamManager returns structured error when $file path is missing", asyn
   assert.equal(result.isError, true);
   assert.equal(
     (result.structuredContent as { error: { code: string } }).error.code,
-    "tool_call_failed"
+    "argument_resolution_failed"
   );
   assert.match(
     (result.structuredContent as { error: { message: string } }).error.message,
@@ -1780,7 +1781,7 @@ test("UpstreamManager enforces $file maxBytes with optional override", async () 
     assert.equal(tooSmall.isError, true);
     assert.equal(
       (tooSmall.structuredContent as { error: { code: string } }).error.code,
-      "tool_call_failed"
+      "argument_resolution_failed"
     );
     assert.match(
       (tooSmall.structuredContent as { error: { message: string } }).error.message,
@@ -1908,12 +1909,117 @@ test("UpstreamManager validates $text reference shape and returns structured err
   assert.equal(result.isError, true);
   assert.equal(
     (result.structuredContent as { error: { code: string } }).error.code,
-    "tool_call_failed"
+    "argument_resolution_failed"
   );
   assert.match(
     (result.structuredContent as { error: { message: string } }).error.message,
     /\$text\.lines.*only strings/
   );
+});
+
+test("UpstreamManager resolves $jsonFile and $yamlFile references to structured arguments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-structured-file-ref-"));
+  const jsonPath = join(dir, "payload.json");
+  const yamlPath = join(dir, "payload.yaml");
+  await writeFile(
+    jsonPath,
+    JSON.stringify({ labels: ["bug", "security"], metadata: { risk: "high" } }),
+    "utf8"
+  );
+  await writeFile(
+    yamlPath,
+    "owner: ops\nreviewers:\n  - sec\n  - platform\n",
+    "utf8"
+  );
+
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  try {
+    const result = await upstream.callTool("create_issue", {
+      title: "Structured refs",
+      body: { $text: { lines: ["hello", "world"] } },
+      metadata: { $jsonFile: jsonPath },
+      routing: { $yamlFile: yamlPath },
+    });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(capturedArguments?.metadata, {
+      labels: ["bug", "security"],
+      metadata: { risk: "high" },
+    });
+    assert.deepEqual(capturedArguments?.routing, {
+      owner: "ops",
+      reviewers: ["sec", "platform"],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("UpstreamManager reports argument resolution errors for invalid $jsonFile", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-json-file-ref-invalid-"));
+  const jsonPath = join(dir, "broken.json");
+  await writeFile(jsonPath, "{ invalid json", "utf8");
+
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (_params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool() {
+          return textResult("unexpected");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  try {
+    const result = await upstream.callTool("create_issue", {
+      metadata: { $jsonFile: jsonPath },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      (result.structuredContent as { error: { code: string } }).error.code,
+      "argument_resolution_failed"
+    );
+    assert.match(
+      (result.structuredContent as { error: { message: string } }).error.message,
+      /failed to parse \$jsonFile/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("fake MCP fixture supports real stdio listTools and callTool", async () => {
@@ -2312,6 +2418,74 @@ function mockTool(name: string, description?: string): Tool {
   };
 }
 
+test("handleDryRun previews resolved calls and cache-hit candidates", async () => {
+  const cache = new CallCache(60);
+  cache.set("github__get_issue", { id: 1 }, textResult("cached"), "github");
+
+  const upstream = {
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      if (tool === "missing_tool") {
+        return {
+          error: errorResult("tool_not_found", 'tool "missing_tool" not found', {
+            tool,
+          }),
+        };
+      }
+      return {
+        toolName: tool,
+        server: server ?? "github",
+        actualName: tool.startsWith("github__") ? tool.slice("github__".length) : tool,
+        resolvedArguments: args,
+      };
+    },
+  };
+
+  const result = await handleDryRun(upstream as never, cache, {
+    mode: "parallel",
+    calls: [
+      { tool: "github__get_issue", server: "github", arguments: { id: 1 } },
+      { tool: "missing_tool", arguments: { title: "B" } },
+    ],
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    mode: string;
+    valid: boolean;
+    items: Array<{ resolved?: { qualifiedTool: string }; cacheHitCandidate?: boolean; error?: { code: string } }>;
+    summary: { totalCalls: number; validCalls: number; invalidCalls: number; cacheHitCandidates: number };
+  };
+  assert.equal(content.mode, "parallel");
+  assert.equal(content.valid, false);
+  assert.equal(content.summary.totalCalls, 2);
+  assert.equal(content.summary.validCalls, 1);
+  assert.equal(content.summary.invalidCalls, 1);
+  assert.equal(content.summary.cacheHitCandidates, 1);
+  assert.equal(content.items[0].resolved?.qualifiedTool, "github__get_issue");
+  assert.equal(content.items[0].cacheHitCandidate, true);
+  assert.equal(content.items[1].error?.code, "tool_not_found");
+});
+
+test("handleDryRun validates mode and shape", async () => {
+  const result = await handleDryRun({} as never, new CallCache(0), {
+    mode: "invalid",
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "invalid_arguments"
+  );
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /mode/
+  );
+});
+
 test("handleCall passes through to upstream and caches result", async () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -2660,7 +2834,7 @@ test("meta-only proxy exposes only meta-tools", async () => {
 
   const allTools = (proxy as unknown as { allTools: Tool[] }).allTools;
   // allTools is empty until start() is called, but META_TOOLS should be the reference
-  assert.equal(META_TOOLS.length, 6);
+  assert.equal(META_TOOLS.length, 7);
   assert.ok(META_TOOLS.some((t) => t.name === "callmux_call"));
 });
 
@@ -3726,6 +3900,47 @@ test("proxy routes callmux_batch to handleBatch", async () => {
 
   const content = result.structuredContent as { succeeded: number };
   assert.equal(content.succeeded, 1);
+});
+
+test("proxy routes callmux_dry_run to handleDryRun", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as {
+    upstream: {
+      prepareToolCall: (
+        tool: string,
+        args?: Record<string, unknown>,
+        serverHint?: string
+      ) => Promise<{ toolName: string; server: string; actualName: string; resolvedArguments?: Record<string, unknown> }>;
+    }
+  }).upstream = {
+    async prepareToolCall(tool: string, args?: Record<string, unknown>, serverHint?: string) {
+      return {
+        toolName: tool,
+        server: serverHint ?? "default",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_dry_run", {
+    tool: "get_issue",
+    arguments: { id: 1 },
+  });
+
+  const content = result.structuredContent as {
+    mode: string;
+    summary: { totalCalls: number };
+  };
+  assert.equal(content.mode, "call");
+  assert.equal(content.summary.totalCalls, 1);
 });
 
 test("proxy routes callmux_status to handleStatus", async () => {

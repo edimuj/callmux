@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { readFile, stat } from "node:fs/promises";
+import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
@@ -63,6 +64,13 @@ interface UpstreamConnectOptions {
   maxConcurrency?: number;
   connectTimeoutMs?: number;
   strictStartup?: boolean;
+}
+
+interface PreparedToolCall {
+  toolName: string;
+  server: string;
+  actualName: string;
+  resolvedArguments?: Record<string, unknown>;
 }
 
 function errorMessage(error: unknown): string {
@@ -495,6 +503,64 @@ export class UpstreamManager {
       return content;
     }
 
+    if ("$jsonFile" in value || "$yamlFile" in value) {
+      const refKey = "$jsonFile" in value ? "$jsonFile" : "$yamlFile";
+      const allowedKeys = new Set([refKey, "maxBytes"]);
+      const unexpectedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
+      if (unexpectedKeys.length > 0) {
+        throw new Error(
+          `invalid ${refKey} reference at ${path}: unexpected keys [${unexpectedKeys.join(", ")}]`
+        );
+      }
+
+      const filePath = value[refKey];
+      if (typeof filePath !== "string" || filePath.trim().length === 0) {
+        throw new Error(`invalid ${refKey} reference at ${path}: "${refKey}" must be a non-empty string`);
+      }
+
+      const requestedMaxBytesRaw = value.maxBytes;
+      let requestedMaxBytes: number | undefined;
+      if (requestedMaxBytesRaw !== undefined) {
+        if (
+          typeof requestedMaxBytesRaw !== "number" ||
+          !Number.isInteger(requestedMaxBytesRaw) ||
+          requestedMaxBytesRaw <= 0 ||
+          requestedMaxBytesRaw > HARD_FILE_REF_MAX_BYTES
+        ) {
+          throw new Error(
+            `invalid ${refKey} reference at ${path}: "maxBytes" must be a positive integer <= ${HARD_FILE_REF_MAX_BYTES}`
+          );
+        }
+        requestedMaxBytes = requestedMaxBytesRaw;
+      }
+      const maxBytes = requestedMaxBytes ?? DEFAULT_FILE_REF_MAX_BYTES;
+
+      const fileStats = await stat(filePath);
+      if (fileStats.size > maxBytes) {
+        throw new Error(
+          `${refKey} reference at ${path} exceeds maxBytes (${fileStats.size} > ${maxBytes}): ${filePath}`
+        );
+      }
+
+      const content = await readFile(filePath, "utf8");
+      if (Buffer.byteLength(content, "utf8") > maxBytes) {
+        throw new Error(
+          `${refKey} reference at ${path} exceeds maxBytes after read: ${filePath}`
+        );
+      }
+
+      try {
+        if (refKey === "$jsonFile") {
+          return JSON.parse(content) as unknown;
+        }
+        return parseYaml(content) as unknown;
+      } catch (error) {
+        throw new Error(
+          `failed to parse ${refKey} at ${path} (${filePath}): ${errorMessage(error)}`
+        );
+      }
+    }
+
     if ("$text" in value) {
       const allowedKeys = new Set(["$text"]);
       const unexpectedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
@@ -554,6 +620,45 @@ export class UpstreamManager {
       ] as const)
     );
     return Object.fromEntries(resolvedEntries);
+  }
+
+  async resolveToolArguments(
+    args?: Record<string, unknown>
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!args) return args;
+    const resolved = await this.resolveFileReferences(args, "arguments");
+    return resolved as Record<string, unknown>;
+  }
+
+  async prepareToolCall(
+    toolName: string,
+    args?: Record<string, unknown>,
+    serverHint?: string
+  ): Promise<PreparedToolCall | { error: CallToolResult }> {
+    const resolved = this.resolveServer(toolName, serverHint);
+    if (!resolved) {
+      return { error: this.toolNotFound(toolName) };
+    }
+    if ("error" in resolved) {
+      return resolved;
+    }
+
+    try {
+      const resolvedArguments = await this.resolveToolArguments(args);
+      return {
+        toolName,
+        server: resolved.server,
+        actualName: resolved.actualName,
+        ...(resolvedArguments ? { resolvedArguments } : {}),
+      };
+    } catch (error) {
+      return {
+        error: errorResult("argument_resolution_failed", errorMessage(error), {
+          tool: toolName,
+          ...(serverHint ? { server: serverHint } : {}),
+        }),
+      };
+    }
   }
 
   resolveServer(
@@ -658,23 +763,18 @@ export class UpstreamManager {
     args?: Record<string, unknown>,
     serverHint?: string
   ): Promise<CallToolResult> {
-    const resolved = this.resolveServer(toolName, serverHint);
-    if (!resolved) {
-      return this.toolNotFound(toolName);
-    }
-
-    if ("error" in resolved) {
-      return resolved.error;
-    }
+    const prepared = await this.prepareToolCall(toolName, args, serverHint);
+    if ("error" in prepared) return prepared.error;
 
     try {
-      const resolvedArgs = args
-        ? await this.resolveFileReferences(args, "arguments")
-        : args;
-      const result = await resolved.client.callTool(
+      const client = this.clients.get(prepared.server);
+      if (!client) {
+        return this.toolNotFound(toolName);
+      }
+      const result = await client.callTool(
         {
-          name: resolved.actualName,
-          arguments: resolvedArgs as Record<string, unknown> | undefined,
+          name: prepared.actualName,
+          arguments: prepared.resolvedArguments,
         },
         undefined,
         this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined

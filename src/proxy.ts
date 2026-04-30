@@ -14,6 +14,7 @@ import {
   handleBatch,
   handlePipeline,
   handleCall,
+  handleDryRun,
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
@@ -186,6 +187,13 @@ export class CallmuxProxy {
 
       case "callmux_cache_clear":
         return handleCacheClear(
+          this.cache,
+          args
+        );
+
+      case "callmux_dry_run":
+        return handleDryRun(
+          this.upstream,
           this.cache,
           args
         );
