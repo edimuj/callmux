@@ -2461,6 +2461,128 @@ test("loadConfig parses legacy plaintext bearer auth config", async () => {
   }
 });
 
+test("loadConfig resolves bearer auth hashRef from env", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-hashref-env-"));
+  const configPath = join(dir, "config.json");
+  const hash = hashBearerToken("hashref-secret");
+  const previous = process.env.CALLMUX_TEST_HASHREF;
+  process.env.CALLMUX_TEST_HASHREF = hash;
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "dev", hashRef: "env:CALLMUX_TEST_HASHREF" }],
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(config.auth, {
+      mode: "bearer",
+      tokens: [{ id: "dev", hash }],
+    });
+  } finally {
+    if (previous === undefined) delete process.env.CALLMUX_TEST_HASHREF;
+    else process.env.CALLMUX_TEST_HASHREF = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig resolves bearer auth tokenRef file relative to config and converts to hash", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-tokenref-file-"));
+  const configPath = join(dir, "config.json");
+  const tokenFile = join(dir, "ops.token");
+
+  try {
+    await writeFile(tokenFile, "tokenref-secret\n", { encoding: "utf-8" });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "ops", tokenRef: "file:./ops.token" }],
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    const parsedAuth = config.auth as { mode: string; tokens: Array<{ id: string; hash?: string; token?: string }> };
+    assert.equal(parsedAuth.mode, "bearer");
+    assert.equal(parsedAuth.tokens.length, 1);
+    assert.equal(parsedAuth.tokens[0].id, "ops");
+    assert.equal(typeof parsedAuth.tokens[0].hash, "string");
+    assert.equal(parsedAuth.tokens[0].token, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects unsupported bearer secret ref scheme", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-ref-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "ops", hashRef: "vault:secret/path" }],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /must use supported secret refs: env:<NAME> or file:<PATH>/
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects bearer env ref when variable is missing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-auth-ref-missing-env-"));
+  const configPath = join(dir, "config.json");
+  const previous = process.env.CALLMUX_TEST_MISSING_REF;
+  delete process.env.CALLMUX_TEST_MISSING_REF;
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "ops", hashRef: "env:CALLMUX_TEST_MISSING_REF" }],
+        },
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /references missing or empty environment variable/
+    );
+  } finally {
+    if (previous !== undefined) process.env.CALLMUX_TEST_MISSING_REF = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig parses oidc_jwt auth config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-auth-oidc-"));
   const configPath = join(dir, "config.json");
@@ -2769,7 +2891,7 @@ test("loadConfig rejects bearer auth tokens with both hash and token", async () 
 
     await assert.rejects(
       loadConfig(configPath),
-      /cannot include both "token" and "hash"/
+      /must include exactly one of "hash", "hashRef", "token", or "tokenRef"/
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -3503,6 +3625,76 @@ test("unwrap preserves error info from upstream", async () => {
 
 import { CallmuxListener } from "./listener.js";
 
+test("listener applyRuntimeConfig updates runtime security settings", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const tools: Tool[] = [{ name: "test_tool", description: "A test", inputSchema: { type: "object", properties: {} } }];
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {}, requestBodyMaxBytes: 1024 },
+    upstream,
+    cache,
+    allTools: tools,
+    maxConcurrency: 10,
+  });
+
+  listener.applyRuntimeConfig({
+    servers: {},
+    requestBodyMaxBytes: 2048,
+    allowRequestBodyMaxOverride: true,
+    auth: {
+      mode: "bearer",
+      tokens: [{ id: "ops", hash: hashBearerToken("ops-secret") }],
+    },
+    metrics: {
+      enabled: true,
+      path: "/metrics-secure",
+      allowUnauthenticated: false,
+    },
+  });
+
+  const internals = listener as unknown as {
+    authConfig: { mode: string } | undefined;
+    globalRequestBodyMaxBytes: number;
+    allowRequestBodyMaxOverride: boolean;
+    metrics: { getPath: () => string };
+  };
+  assert.equal(internals.authConfig?.mode, "bearer");
+  assert.equal(internals.globalRequestBodyMaxBytes, 2048);
+  assert.equal(internals.allowRequestBodyMaxOverride, true);
+  assert.equal(internals.metrics.getPath(), "/metrics-secure");
+});
+
+test("listener applyRuntimeConfig rejects insecure remote runtime config", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const tools: Tool[] = [{ name: "test_tool", description: "A test", inputSchema: { type: "object", properties: {} } }];
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "0.0.0.0",
+    config: {
+      servers: {},
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", hash: hashBearerToken("ops-secret") }],
+      },
+    },
+    upstream,
+    cache,
+    allTools: tools,
+    maxConcurrency: 10,
+  });
+
+  assert.throws(
+    () =>
+      listener.applyRuntimeConfig({
+        servers: {},
+      }),
+    /Refusing insecure remote listener/
+  );
+});
+
 test("listener /health returns ok with session count", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
@@ -3885,6 +4077,15 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
       body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
     });
     assert.equal(res.status, 400);
+    const body = await res.json() as {
+      error?: { message?: string };
+      id?: unknown;
+    };
+    assert.equal(body.id, 1);
+    assert.equal(
+      body.error?.message,
+      "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id."
+    );
   } finally {
     await listener.close();
   }
@@ -4128,8 +4329,16 @@ test("listener includes request IDs in error responses and headers", async () =>
     });
     assert.equal(badSession.status, 400);
     assert.equal(badSession.headers.get("x-request-id"), "req-bad-session-1");
-    const badSessionBody = await badSession.json();
+    const badSessionBody = await badSession.json() as {
+      error: { data: { requestId: string }; message: string };
+      id: unknown;
+    };
     assert.equal(badSessionBody.error.data.requestId, "req-bad-session-1");
+    assert.equal(badSessionBody.id, 2);
+    assert.equal(
+      badSessionBody.error.message,
+      "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id."
+    );
   } finally {
     await listener.close();
   }

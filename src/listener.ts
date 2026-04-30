@@ -52,6 +52,8 @@ interface RequestContext {
   payload?: unknown;
 }
 
+type JsonRpcId = string | number | null;
+
 export interface ListenerOptions {
   port: number;
   host?: string;
@@ -92,7 +94,39 @@ export class CallmuxListener {
     this.auditLogger = new AuditLogger(options.config.auditLog);
     this.metrics = new PrometheusMetrics(options.config.metrics);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
-    this.validateSecurityPosture();
+    this.validateSecurityPosture(options.config, this.authConfig);
+  }
+
+  applyRuntimeConfig(config: CallmuxConfig): void {
+    const nextAuthConfig = config.auth;
+    const nextGlobalRequestBodyMaxBytes =
+      config.requestBodyMaxBytes ?? DEFAULT_REQUEST_BODY_MAX_BYTES;
+    const nextAllowRequestBodyMaxOverride =
+      config.allowRequestBodyMaxOverride ?? false;
+    const nextOidcVerifier =
+      nextAuthConfig?.mode === "oidc_jwt"
+        ? new OidcJwtVerifier(nextAuthConfig)
+        : undefined;
+    const nextAbuseController = config.abuseControls
+      ? new AbuseController(config.abuseControls)
+      : undefined;
+    const nextAuditLogger = new AuditLogger(config.auditLog);
+    const nextMetrics = new PrometheusMetrics(config.metrics);
+
+    this.validateSecurityPosture(config, nextAuthConfig);
+
+    this.options = {
+      ...this.options,
+      config,
+    };
+    this.authConfig = nextAuthConfig;
+    this.globalRequestBodyMaxBytes = nextGlobalRequestBodyMaxBytes;
+    this.allowRequestBodyMaxOverride = nextAllowRequestBodyMaxOverride;
+    this.oidcVerifier = nextOidcVerifier;
+    this.abuseController = nextAbuseController;
+    this.auditLogger = nextAuditLogger;
+    this.metrics = nextMetrics;
+    this.preReadMaxBytes = this.computePreReadMaxBytes();
   }
 
   async start(): Promise<void> {
@@ -230,6 +264,7 @@ export class CallmuxListener {
         : requestedLimit;
     const { body, bytes } = await readBody(req, readLimit);
     const parsed = body ? JSON.parse(body) : undefined;
+    const jsonRpcId = this.extractJsonRpcId(parsed);
     context.payload = parsed;
     const effectiveLimit = this.resolveEffectiveRequestBodyMaxBytes(parsed, requestedLimit);
     if (effectiveLimit !== undefined && bytes > effectiveLimit) {
@@ -246,11 +281,24 @@ export class CallmuxListener {
           400,
           context,
           -32000,
-          "Session uses different transport"
+          "Session uses different transport",
+          jsonRpcId
         );
         return;
       }
       await session.transport.handleRequest(req, res, parsed);
+      return;
+    }
+
+    if (sessionId && !this.sessions.has(sessionId)) {
+      this.writeJsonRpcError(
+        res,
+        400,
+        context,
+        -32000,
+        "Bad Request: Unknown session. Re-initialize and retry with a new MCP-Session-Id.",
+        jsonRpcId
+      );
       return;
     }
 
@@ -279,7 +327,8 @@ export class CallmuxListener {
       400,
       context,
       -32000,
-      "Bad Request: No valid session"
+      "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id.",
+      jsonRpcId
     );
   }
 
@@ -404,18 +453,21 @@ export class CallmuxListener {
     return server;
   }
 
-  private validateSecurityPosture(): void {
+  private validateSecurityPosture(
+    config: CallmuxConfig,
+    authConfig: CallmuxConfig["auth"]
+  ): void {
     const host = this.options.host ?? "127.0.0.1";
     const isRemote = !isLoopbackHost(host);
     const allowInsecureRemoteListener =
-      this.options.config.allowInsecureRemoteListener ?? false;
-    if (isRemote && !this.authConfig && !allowInsecureRemoteListener) {
+      config.allowInsecureRemoteListener ?? false;
+    if (isRemote && !authConfig && !allowInsecureRemoteListener) {
       throw new Error(
         `Refusing insecure remote listener on "${host}". Configure "auth" or set allowInsecureRemoteListener=true to bypass (unsafe).`
       );
     }
 
-    if (isRemote && !this.authConfig && allowInsecureRemoteListener) {
+    if (isRemote && !authConfig && allowInsecureRemoteListener) {
       process.stderr.write(
         `[callmux] WARNING: insecure remote listener enabled on "${host}" (no auth configured)\n`
       );
@@ -664,7 +716,8 @@ export class CallmuxListener {
     status: number,
     context: RequestContext,
     code: number,
-    message: string
+    message: string,
+    id: JsonRpcId = null
   ): void {
     this.writeJson(res, status, context, {
       jsonrpc: "2.0",
@@ -675,8 +728,18 @@ export class CallmuxListener {
           requestId: context.requestId,
         },
       },
-      id: null,
+      id,
     });
+  }
+
+  private extractJsonRpcId(parsed: unknown): JsonRpcId {
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!("id" in parsed)) return null;
+    const candidate = (parsed as { id?: unknown }).id;
+    if (typeof candidate === "string" || typeof candidate === "number") {
+      return candidate;
+    }
+    return null;
   }
 
   private isSourceIpAllowed(req: IncomingMessage): boolean {
