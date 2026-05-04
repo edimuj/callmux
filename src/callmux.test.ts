@@ -6052,6 +6052,24 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     };
     assert.equal(payload.cwd, root);
     assert.deepEqual(payload.arguments, { id: 99 });
+
+    await listener.close();
+    await listener.start();
+
+    const restartedTools = await bridgeClient.listTools();
+    assert.ok(restartedTools.tools.some((tool) => tool.name === "get_item"));
+
+    const restartedResult = await bridgeClient.callTool({
+      name: "get_item",
+      arguments: { id: 100 },
+    }) as unknown as CallToolResult;
+    assert.equal(restartedResult.isError, undefined);
+    const restartedPayload = JSON.parse((restartedResult.content[0] as { text: string }).text) as {
+      cwd: string;
+      arguments: { id: number };
+    };
+    assert.equal(restartedPayload.cwd, root);
+    assert.deepEqual(restartedPayload.arguments, { id: 100 });
   } finally {
     await bridgeClient?.close();
     await bridgeTransport?.close();

@@ -562,7 +562,7 @@ callmux client print claude --url http://localhost:4860/sse
 url = "http://localhost:4860/mcp"
 ```
 
-If your Codex MCP client does not send MCP roots or a project cwd to HTTP servers, use the stdio bridge instead. Codex starts one lightweight bridge per project session; the bridge connects to the shared listener and sends `x-callmux-cwd` from its process cwd, so wrapped path-sensitive stdio servers still see the project cwd:
+If your Codex MCP client does not send MCP roots or a project cwd to HTTP servers, use the stdio bridge instead. Codex starts one lightweight bridge per project session; the bridge connects to the shared listener and sends `x-callmux-cwd` from its process cwd, so wrapped path-sensitive stdio servers still see the project cwd. If the shared listener restarts, the bridge reconnects on the next session/transport failure and retries the request once:
 
 ```toml
 [mcp_servers.callmux]
