@@ -220,6 +220,27 @@ export interface ToolCallContext {
   sessionId?: string;
 }
 
+export interface ListenerRuntimeDiagnostics {
+  activeSessions: number;
+  sessions: Array<{
+    id: string;
+    transport: "streamable-http" | "sse" | "unknown";
+    cwd?: string;
+    cwdSource?: "header" | "meta" | "roots";
+    rootsAttempted: boolean;
+  }>;
+  scopedStdioClients: {
+    total: number;
+    byServer: Record<string, number>;
+    items: Array<{
+      server: string;
+      cwd: string;
+      activeCalls: number;
+      idle: boolean;
+    }>;
+  };
+}
+
 // ─── Meta-tool call shapes ─────────────────────────────────────
 
 export interface ParallelCall {

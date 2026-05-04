@@ -32,6 +32,36 @@ interface DoctorReport {
   servers: DoctorServerReport[];
 }
 
+interface ListenerDoctorReport {
+  ok: boolean;
+  url: string;
+  mcpUrl: string;
+  healthUrl: string;
+  cwd?: string;
+  health?: {
+    status: number;
+    ok: boolean;
+    body?: unknown;
+  };
+  initialize?: {
+    status: number;
+    ok: boolean;
+    sessionId?: string;
+    body?: unknown;
+  };
+  status?: {
+    ok: boolean;
+    body?: unknown;
+  };
+  issues: string[];
+}
+
+interface ListenerDoctorOptions {
+  url: string;
+  cwd?: string;
+  headers?: Record<string, string>;
+}
+
 interface ServerInspectionReport {
   name: string;
   command: string;
@@ -47,6 +77,11 @@ interface ServerTestReport extends ServerInspectionReport {
 }
 
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat", ".com"];
+const MCP_ACCEPT_HEADER = "application/json, text/event-stream";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 async function canExecute(filePath: string): Promise<boolean> {
   try {
@@ -215,6 +250,186 @@ export async function runDoctor(
   };
 }
 
+function listenerUrls(input: string): { mcpUrl: string; healthUrl: string } {
+  const mcp = new URL(input);
+  if (mcp.pathname === "" || mcp.pathname === "/") {
+    mcp.pathname = "/mcp";
+  }
+  const health = new URL(mcp.href);
+  health.pathname = "/health";
+  health.search = "";
+  health.hash = "";
+  return { mcpUrl: mcp.href, healthUrl: health.href };
+}
+
+async function parseHttpBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+  if (contentType.includes("text/event-stream")) {
+    const text = await response.text();
+    const dataLine = text
+      .split("\n")
+      .find((line) => line.startsWith("data: "));
+    return dataLine ? JSON.parse(dataLine.slice(6)) : text;
+  }
+  const text = await response.text();
+  if (text.length === 0) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function extractToolPayload(body: unknown): unknown {
+  if (!isRecord(body)) return undefined;
+  const result = body.result;
+  if (!isRecord(result)) return undefined;
+  if (result.structuredContent !== undefined) return result.structuredContent;
+  const content = result.content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((item): item is { type: string; text: string } =>
+      isRecord(item) && item.type === "text" && typeof item.text === "string"
+    )
+    .map((item) => item.text)
+    .join("\n");
+  if (text.length === 0) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function hasJsonRpcError(body: unknown): string | undefined {
+  if (!isRecord(body) || !isRecord(body.error)) return undefined;
+  const message = body.error.message;
+  return typeof message === "string" ? message : "JSON-RPC error";
+}
+
+export async function runListenerDoctor(
+  options: ListenerDoctorOptions
+): Promise<ListenerDoctorReport> {
+  const { mcpUrl, healthUrl } = listenerUrls(options.url);
+  const issues: string[] = [];
+  const baseHeaders = options.headers ?? {};
+  const mcpHeaders = {
+    ...baseHeaders,
+    "Content-Type": "application/json",
+    Accept: MCP_ACCEPT_HEADER,
+    ...(options.cwd ? { "x-callmux-cwd": options.cwd } : {}),
+  };
+
+  let health: ListenerDoctorReport["health"];
+  try {
+    const response = await fetch(healthUrl, { headers: baseHeaders });
+    const body = await parseHttpBody(response);
+    health = { status: response.status, ok: response.ok, body };
+    if (!response.ok) {
+      issues.push(`/health returned HTTP ${response.status}`);
+    }
+  } catch (error) {
+    issues.push(`/health failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let initialize: ListenerDoctorReport["initialize"];
+  let status: ListenerDoctorReport["status"];
+
+  try {
+    const response = await fetch(mcpUrl, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "callmux-doctor", version: "1.0" },
+        },
+        id: 1,
+      }),
+    });
+    const body = await parseHttpBody(response);
+    const sessionId = response.headers.get("mcp-session-id") ?? undefined;
+    const jsonRpcError = hasJsonRpcError(body);
+    initialize = {
+      status: response.status,
+      ok: response.ok && !jsonRpcError && Boolean(sessionId),
+      ...(sessionId ? { sessionId } : {}),
+      body,
+    };
+    if (!response.ok) {
+      issues.push(`/mcp initialize returned HTTP ${response.status}`);
+    } else if (jsonRpcError) {
+      issues.push(`/mcp initialize failed: ${jsonRpcError}`);
+    } else if (!sessionId) {
+      issues.push(`/mcp initialize did not return mcp-session-id`);
+    }
+
+    if (sessionId) {
+      const statusResponse = await fetch(mcpUrl, {
+        method: "POST",
+        headers: {
+          ...mcpHeaders,
+          "mcp-session-id": sessionId,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "callmux_status",
+            arguments: { sessions: true, recommendations: false },
+          },
+          id: 2,
+        }),
+      });
+      const statusBody = await parseHttpBody(statusResponse);
+      const statusPayload = extractToolPayload(statusBody);
+      const jsonRpcStatusError = hasJsonRpcError(statusBody);
+      status = {
+        ok: statusResponse.ok && !jsonRpcStatusError,
+        body: statusPayload ?? statusBody,
+      };
+      if (!statusResponse.ok) {
+        issues.push(`callmux_status returned HTTP ${statusResponse.status}`);
+      } else if (jsonRpcStatusError) {
+        issues.push(`callmux_status failed: ${jsonRpcStatusError}`);
+      }
+
+      if (options.cwd && isRecord(statusPayload)) {
+        const listener = statusPayload.listener;
+        const sessions = isRecord(listener) && Array.isArray(listener.sessions)
+          ? listener.sessions
+          : [];
+        const matched = sessions.some((session) =>
+          isRecord(session) && session.id === sessionId && session.cwd === options.cwd
+        );
+        if (!matched) {
+          issues.push(`session cwd diagnostics did not report "${options.cwd}"`);
+        }
+      }
+    }
+  } catch (error) {
+    issues.push(`/mcp smoke test failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return {
+    ok: issues.length === 0,
+    url: options.url,
+    mcpUrl,
+    healthUrl,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(health ? { health } : {}),
+    ...(initialize ? { initialize } : {}),
+    ...(status ? { status } : {}),
+    issues,
+  };
+}
+
 function collectSecurityIssues(config: CallmuxConfig): string[] {
   const issues: string[] = [];
 
@@ -339,6 +554,39 @@ export function formatDoctorReport(report: DoctorReport): string {
     for (const issue of server.issues) {
       lines.push(`  issue: ${issue}`);
     }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatListenerDoctorReport(report: ListenerDoctorReport): string {
+  const lines = [
+    `Status: ${report.ok ? "ok" : "issues found"}`,
+    `Listener: ${report.url}`,
+    `Health URL: ${report.healthUrl}`,
+    `MCP URL: ${report.mcpUrl}`,
+  ];
+
+  if (report.cwd) {
+    lines.push(`CWD: ${report.cwd}`);
+  }
+
+  if (report.health) {
+    lines.push(`Health: HTTP ${report.health.status}`);
+  }
+
+  if (report.initialize) {
+    lines.push(
+      `Initialize: HTTP ${report.initialize.status}${report.initialize.sessionId ? ` session=${report.initialize.sessionId}` : ""}`
+    );
+  }
+
+  if (report.status) {
+    lines.push(`Status tool: ${report.status.ok ? "ok" : "issues found"}`);
+  }
+
+  for (const issue of report.issues) {
+    lines.push(`Issue: ${issue}`);
   }
 
   return lines.join("\n");

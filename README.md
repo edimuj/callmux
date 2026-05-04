@@ -393,10 +393,10 @@ Like `$file`, `$text` is resolved by callmux before forwarding, so downstream MC
 
 ### `callmux_status`
 
-Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, mode, and lightweight `recommendations` for choosing the right meta-tool. Pass `descriptions: true` for tool discovery in meta-only mode.
+Introspect callmux from inside your agent. Shows instance identity (`instanceId`, optional `namespace`), wrapped server names, failed startup servers, available tools, cache state, mode, and lightweight `recommendations` for choosing the right meta-tool. Pass `descriptions: true` for tool discovery in meta-only mode. In shared listener mode, pass `sessions: true` to include active session cwd diagnostics and scoped stdio client state.
 
 ```json
-{ "server": "github", "descriptions": true, "descriptionMaxLength": 80, "recommendations": true }
+{ "server": "github", "descriptions": true, "descriptionMaxLength": 80, "recommendations": true, "sessions": true }
 ```
 
 Set `"recommendations": false` to omit guidance from status responses when you need the smallest payload.
@@ -616,6 +616,7 @@ callmux server add github -- npx -y @modelcontextprotocol/server-github
 callmux server set github --add-tool search_issues
 callmux server test --all
 callmux doctor
+callmux doctor --url http://localhost:4860/mcp --cwd "$PWD"
 callmux client status
 callmux client attach claude --yes
 ```
@@ -635,6 +636,7 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `callmux server list [--json]` | List configured servers |
 | `callmux server remove <name>` | Remove a server |
 | `callmux doctor [--json]` | Validate config + probe all servers |
+| `callmux doctor --url <listener-url> [--cwd <path>] [--header Name:Value] [--json]` | Smoke-test a running shared listener |
 | `callmux client status [claude\|codex]` | Check client configuration state |
 | `callmux client attach <client> [--yes]` | Write callmux into client config |
 | `callmux client detach <client> [--yes]` | Remove callmux from client config |

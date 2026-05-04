@@ -26,6 +26,7 @@ import {
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
 import type { ToolCallContext } from "./types.js";
+import type { ListenerRuntimeDiagnostics } from "./types.js";
 import { authenticateBearerToken } from "./auth.js";
 import { OidcJwtVerifier } from "./oidc.js";
 import {
@@ -135,6 +136,32 @@ export class CallmuxListener {
     this.auditLogger = nextAuditLogger;
     this.metrics = nextMetrics;
     this.preReadMaxBytes = this.computePreReadMaxBytes();
+  }
+
+  getRuntimeDiagnostics(): ListenerRuntimeDiagnostics {
+    const scopedClients = this.options.upstream.getScopedStdioClientDiagnostics();
+    const byServer: Record<string, number> = {};
+    for (const client of scopedClients) {
+      byServer[client.server] = (byServer[client.server] ?? 0) + 1;
+    }
+
+    return {
+      activeSessions: this.sessions.size,
+      sessions: Array.from(this.sessions.entries())
+        .map(([id, session]) => ({
+          id,
+          transport: this.transportName(session.transport),
+          ...(session.cwd ? { cwd: session.cwd } : {}),
+          ...(session.cwdSource ? { cwdSource: session.cwdSource } : {}),
+          rootsAttempted: session.rootsAttempted === true,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      scopedStdioClients: {
+        total: scopedClients.length,
+        byServer,
+        items: scopedClients,
+      },
+    };
   }
 
   async start(): Promise<void> {
@@ -364,6 +391,12 @@ export class CallmuxListener {
       "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id.",
       jsonRpcId
     );
+  }
+
+  private transportName(transport: Transport): "streamable-http" | "sse" | "unknown" {
+    if (transport instanceof StreamableHTTPServerTransport) return "streamable-http";
+    if (transport instanceof SSEServerTransport) return "sse";
+    return "unknown";
   }
 
   // ─── SSE (legacy) ──────────────────────────────────────────────
@@ -632,7 +665,8 @@ export class CallmuxListener {
             config.metaOnly ?? false,
             config.descriptionMaxLength,
             upstream.getInstanceIdentity(),
-            args
+            args,
+            this.getRuntimeDiagnostics()
           );
       }
 

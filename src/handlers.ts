@@ -8,6 +8,7 @@ import type {
   PipelineStep,
   InstanceIdentity,
   ToolCallContext,
+  ListenerRuntimeDiagnostics,
 } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -858,12 +859,14 @@ export function handleStatus(
   metaOnly: boolean,
   defaultDescriptionMaxLength: number | undefined,
   instanceIdentity: InstanceIdentity,
-  args: unknown
+  args: unknown,
+  listenerDiagnostics?: ListenerRuntimeDiagnostics
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
   const includeDescriptions = parsed.descriptions === true;
   const includeRecommendations = parsed.recommendations !== false;
+  const includeSessions = parsed.sessions === true;
   const descriptionMaxLength =
     typeof parsed.descriptionMaxLength === "number" && parsed.descriptionMaxLength > 0
       ? parsed.descriptionMaxLength
@@ -998,6 +1001,7 @@ export function handleStatus(
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
     maxConcurrency,
+    ...(includeSessions && listenerDiagnostics ? { listener: listenerDiagnostics } : {}),
     ...(includeRecommendations ? { recommendations } : {}),
   });
 }

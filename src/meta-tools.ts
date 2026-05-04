@@ -240,6 +240,11 @@ export const META_TOOLS: Tool[] = [
           description:
             "Include lightweight guidance on which callmux meta-tool to use for common patterns (default true).",
         },
+        sessions: {
+          type: "boolean",
+          description:
+            "Include listener session cwd diagnostics and scoped stdio client state when running in shared listener mode (default false).",
+        },
       },
       additionalProperties: false,
     },

@@ -38,9 +38,11 @@ import {
 } from "../cli.js";
 import {
   createDoctorFailureReport,
+  formatListenerDoctorReport,
   formatDoctorReport,
   formatServerTestReports,
   formatServerTestReport,
+  runListenerDoctor,
   runDoctor,
   runServerTest,
 } from "../doctor.js";
@@ -64,6 +66,7 @@ Usage:
   callmux setup [--config <path>]            Interactive setup wizard
   callmux init [--config <path>] [--force]
   callmux doctor [--config <path>] [--json]
+  callmux doctor --url <listener-url> [--cwd <path>] [--header Name:Value] [--json]
   callmux server add <name> [options] -- <command> [args...]
   callmux server set <name> [options] [-- <command> [args...]]
   callmux server edit <name> [options] [-- <command> [args...]]
@@ -211,6 +214,7 @@ Examples:
   callmux server test --all
   callmux server test github --tool get_issue
   callmux doctor
+  callmux doctor --url http://localhost:4860/mcp --cwd "$PWD"
   callmux client print codex
   callmux client status
   callmux client attach codex
@@ -221,7 +225,10 @@ Meta-tools exposed:
   callmux_parallel      Execute N tool calls concurrently
   callmux_batch         Apply one tool across many items
   callmux_pipeline      Chain tool calls with output mapping
+  callmux_call          Call a single downstream tool by name
+  callmux_dry_run       Validate and preview calls without execution
   callmux_cache_clear   Clear result cache
+  callmux_status        Report callmux/downstream health and diagnostics
 
 See https://github.com/edimuj/callmux for full documentation.
 `.trim();
@@ -705,13 +712,45 @@ async function handleDoctorCommand(
   configPath: string
 ): Promise<void> {
   let json = false;
+  let listenerUrl: string | undefined;
+  let cwd: string | undefined;
+  const headers: Record<string, string> = {};
 
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === "--json") {
       json = true;
+    } else if (arg === "--url" && i + 1 < args.length) {
+      listenerUrl = args[++i];
+    } else if (arg === "--cwd" && i + 1 < args.length) {
+      cwd = args[++i];
+    } else if (arg === "--header" && i + 1 < args.length) {
+      const raw = args[++i];
+      const separator = raw.indexOf(":");
+      if (separator <= 0) {
+        throw new Error("--header must use Name:Value format");
+      }
+      headers[raw.slice(0, separator).trim()] = raw.slice(separator + 1).trim();
     } else {
       throw new Error(`Unknown doctor option "${arg}"`);
     }
+  }
+
+  if (listenerUrl) {
+    const report = await runListenerDoctor({
+      url: listenerUrl,
+      ...(cwd ? { cwd } : {}),
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    });
+    if (json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else {
+      console.log(formatListenerDoctorReport(report));
+    }
+    if (!report.ok) {
+      process.exitCode = 1;
+    }
+    return;
   }
 
   let report;

@@ -36,9 +36,11 @@ import {
 } from "./client-config.js";
 import {
   createDoctorFailureReport,
+  formatListenerDoctorReport,
   formatDoctorReport,
   formatServerTestReports,
   formatServerTestReport,
+  runListenerDoctor,
   runDoctor,
   runServerTest,
 } from "./doctor.js";
@@ -1282,6 +1284,23 @@ test("runDoctor flags insecure oidc_jwt endpoints", async () => {
   assert.equal(report.ok, false);
   assert.ok(report.issues.some((issue) => issue.includes("auth.issuer should use https://")));
   assert.ok(report.issues.some((issue) => issue.includes("auth.jwksUri should use https://")));
+});
+
+test("formatListenerDoctorReport summarizes listener smoke checks", () => {
+  const output = formatListenerDoctorReport({
+    ok: true,
+    url: "http://127.0.0.1:4860/mcp",
+    mcpUrl: "http://127.0.0.1:4860/mcp",
+    healthUrl: "http://127.0.0.1:4860/health",
+    cwd: "/repo",
+    health: { status: 200, ok: true },
+    initialize: { status: 200, ok: true, sessionId: "session-1" },
+    status: { ok: true },
+    issues: [],
+  });
+
+  assert.match(output, /Status: ok/);
+  assert.match(output, /Initialize: HTTP 200 session=session-1/);
 });
 
 test("authorization policy supports deny-by-default with allow rule", () => {
@@ -2972,6 +2991,54 @@ test("handleStatus can disable recommendations", () => {
   assert.equal(content.recommendations, undefined);
 });
 
+test("handleStatus includes listener diagnostics only when requested", () => {
+  const upstream = createMockUpstream([]);
+  const diagnostics = {
+    activeSessions: 1,
+    sessions: [
+      {
+        id: "session-1",
+        transport: "streamable-http" as const,
+        cwd: "/repo",
+        cwdSource: "header" as const,
+        rootsAttempted: false,
+      },
+    ],
+    scopedStdioClients: {
+      total: 1,
+      byServer: { tokenlean: 1 },
+      items: [{ server: "tokenlean", cwd: "/repo", activeCalls: 0, idle: true }],
+    },
+  };
+
+  const omitted = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    { recommendations: false },
+    diagnostics
+  ).structuredContent as { listener?: unknown };
+  assert.equal(omitted.listener, undefined);
+
+  const included = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    { sessions: true, recommendations: false },
+    diagnostics
+  ).structuredContent as {
+    listener: { activeSessions: number; sessions: Array<{ cwd?: string }> };
+  };
+  assert.equal(included.listener.activeSessions, 1);
+  assert.equal(included.listener.sessions[0].cwd, "/repo");
+});
+
 test("handleStatus truncates descriptions to maxLength", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue", "Get a specific issue by number from the repository") },
@@ -4656,6 +4723,47 @@ test("listener /health returns ok with session count", async () => {
   }
 });
 
+test("runListenerDoctor validates streamable listener cwd diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "callmux-doctor-cwd-"));
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: META_TOOLS,
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const report = await runListenerDoctor({
+      url: `http://127.0.0.1:${port}/mcp`,
+      cwd: root,
+    });
+
+    assert.equal(report.ok, true);
+    assert.equal(report.health?.status, 200);
+    assert.ok(report.initialize?.sessionId);
+    const status = report.status?.body as {
+      listener: { sessions: Array<{ id: string; cwd?: string; cwdSource?: string }> };
+    };
+    assert.ok(status.listener.sessions.some((session) =>
+      session.id === report.initialize?.sessionId &&
+      session.cwd === root &&
+      session.cwdSource === "header"
+    ));
+  } finally {
+    await listener.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("listener requires bearer auth for /health by default when auth is configured", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
@@ -5298,16 +5406,62 @@ test("listener scopes stdio downstream cwd per MCP session", async () => {
       return JSON.parse(text) as { cwd: string; arguments: { id: number } };
     };
 
+    const callStatus = async (sessionId: string) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "callmux_status",
+            arguments: { sessions: true, recommendations: false },
+          },
+          id: 5,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = await parseMcpResponseBody(res);
+      const text = body.result.content[0].text;
+      return JSON.parse(text) as {
+        listener: {
+          activeSessions: number;
+          sessions: Array<{ id: string; cwd?: string; cwdSource?: string }>;
+          scopedStdioClients: {
+            total: number;
+            byServer: Record<string, number>;
+            items: Array<{ server: string; cwd: string; idle: boolean }>;
+          };
+        };
+      };
+    };
+
     const sessionA = await initialize(rootA, 1);
     const sessionB = await initialize(rootB, 2);
 
     const payloadA = await callGetItem(sessionA, 3);
     const payloadB = await callGetItem(sessionB, 4);
+    const status = await callStatus(sessionA);
 
     assert.equal(payloadA.cwd, rootA);
     assert.equal(payloadB.cwd, rootB);
     assert.deepEqual(payloadA.arguments, { id: 7 });
     assert.deepEqual(payloadB.arguments, { id: 7 });
+    assert.equal(status.listener.activeSessions, 2);
+    assert.ok(status.listener.sessions.some((session) =>
+      session.id === sessionA && session.cwd === rootA && session.cwdSource === "header"
+    ));
+    assert.ok(status.listener.sessions.some((session) =>
+      session.id === sessionB && session.cwd === rootB && session.cwdSource === "header"
+    ));
+    assert.equal(status.listener.scopedStdioClients.total, 2);
+    assert.equal(status.listener.scopedStdioClients.byServer.fake, 2);
+    assert.ok(status.listener.scopedStdioClients.items.some((item) =>
+      item.server === "fake" && item.cwd === rootA && item.idle
+    ));
+    assert.ok(status.listener.scopedStdioClients.items.some((item) =>
+      item.server === "fake" && item.cwd === rootB && item.idle
+    ));
   } finally {
     await listener?.close();
     await upstream.close();

@@ -33,6 +33,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "check:public-surface": "node scripts/check-public-surface.mjs",
     "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js",
     "prepublishOnly": "npm run build"
   },

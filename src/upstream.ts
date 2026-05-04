@@ -17,6 +17,7 @@ import type {
   ToolCallContext,
   UpstreamConnection,
   UpstreamConnectionFailure,
+  ListenerRuntimeDiagnostics,
 } from "./types.js";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
@@ -493,6 +494,26 @@ export class UpstreamManager {
     return context?.cwd && this.usesSessionCwd(toolName, serverHint)
       ? context.cwd
       : undefined;
+  }
+
+  getScopedStdioClientDiagnostics(): ListenerRuntimeDiagnostics["scopedStdioClients"]["items"] {
+    return Array.from(this.sessionClients.entries())
+      .map(([key, scoped]) => {
+        const separator = key.indexOf("\0");
+        const server = separator === -1 ? key : key.slice(0, separator);
+        const cwd = separator === -1 ? "" : key.slice(separator + 1);
+        return {
+          server,
+          cwd,
+          activeCalls: scoped.activeCalls,
+          idle: scoped.activeCalls === 0,
+        };
+      })
+      .sort((left, right) =>
+        left.server === right.server
+          ? left.cwd.localeCompare(right.cwd)
+          : left.server.localeCompare(right.server)
+      );
   }
 
   private refreshSessionClientIdleTimer(
