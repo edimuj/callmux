@@ -54,6 +54,7 @@ import { errorResult } from "./results.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
+import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -1062,6 +1063,23 @@ test("attachClaudeConfig inserts callmux into Claude config", () => {
   });
 });
 
+test("attachClaudeConfig can write shared listener URL entries", () => {
+  const result = attachClaudeConfig({
+    source: JSON.stringify({}),
+    serverName: "callmux",
+    url: "http://localhost:4860/sse",
+  });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(JSON.parse(result.content), {
+    mcpServers: {
+      callmux: {
+        url: "http://localhost:4860/sse",
+      },
+    },
+  });
+});
+
 test("detachClaudeConfig removes only the managed entry", () => {
   const result = detachClaudeConfig({
     source: JSON.stringify({
@@ -1095,6 +1113,19 @@ test("attachCodexConfig adds a managed block and is idempotent", () => {
   assert.match(first.content, /# BEGIN CALLMUX MANAGED callmux/);
   assert.match(first.content, /\[mcp_servers\.callmux\]/);
   assert.equal(second.changed, false);
+});
+
+test("attachCodexConfig can write shared listener URL entries", () => {
+  const result = attachCodexConfig({
+    source: "",
+    serverName: "callmux",
+    url: "http://localhost:4860/mcp",
+  });
+
+  assert.equal(result.changed, true);
+  assert.match(result.content, /\[mcp_servers\.callmux\]/);
+  assert.match(result.content, /url = "http:\/\/localhost:4860\/mcp"/);
+  assert.doesNotMatch(result.content, /command = "callmux"/);
 });
 
 test("detachCodexConfig refuses to remove unmanaged entries", () => {
@@ -1215,6 +1246,52 @@ test("renderClientSnippet emits Codex snippet with explicit config path when nee
       'command = "callmux"',
       `args = ${JSON.stringify(["--config", configPath])}`,
     ].join("\n")
+  );
+});
+
+test("renderClientSnippet emits shared listener URL snippets", () => {
+  assert.deepEqual(
+    JSON.parse(renderClientSnippet("claude", {
+      serverName: "callmux",
+      url: "http://localhost:4860/sse",
+    })),
+    {
+      mcpServers: {
+        callmux: {
+          url: "http://localhost:4860/sse",
+        },
+      },
+    }
+  );
+
+  assert.equal(
+    renderClientSnippet("codex", {
+      serverName: "callmux",
+      url: "http://localhost:4860/mcp",
+    }),
+    [
+      "[mcp_servers.callmux]",
+      'url = "http://localhost:4860/mcp"',
+    ].join("\n")
+  );
+});
+
+test("shared listener setup helpers derive client URLs and start command", () => {
+  assert.equal(
+    listenerClientUrl("http://localhost:4860", "codex"),
+    "http://localhost:4860/mcp"
+  );
+  assert.equal(
+    listenerClientUrl("http://localhost:4860/mcp", "claude"),
+    "http://localhost:4860/sse"
+  );
+  assert.equal(
+    renderSharedListenerStartCommand("http://localhost:4860/mcp", "/tmp/callmux.json"),
+    "callmux --listen 4860 --config /tmp/callmux.json"
+  );
+  assert.equal(
+    renderSharedListenerStartCommand("http://0.0.0.0:4860", "/tmp/callmux.json"),
+    "callmux --listen 4860 --host 0.0.0.0 --config /tmp/callmux.json"
   );
 });
 

@@ -23,12 +23,39 @@ interface DiscoveredServer {
   selectedTools?: string[];
 }
 
+type SetupClientMode =
+  | { mode: "local" }
+  | { mode: "shared"; listenerUrl: string };
+
+export function listenerClientUrl(baseUrl: string, client: ClientKind): string {
+  const url = new URL(baseUrl);
+  url.pathname = client === "codex" ? "/mcp" : "/sse";
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+export function renderSharedListenerStartCommand(
+  listenerUrl: string,
+  configPath: string
+): string {
+  const url = new URL(listenerUrl);
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  const host = url.hostname;
+  const args = ["callmux", "--listen", port, "--config", configPath];
+  if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+    args.splice(3, 0, "--host", host);
+  }
+  return args.join(" ");
+}
+
 export async function runSetup(configPath?: string): Promise<void> {
   const resolvedConfigPath = configPath ?? getDefaultConfigPath();
 
   p.intro("callmux setup");
 
   const existing = await loadManagedConfig(resolvedConfigPath);
+  let effectiveExisting = existing;
   if (existing && Object.keys(existing.servers).length > 0) {
     const action = await p.select({
       message: `Found existing config at ${resolvedConfigPath} with ${Object.keys(existing.servers).length} server(s). What would you like to do?`,
@@ -45,7 +72,7 @@ export async function runSetup(configPath?: string): Promise<void> {
     }
 
     if (action === "replace") {
-      // Will be overwritten at the end
+      effectiveExisting = null;
     }
   }
 
@@ -110,15 +137,74 @@ export async function runSetup(configPath?: string): Promise<void> {
     cacheTtl,
     metaOnlyChoice,
     descriptionMaxLength,
-    existing
+    effectiveExisting
   );
+
+  const clientMode = await selectClientMode();
 
   await saveManagedConfig(resolvedConfigPath, config);
   p.log.success(`Config written to ${resolvedConfigPath}`);
 
-  await attachToClients(resolvedConfigPath);
+  if (clientMode.mode === "shared") {
+    p.log.info(
+      `Start the shared listener with: ${renderSharedListenerStartCommand(clientMode.listenerUrl, resolvedConfigPath)}`
+    );
+  }
 
-  p.outro("Setup complete! Your agent now has access to callmux meta-tools.");
+  await attachToClients(resolvedConfigPath, clientMode);
+
+  p.outro(
+    clientMode.mode === "shared"
+      ? "Setup complete. Start the listener, then clients will connect to the shared callmux URL."
+      : "Setup complete. Your agent now has access to callmux meta-tools."
+  );
+}
+
+async function selectClientMode(): Promise<SetupClientMode> {
+  const mode = await p.select({
+    message: "How should clients connect to callmux?",
+    options: [
+      {
+        value: "shared",
+        label: "Shared listener URL",
+        hint: "Run one callmux --listen process and connect all sessions to it",
+      },
+      {
+        value: "local",
+        label: "Local command per client",
+        hint: "Each client starts its own callmux process",
+      },
+    ],
+  });
+
+  if (p.isCancel(mode)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  if (mode === "local") {
+    return { mode: "local" };
+  }
+
+  const listenerUrl = await p.text({
+    message: "Shared listener base URL:",
+    placeholder: "http://localhost:4860",
+    initialValue: "http://localhost:4860",
+    validate: (value = "") => {
+      try {
+        new URL(value);
+      } catch {
+        return "Must be a valid URL";
+      }
+    },
+  });
+
+  if (p.isCancel(listenerUrl)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  return { mode: "shared", listenerUrl };
 }
 
 async function detectAndImport(): Promise<DiscoveredServer[]> {
@@ -415,7 +501,10 @@ function buildConfig(
   };
 }
 
-async function attachToClients(configPath: string): Promise<void> {
+async function attachToClients(
+  configPath: string,
+  clientMode: SetupClientMode
+): Promise<void> {
   const clients = await p.multiselect({
     message: "Register callmux in which client(s)?",
     options: [
@@ -449,7 +538,14 @@ async function attachToClients(configPath: string): Promise<void> {
       }
 
       const mutate = kind === "claude" ? attachClaudeConfig : attachCodexConfig;
-      const result = mutate({ source, configPath, serverName: "callmux" });
+      const result = mutate({
+        source,
+        configPath,
+        serverName: "callmux",
+        ...(clientMode.mode === "shared"
+          ? { url: listenerClientUrl(clientMode.listenerUrl, kind) }
+          : {}),
+      });
 
       if (result.changed) {
         await mkdir(dirname(filePath), { recursive: true });

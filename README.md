@@ -248,7 +248,8 @@ The wizard walks you through:
 3. **Auto-discovers tools** by probing each server, then lets you pick which to expose
 4. **Configures caching** with sensible defaults
 5. **Offers meta-only mode** to hide proxied tools and reduce system prompt size
-6. **Attaches to your client** (Claude Code, Codex) automatically
+6. **Chooses client connection mode**: local command per client or shared listener URL
+7. **Attaches to your client** (Claude Code, Codex) automatically
 
 ---
 
@@ -518,6 +519,13 @@ For stdio servers in listener mode, callmux uses the client session's project cw
 
 **Client config (shared server):**
 
+Generate ready-to-use client snippets:
+
+```bash
+callmux client print codex --url http://localhost:4860/mcp
+callmux client print claude --url http://localhost:4860/sse
+```
+
 **Codex** (Streamable HTTP):
 
 ```toml
@@ -619,6 +627,7 @@ callmux doctor
 callmux doctor --url http://localhost:4860/mcp --cwd "$PWD"
 callmux client status
 callmux client attach claude --yes
+callmux client attach codex --url http://localhost:4860/mcp --yes
 ```
 
 When adding a server without `--tools`, callmux probes it automatically and lets you pick which tools to expose interactively.
@@ -638,9 +647,10 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `callmux doctor [--json]` | Validate config + probe all servers |
 | `callmux doctor --url <listener-url> [--cwd <path>] [--header Name:Value] [--json]` | Smoke-test a running shared listener |
 | `callmux client status [claude\|codex]` | Check client configuration state |
-| `callmux client attach <client> [--yes]` | Write callmux into client config |
+| `callmux client attach <client> [--yes]` | Write command-mode callmux into client config |
+| `callmux client attach <client> --url <listener-url> [--yes]` | Write shared listener URL into client config |
 | `callmux client detach <client> [--yes]` | Remove callmux from client config |
-| `callmux client print <client>` | Output ready-to-paste snippet |
+| `callmux client print <client> [--url <listener-url>]` | Output ready-to-paste snippet |
 
 **Inline flags** (single-server mode):
 

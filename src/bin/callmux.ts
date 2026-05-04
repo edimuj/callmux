@@ -74,10 +74,10 @@ Usage:
   callmux server test --all [--tool <tool>] [--json]
   callmux server remove <name> [--config <path>]
   callmux server list [--config <path>] [--json]
-  callmux client print <claude|codex> [--config <path>] [--name <id>]
-  callmux client attach <claude|codex> [--config <path>] [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
+  callmux client print <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>]
+  callmux client attach <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client detach <claude|codex> [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
-  callmux client status [claude|codex] [--config <path>] [--name <id>] [--file <path>] [--json]
+  callmux client status [claude|codex] [--config <path>] [--name <id>] [--url <listener-url>] [--file <path>] [--json]
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
@@ -216,6 +216,7 @@ Examples:
   callmux doctor
   callmux doctor --url http://localhost:4860/mcp --cwd "$PWD"
   callmux client print codex
+  callmux client print codex --url http://localhost:4860/mcp
   callmux client status
   callmux client attach codex
   callmux client attach codex --yes
@@ -554,12 +555,15 @@ async function handleClientMutation(
   let yes = false;
   let dryRun = false;
   let json = false;
+  let url: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--name" && i + 1 < args.length) {
       name = args[++i];
     } else if (args[i] === "--file" && i + 1 < args.length) {
       filePath = args[++i];
+    } else if (args[i] === "--url" && i + 1 < args.length) {
+      url = args[++i];
     } else if (args[i] === "--yes") {
       yes = true;
     } else if (args[i] === "--dry-run") {
@@ -575,10 +579,10 @@ async function handleClientMutation(
   const mutation =
     client === "claude"
       ? action === "attach"
-        ? attachClaudeConfig({ source, configPath, serverName: name })
+        ? attachClaudeConfig({ source, configPath, serverName: name, url })
         : detachClaudeConfig({ source, serverName: name })
       : action === "attach"
-        ? attachCodexConfig({ source, configPath, serverName: name })
+        ? attachCodexConfig({ source, configPath, serverName: name, url })
         : detachCodexConfig({ source, serverName: name });
   const shouldWrite = yes && !dryRun;
   const preview =
@@ -586,6 +590,7 @@ async function handleClientMutation(
       ? renderClientAttachPreview(client, {
           configPath,
           serverName: name,
+          url,
         })
       : client === "claude"
         ? `Remove mcpServers.${name}`
@@ -604,6 +609,7 @@ async function handleClientMutation(
     changed: mutation.changed,
     wrote: shouldWrite,
     dryRun: !shouldWrite,
+    ...(url ? { url } : {}),
     ...(mutation.changed ? { preview } : {}),
   };
 
@@ -643,6 +649,7 @@ async function handleClientCommand(
     let name = "callmux";
     let filePath: string | undefined;
     let json = false;
+    let url: string | undefined;
 
     if (args[1] === "claude" || args[1] === "codex") {
       client = args[1];
@@ -653,6 +660,8 @@ async function handleClientCommand(
         name = args[++i];
       } else if (args[i] === "--file" && i + 1 < args.length) {
         filePath = args[++i];
+      } else if (args[i] === "--url" && i + 1 < args.length) {
+        url = args[++i];
       } else if (args[i] === "--json") {
         json = true;
       } else {
@@ -660,8 +669,8 @@ async function handleClientCommand(
       }
     }
 
-    if (!client && filePath) {
-      throw new Error("Usage: callmux client status <claude|codex> [--file <path>] [--name <id>] [--json]");
+    if (!client && (filePath || url)) {
+      throw new Error("Usage: callmux client status <claude|codex> [--file <path>] [--name <id>] [--url <listener-url>] [--json]");
     }
 
     const clients = client ? [client] : (["claude", "codex"] as ClientKind[]);
@@ -671,8 +680,8 @@ async function handleClientCommand(
         const source = await readTextFileIfExists(path);
         const status =
           kind === "claude"
-            ? getClaudeConfigStatus({ source, configPath, serverName: name })
-            : getCodexConfigStatus({ source, configPath, serverName: name });
+            ? getClaudeConfigStatus({ source, configPath, serverName: name, url })
+            : getCodexConfigStatus({ source, configPath, serverName: name, url });
         return { ...status, path };
       })
     );
@@ -691,9 +700,12 @@ async function handleClientCommand(
 
   const client = validateClientKind(args[1]);
   let name = "callmux";
+  let url: string | undefined;
   for (let i = 2; i < args.length; i++) {
     if (args[i] === "--name" && i + 1 < args.length) {
       name = args[++i];
+    } else if (args[i] === "--url" && i + 1 < args.length) {
+      url = args[++i];
     } else {
       throw new Error(`Unknown client print option "${args[i]}"`);
     }
@@ -703,6 +715,7 @@ async function handleClientCommand(
     renderClientSnippet(client, {
       configPath,
       serverName: name,
+      url,
     })
   );
 }

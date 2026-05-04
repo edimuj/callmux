@@ -7,6 +7,7 @@ export type ClientKind = "claude" | "codex";
 interface ClientConfigOptions {
   configPath?: string;
   serverName?: string;
+  url?: string;
 }
 
 interface ClientConfigMutationOptions extends ClientConfigOptions {
@@ -42,6 +43,15 @@ function getCallmuxArgs(configPath?: string): string[] {
   return configPath && configPath !== defaultPath ? ["--config", configPath] : [];
 }
 
+function getClientUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).href;
+  } catch {
+    throw new Error("client URL must be a valid URL");
+  }
+}
+
 function getClientServerName(serverName?: string): string {
   const name = serverName ?? "callmux";
   if (!/^[A-Za-z0-9_-]+$/.test(name)) {
@@ -59,10 +69,15 @@ export function getDefaultClientConfigPath(client: ClientKind): string {
 }
 
 export function buildClaudeEntry(options?: ClientConfigOptions): {
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
+  url?: string;
 } {
   getClientServerName(options?.serverName);
+  const url = getClientUrl(options?.url);
+  if (url) {
+    return { url };
+  }
   return {
     command: "callmux",
     args: getCallmuxArgs(options?.configPath),
@@ -71,6 +86,13 @@ export function buildClaudeEntry(options?: ClientConfigOptions): {
 
 export function buildCodexSnippet(options?: ClientConfigOptions): string {
   const serverName = getClientServerName(options?.serverName);
+  const url = getClientUrl(options?.url);
+  if (url) {
+    return [
+      `[mcp_servers.${serverName}]`,
+      `url = ${JSON.stringify(url)}`,
+    ].join("\n");
+  }
 
   return [
     `[mcp_servers.${serverName}]`,
@@ -96,10 +118,7 @@ export function renderClientAttachPreview(
     );
   }
 
-  return createCodexManagedBlock(
-    serverName,
-    options?.configPath
-  );
+  return createCodexManagedBlock(serverName, options);
 }
 
 export function getClaudeConfigStatus(
@@ -167,7 +186,9 @@ export function getClaudeConfigStatus(
     status: matches ? "configured" : "different_entry",
     configured: matches,
     details: matches
-      ? `command "callmux" with ${expected.args.length} args`
+      ? expected.url
+        ? `url "${expected.url}"`
+        : `command "callmux" with ${expected.args?.length ?? 0} args`
       : `mcpServers.${serverName} exists but does not match the expected callmux entry`,
   };
 }
@@ -280,10 +301,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function createCodexManagedBlock(serverName: string, configPath?: string): string {
+function createCodexManagedBlock(serverName: string, options?: ClientConfigOptions): string {
   return [
     `# BEGIN CALLMUX MANAGED ${serverName}`,
-    buildCodexSnippet({ configPath, serverName }),
+    buildCodexSnippet({ ...options, serverName }),
     `# END CALLMUX MANAGED ${serverName}`,
   ].join("\n");
 }
@@ -330,7 +351,7 @@ export function getCodexConfigStatus(
   }
 
   const managedBlock = extractManagedCodexBlock(options.source, serverName);
-  const expectedManagedBlock = createCodexManagedBlock(serverName, options.configPath);
+  const expectedManagedBlock = createCodexManagedBlock(serverName, options);
 
   if (managedBlock) {
     const configured = managedBlock === expectedManagedBlock;
@@ -390,7 +411,7 @@ export function attachCodexConfig(
 ): ClientConfigMutationResult {
   const serverName = getClientServerName(options.serverName);
   const path = getDefaultClientConfigPath("codex");
-  const managedBlock = createCodexManagedBlock(serverName, options.configPath);
+  const managedBlock = createCodexManagedBlock(serverName, options);
   const managedBlockPattern = findCodexManagedBlock(options.source, serverName);
 
   if (managedBlockPattern.test(options.source)) {
