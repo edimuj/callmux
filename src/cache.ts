@@ -177,10 +177,12 @@ export class CallCache {
   private key(
     tool: string,
     args?: Record<string, unknown>,
-    server?: string
+    server?: string,
+    scope?: string
   ): string {
     return JSON.stringify({
       server: server ?? null,
+      scope: scope ?? null,
       tool,
       arguments: args === undefined ? null : stableValue(args),
     });
@@ -211,14 +213,15 @@ export class CallCache {
   get(
     tool: string,
     args?: Record<string, unknown>,
-    server?: string
+    server?: string,
+    scope?: string
   ): CallToolResult | null {
     if (this.ttlMs <= 0) return null;
     if (!this.shouldCache(tool, server)) return null;
     const now = Date.now();
     this.maybePruneExpired(now);
 
-    const key = this.key(tool, args, server);
+    const key = this.key(tool, args, server, scope);
     const entry = this.entries.get(key);
     if (!entry) return null;
     if (now > entry.expiresAt) {
@@ -235,7 +238,8 @@ export class CallCache {
     tool: string,
     args: Record<string, unknown> | undefined,
     result: CallToolResult,
-    server?: string
+    server?: string,
+    scope?: string
   ): void {
     if (this.ttlMs <= 0) return;
     if (!this.shouldCache(tool, server)) return;
@@ -243,7 +247,7 @@ export class CallCache {
     const now = Date.now();
     this.maybePruneExpired(now);
 
-    this.entries.set(this.key(tool, args, server), {
+    this.entries.set(this.key(tool, args, server, scope), {
       tool,
       server,
       result,

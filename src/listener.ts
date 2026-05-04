@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -23,6 +25,7 @@ import {
   handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig } from "./types.js";
+import type { ToolCallContext } from "./types.js";
 import { authenticateBearerToken } from "./auth.js";
 import { OidcJwtVerifier } from "./oidc.js";
 import {
@@ -37,10 +40,14 @@ import { PrometheusMetrics } from "./metrics.js";
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
 const REQUEST_ID_HEADER = "x-request-id";
+const CWD_HEADER = "x-callmux-cwd";
 
 interface SessionEntry {
   transport: Transport;
   server: Server;
+  cwd?: string;
+  cwdSource?: "header" | "meta" | "roots";
+  rootsAttempted?: boolean;
 }
 
 interface RequestContext {
@@ -308,6 +315,7 @@ export class CallmuxListener {
         );
         return;
       }
+      this.setSessionCwdFromHeader(session, req);
       await session.transport.handleRequest(req, res, parsed);
       return;
     }
@@ -329,7 +337,11 @@ export class CallmuxListener {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid: string) => {
-          this.sessions.set(sid, { transport, server });
+          this.sessions.set(sid, {
+            transport,
+            server,
+            ...this.sessionCwdFromHeader(req),
+          });
         },
       });
 
@@ -357,13 +369,17 @@ export class CallmuxListener {
   // ─── SSE (legacy) ──────────────────────────────────────────────
 
   private async handleSseConnect(
-    _req: IncomingMessage,
+    req: IncomingMessage,
     res: ServerResponse,
     _context: RequestContext
   ): Promise<void> {
     const transport = new SSEServerTransport("/messages", res);
     const server = this.createSession(transport);
-    this.sessions.set(transport.sessionId, { transport, server });
+    this.sessions.set(transport.sessionId, {
+      transport,
+      server,
+      ...this.sessionCwdFromHeader(req),
+    });
 
     res.on("close", () => {
       this.sessions.delete(transport.sessionId);
@@ -395,6 +411,7 @@ export class CallmuxListener {
       });
       return;
     }
+    this.setSessionCwdFromHeader(session, req);
 
     const requestedLimit = this.parsePerRequestLimitOverride(req);
     const readLimit = requestedLimit === undefined
@@ -419,6 +436,149 @@ export class CallmuxListener {
     await session.transport.handlePostMessage(req, res, parsed);
   }
 
+  private normalizeSessionCwd(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    if (!trimmed || !isAbsolute(trimmed)) return undefined;
+    return trimmed;
+  }
+
+  private sessionCwdFromHeader(
+    req: IncomingMessage
+  ): Pick<SessionEntry, "cwd" | "cwdSource"> {
+    const cwd = this.normalizeSessionCwd(headerValue(req.headers[CWD_HEADER]));
+    return cwd ? { cwd, cwdSource: "header" } : {};
+  }
+
+  private setSessionCwdFromHeader(session: SessionEntry, req: IncomingMessage): void {
+    const cwd = this.normalizeSessionCwd(headerValue(req.headers[CWD_HEADER]));
+    if (!cwd) return;
+    session.cwd = cwd;
+    session.cwdSource = "header";
+  }
+
+  private cwdFromMeta(meta: unknown): string | undefined {
+    if (!isRecord(meta)) return undefined;
+    const callmux = isRecord(meta.callmux) ? meta.callmux : undefined;
+    return this.normalizeSessionCwd(
+      callmux?.cwd ?? meta["callmux.cwd"] ?? meta.cwd ?? meta.workingDirectory
+    );
+  }
+
+  private cwdFromRoots(roots: unknown): string | undefined {
+    if (!Array.isArray(roots)) return undefined;
+    for (const root of roots) {
+      if (!isRecord(root) || typeof root.uri !== "string") continue;
+      if (!root.uri.startsWith("file:")) continue;
+      try {
+        const cwd = this.normalizeSessionCwd(fileURLToPath(root.uri));
+        if (cwd) return cwd;
+      } catch {}
+    }
+    return undefined;
+  }
+
+  private async resolveToolCallContext(
+    session: SessionEntry | undefined,
+    server: Server,
+    extra: { _meta?: unknown; sessionId?: string; sendRequest?: unknown }
+  ): Promise<ToolCallContext> {
+    const context: ToolCallContext = {
+      ...(extra.sessionId ? { sessionId: extra.sessionId } : {}),
+    };
+
+    const metaCwd = this.cwdFromMeta(extra._meta);
+    if (session && metaCwd) {
+      session.cwd = metaCwd;
+      session.cwdSource = "meta";
+    }
+
+    if (session?.cwd) {
+      return { ...context, cwd: session.cwd };
+    }
+
+    if (!session || session.rootsAttempted || !server.getClientCapabilities()?.roots) {
+      return context;
+    }
+
+    session.rootsAttempted = true;
+    try {
+      const result = await server.listRoots(undefined, { timeout: 1_000 });
+      const cwd = this.cwdFromRoots(result.roots);
+      if (cwd) {
+        session.cwd = cwd;
+        session.cwdSource = "roots";
+        return { ...context, cwd };
+      }
+    } catch {}
+
+    return context;
+  }
+
+  private bareToolCallContext(extra: { sessionId?: string }): ToolCallContext {
+    return {
+      ...(extra.sessionId ? { sessionId: extra.sessionId } : {}),
+    };
+  }
+
+  private toolRequestNeedsSessionCwd(
+    upstream: UpstreamManager,
+    name: string,
+    args: unknown
+  ): boolean {
+    const targetUsesSessionCwd = (tool: unknown, server: unknown): boolean => {
+      if (typeof tool !== "string" || tool.length === 0) return false;
+      return upstream.usesSessionCwd(
+        tool,
+        typeof server === "string" && server.length > 0 ? server : undefined
+      );
+    };
+
+    if (name === "callmux_status" || name === "callmux_cache_clear") {
+      return false;
+    }
+
+    if (name === "callmux_call") {
+      return isRecord(args) && targetUsesSessionCwd(args.tool, args.server);
+    }
+
+    if (name === "callmux_parallel") {
+      if (!isRecord(args) || !Array.isArray(args.calls)) return false;
+      return args.calls.some((call) =>
+        isRecord(call) && targetUsesSessionCwd(call.tool, call.server)
+      );
+    }
+
+    if (name === "callmux_batch") {
+      return isRecord(args) && targetUsesSessionCwd(args.tool, args.server);
+    }
+
+    if (name === "callmux_pipeline") {
+      if (!isRecord(args) || !Array.isArray(args.steps)) return false;
+      return args.steps.some((step) =>
+        isRecord(step) && targetUsesSessionCwd(step.tool, step.server)
+      );
+    }
+
+    if (name === "callmux_dry_run") {
+      if (!isRecord(args)) return false;
+      if (targetUsesSessionCwd(args.tool, args.server)) return true;
+      if (Array.isArray(args.calls)) {
+        return args.calls.some((call) =>
+          isRecord(call) && targetUsesSessionCwd(call.tool, call.server)
+        );
+      }
+      if (Array.isArray(args.steps)) {
+        return args.steps.some((step) =>
+          isRecord(step) && targetUsesSessionCwd(step.tool, step.server)
+        );
+      }
+      return false;
+    }
+
+    return upstream.usesSessionCwd(name);
+  }
+
   // ─── Session factory ───────────────────────────────────────────
 
   private createSession(transport: Transport): Server {
@@ -433,7 +593,7 @@ export class CallmuxListener {
       tools: allTools,
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const name = request.params.name;
       const args = request.params.arguments;
       const principal = this.authzContext.getStore();
@@ -446,20 +606,24 @@ export class CallmuxListener {
           ...(authz.tool ? { tool: authz.tool } : {}),
         });
       }
+      const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
+      const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
+        ? await this.resolveToolCallContext(session, server, extra)
+        : this.bareToolCallContext(extra);
 
       switch (name) {
         case "callmux_parallel":
-          return handleParallel(upstream, cache, args, maxConcurrency);
+          return handleParallel(upstream, cache, args, maxConcurrency, toolContext);
         case "callmux_batch":
-          return handleBatch(upstream, cache, args, maxConcurrency);
+          return handleBatch(upstream, cache, args, maxConcurrency, toolContext);
         case "callmux_pipeline":
-          return handlePipeline(upstream, cache, args);
+          return handlePipeline(upstream, cache, args, toolContext);
         case "callmux_call":
-          return handleCall(upstream, cache, args);
+          return handleCall(upstream, cache, args, toolContext);
         case "callmux_cache_clear":
           return handleCacheClear(cache, args);
         case "callmux_dry_run":
-          return handleDryRun(upstream, cache, args);
+          return handleDryRun(upstream, cache, args, toolContext);
         case "callmux_status":
           return handleStatus(
             upstream,
@@ -473,11 +637,12 @@ export class CallmuxListener {
       }
 
       // Proxied tool — check cache first
-      const cached = cache.get(name, args);
+      const cacheScope = upstream.cacheScopeForCall(name, undefined, toolContext);
+      const cached = cache.get(name, args, undefined, cacheScope);
       if (cached) return cached;
 
-      const result = await upstream.callTool(name, args);
-      cache.set(name, args, result);
+      const result = await upstream.callTool(name, args, undefined, toolContext);
+      cache.set(name, args, result, undefined, cacheScope);
       return result;
     });
 

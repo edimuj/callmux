@@ -112,6 +112,7 @@ export class CallmuxProxy {
       {
         maxConcurrency: this.maxConcurrency,
         connectTimeoutMs: this.connectTimeoutMs,
+        sessionCwdIdleTtlSeconds: this.config.sessionCwdIdleTtlSeconds,
         strictStartup: this.config.strictStartup ?? false,
       }
     );

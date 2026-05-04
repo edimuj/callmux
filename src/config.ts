@@ -648,12 +648,21 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
         : (() => {
             throw new Error(`servers.${serverName}.cwd must be a string`);
           })();
+  const cwdMode =
+    value.cwdMode === undefined
+      ? undefined
+      : value.cwdMode === "global" || value.cwdMode === "session"
+        ? value.cwdMode
+        : (() => {
+            throw new Error(`servers.${serverName}.cwdMode must be "global" or "session"`);
+          })();
 
   return {
     command: value.command as string,
     ...(args ? { args } : {}),
     ...(env ? { env } : {}),
     ...(cwd ? { cwd } : {}),
+    ...(cwdMode ? { cwdMode } : {}),
     ...shared,
   };
 }
@@ -715,6 +724,14 @@ function parseConfigDocument(
             callTimeoutMs: parsePositiveInteger(
               parsed.callTimeoutMs,
               "callTimeoutMs"
+            ),
+          }
+        : {}),
+      ...(parsed.sessionCwdIdleTtlSeconds !== undefined
+        ? {
+            sessionCwdIdleTtlSeconds: parseNonNegativeInteger(
+              parsed.sessionCwdIdleTtlSeconds,
+              "sessionCwdIdleTtlSeconds"
             ),
           }
         : {}),

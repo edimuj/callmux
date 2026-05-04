@@ -54,6 +54,12 @@
       "default": 30000,
       "description": "Timeout in milliseconds for downstream tool calls"
     },
+    "sessionCwdIdleTtlSeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 600,
+      "description": "Idle TTL in seconds for listener-mode session cwd stdio clients (0 = close after each call)"
+    },
     "strictStartup": {
       "type": "boolean",
       "default": false,
@@ -129,6 +135,11 @@
         "cwd": {
           "type": "string",
           "description": "Working directory for the server process"
+        },
+        "cwdMode": {
+          "type": "string",
+          "enum": ["global", "session"],
+          "description": "Working directory behavior for listener mode stdio calls. Omit to use per-session cwd when available; set global to always use the configured/process cwd."
         },
         "tools": {
           "type": "array",

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createSign, generateKeyPairSync } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { CallCache } from "./cache.js";
 import {
   configFromArgs,
@@ -2265,12 +2266,12 @@ test("fake MCP fixture supports real stdio listTools and callTool", async () => 
       server: string;
       tool: string;
       arguments: { id: number };
+      cwd: string;
     };
-    assert.deepEqual(payload, {
-      server: "fake",
-      tool: "get_item",
-      arguments: { id: 42 },
-    });
+    assert.equal(payload.server, "fake");
+    assert.equal(payload.tool, "get_item");
+    assert.deepEqual(payload.arguments, { id: 42 });
+    assert.equal(typeof payload.cwd, "string");
   } finally {
     await upstream.close();
   }
@@ -2413,6 +2414,70 @@ test("fake MCP fixture hanging calls are converted into timeout errors", async (
     );
   } finally {
     await upstream.close();
+  }
+});
+
+test("UpstreamManager retires session-scoped stdio clients when idle TTL is zero", async () => {
+  const upstream = new UpstreamManager();
+  const cwd = await mkdtemp(join(tmpdir(), "callmux-session-idle-"));
+
+  try {
+    await upstream.connect(
+      {
+        fake: fakeMcpServer("fake", {
+          FAKE_MCP_TOOLS: JSON.stringify([
+            { name: "get_item", description: "Get a fake item" },
+          ]),
+        }),
+      },
+      { sessionCwdIdleTtlSeconds: 0 }
+    );
+
+    const result = await upstream.callTool(
+      "get_item",
+      { id: 1 },
+      undefined,
+      { cwd, sessionId: "session-1" }
+    );
+    assert.equal(result.isError, undefined);
+    assert.equal((upstream as any).sessionClients.size, 0);
+  } finally {
+    await upstream.close();
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("UpstreamManager rejects cwd-scoped stdio servers with mismatched tool surface", async () => {
+  const upstream = new UpstreamManager();
+  const cwd = await mkdtemp(join(tmpdir(), "callmux-session-surface-"));
+
+  try {
+    await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([
+          { name: "get_item", description: "Get a fake item" },
+        ]),
+      }),
+    });
+    const configs = (upstream as any).serverConfigs as Map<string, StdioServerConfig>;
+    configs.set("fake", fakeMcpServer("fake", {
+      FAKE_MCP_TOOLS: JSON.stringify([
+        { name: "other_item", description: "Wrong surface" },
+      ]),
+    }));
+
+    const result = await upstream.callTool(
+      "get_item",
+      { id: 1 },
+      undefined,
+      { cwd, sessionId: "session-1" }
+    );
+
+    assert.equal(result.isError, true);
+    assert.match((result.content[0] as { text: string }).text, /did not expose expected tool/);
+  } finally {
+    await upstream.close();
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
@@ -3161,6 +3226,7 @@ test("loadConfig parses startup timeout settings from file", async () => {
         servers: { github: { command: "node", args: ["server.js"] } },
         connectTimeoutMs: 1000,
         callTimeoutMs: 2000,
+        sessionCwdIdleTtlSeconds: 300,
         strictStartup: true,
       })
     );
@@ -3168,6 +3234,7 @@ test("loadConfig parses startup timeout settings from file", async () => {
     const config = await loadConfig(configPath);
     assert.equal(config.connectTimeoutMs, 1000);
     assert.equal(config.callTimeoutMs, 2000);
+    assert.equal(config.sessionCwdIdleTtlSeconds, 300);
     assert.equal(config.strictStartup, true);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -3196,6 +3263,29 @@ test("loadConfig parses request body limits from file", async () => {
     assert.equal(config.allowRequestBodyMaxOverride, true);
     assert.equal((config.servers.github as StdioServerConfig).requestBodyMaxBytes, 4096);
     assert.equal((config.servers.linear as StdioServerConfig).requestBodyMaxBytes, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses stdio cwdMode from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-cwd-mode-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          tokenlean: { command: "tokenlean-mcp", cwdMode: "session" },
+          github: { command: "github-mcp", cwdMode: "global" },
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal((config.servers.tokenlean as StdioServerConfig).cwdMode, "session");
+    assert.equal((config.servers.github as StdioServerConfig).cwdMode, "global");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -5126,6 +5216,167 @@ test("listener requires bearer auth for /mcp", async () => {
   } finally {
     await listener.close();
   }
+});
+
+test("listener scopes stdio downstream cwd per MCP session", async () => {
+  const upstream = new UpstreamManager();
+  const rootA = await mkdtemp(join(tmpdir(), "callmux-cwd-a-"));
+  const rootB = await mkdtemp(join(tmpdir(), "callmux-cwd-b-"));
+  const cache = new CallCache(60, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([
+          { name: "get_item", description: "Get a fake item" },
+        ]),
+      }),
+    });
+
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { fake: fakeMcpServer("fake") } },
+      upstream,
+      cache,
+      allTools,
+      maxConcurrency: 10,
+    });
+
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    (listener as any).options.port = port;
+    await listener.start();
+
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+
+    const initialize = async (cwd: string, id: number) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { ...mcpHeaders, "x-callmux-cwd": cwd },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+          },
+          id,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const sessionId = res.headers.get("mcp-session-id");
+      assert.ok(sessionId);
+      return sessionId;
+    };
+
+    const callGetItem = async (sessionId: string, id: number) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "get_item",
+            arguments: { id: 7 },
+          },
+          id,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = await parseMcpResponseBody(res);
+      const text = body.result.content[0].text;
+      return JSON.parse(text) as { cwd: string; arguments: { id: number } };
+    };
+
+    const sessionA = await initialize(rootA, 1);
+    const sessionB = await initialize(rootB, 2);
+
+    const payloadA = await callGetItem(sessionA, 3);
+    const payloadB = await callGetItem(sessionB, 4);
+
+    assert.equal(payloadA.cwd, rootA);
+    assert.equal(payloadB.cwd, rootB);
+    assert.deepEqual(payloadA.arguments, { id: 7 });
+    assert.deepEqual(payloadB.arguments, { id: 7 });
+  } finally {
+    await listener?.close();
+    await upstream.close();
+    await rm(rootA, { recursive: true, force: true });
+    await rm(rootB, { recursive: true, force: true });
+  }
+});
+
+test("listener resolves session cwd from MCP roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "callmux-roots-cwd-"));
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  try {
+    const session: Record<string, unknown> = {};
+    const server = {
+      getClientCapabilities: () => ({ roots: {} }),
+      listRoots: async () => ({
+        roots: [{ uri: pathToFileURL(root).href, name: "project" }],
+      }),
+    };
+
+    const context = await (listener as any).resolveToolCallContext(
+      session,
+      server,
+      { sessionId: "session-1" }
+    );
+
+    assert.equal(context.cwd, root);
+    assert.equal(context.sessionId, "session-1");
+    assert.equal(session.cwd, root);
+    assert.equal(session.cwdSource, "roots");
+  } finally {
+    await listener.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("listener does not require session cwd for global meta tools", () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  const upstream = {
+    usesSessionCwd() {
+      throw new Error("should not resolve targets for global meta tools");
+    },
+  };
+
+  assert.equal(
+    (listener as any).toolRequestNeedsSessionCwd(upstream, "callmux_status", {}),
+    false
+  );
+  assert.equal(
+    (listener as any).toolRequestNeedsSessionCwd(upstream, "callmux_cache_clear", {}),
+    false
+  );
 });
 
 test("listener enforces authorization policy for direct and meta-routed tool calls", async () => {

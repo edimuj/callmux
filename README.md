@@ -511,8 +511,10 @@ callmux (port 4860) ─┼─ Linear MCP (1 instance)
 - ~60 processes → ~6 (one callmux + one of each downstream)
 - ~4 GB → ~500 MB RAM for MCP infrastructure
 - No orphaned servers when sessions die (one process, clean lifecycle)
-- Cache shared across sessions (one session's cached result serves all)
+- Cache shared across sessions when safe, and scoped by project cwd for cwd-sensitive calls
 - Downstream startup cost paid once
+
+For stdio servers in listener mode, callmux uses the client session's project cwd by default when it can resolve one from MCP roots, `x-callmux-cwd`, or request `_meta`. This makes relative paths behave like they would in a per-project MCP process. Session-cwd stdio clients are reused per `server + cwd` and retired after `sessionCwdIdleTtlSeconds` of inactivity. If a stdio server should always run from the configured/process cwd, set `cwdMode: "global"` for that server.
 
 **Client config (shared server):**
 
@@ -688,6 +690,7 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
       "args": ["..."],
       "env": { "KEY": "value" },
       "cwd": "/path",
+      "cwdMode": "global",
       "tools": ["tool_a", "tool_b"],
       "maxConcurrency": 2,
       "requestBodyMaxBytes": 1048576,
@@ -771,6 +774,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
 | `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
 | `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
+| `sessionCwdIdleTtlSeconds` | integer | `600` | Idle TTL for listener-mode session cwd stdio clients (`0` = close after each call) |
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
 | `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
@@ -792,6 +796,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `args` | string[] | — | Arguments passed to the command |
 | `env` | object | — | Environment variables for the process |
 | `cwd` | string | — | Working directory |
+| `cwdMode` | `"global"` or `"session"` | — | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
 | `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
 | `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |

@@ -12,6 +12,7 @@ interface ServerMutation {
   removeTools?: string[];
   clearTools?: boolean;
   cwd?: string;
+  cwdMode?: "global" | "session";
   clearCwd?: boolean;
   setEnv?: Record<string, string>;
   removeEnv?: string[];
@@ -369,6 +370,7 @@ export function applyServerMutation(
     ...((mutation.clearCwd ? undefined : mutation.cwd) ?? (!mutation.clearCwd ? server.cwd : undefined)
       ? { cwd: (mutation.clearCwd ? undefined : mutation.cwd) ?? server.cwd }
       : {}),
+    ...(server.cwdMode ? { cwdMode: server.cwdMode } : {}),
     ...(tools ? { tools } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
     ...(mutation.clearRequestBodyMaxBytes
@@ -388,6 +390,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
   transport?: string;
   args?: string[];
   cwd?: string;
+  cwdMode?: "global" | "session";
   tools?: string[];
   envKeys?: string[];
   cachePolicy?: CachePolicyConfig;
@@ -411,6 +414,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
       command: server.command,
       ...(server.args ? { args: server.args } : {}),
       ...(server.cwd ? { cwd: server.cwd } : {}),
+      ...(server.cwdMode ? { cwdMode: server.cwdMode } : {}),
       ...(server.tools ? { tools: server.tools } : {}),
       ...(server.env ? { envKeys: Object.keys(server.env).sort() } : {}),
       ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
@@ -437,6 +441,7 @@ export function formatServerList(config: CallmuxConfig): string {
       } else {
         lines.push(`  command: ${formatCommand(server)}`);
         if (server.cwd) lines.push(`  cwd: ${server.cwd}`);
+        if (server.cwdMode) lines.push(`  cwd mode: ${server.cwdMode}`);
         const envKeys = formatValueList(server.env ? Object.keys(server.env).sort() : undefined);
         if (envKeys) lines.push(`  env keys: ${envKeys}`);
       }

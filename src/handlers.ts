@@ -7,6 +7,7 @@ import type {
   BatchItem,
   PipelineStep,
   InstanceIdentity,
+  ToolCallContext,
 } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -36,6 +37,24 @@ function unwrapResult(result: CallToolResult): unknown {
   } catch {
     return text;
   }
+}
+
+function cacheScopeForCall(
+  upstream: UpstreamManager,
+  tool: string,
+  server: string | undefined,
+  context?: ToolCallContext
+): string | undefined {
+  const maybeScoped = upstream as UpstreamManager & {
+    cacheScopeForCall?: (
+      toolName: string,
+      serverHint?: string,
+      context?: ToolCallContext
+    ) => string | undefined;
+  };
+  return typeof maybeScoped.cacheScopeForCall === "function"
+    ? maybeScoped.cacheScopeForCall(tool, server, context)
+    : context?.cwd;
 }
 
 function resolveMapping(text: string, expr: string): unknown {
@@ -467,7 +486,8 @@ export async function handleParallel(
   upstream: UpstreamManager,
   cache: CallCache,
   args: unknown,
-  maxConcurrency: number
+  maxConcurrency: number,
+  context?: ToolCallContext
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
@@ -502,13 +522,14 @@ export async function handleParallel(
     if (serverSem) await serverSem.acquire();
     const callStart = Date.now();
     try {
-      const cached = cache.get(call.tool, call.arguments, call.server);
+      const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, context);
+      const cached = cache.get(call.tool, call.arguments, call.server, cacheScope);
       if (cached) {
         return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(call.tool, call.arguments, call.server);
-      cache.set(call.tool, call.arguments, result, call.server);
+      const result = await upstream.callTool(call.tool, call.arguments, call.server, context);
+      cache.set(call.tool, call.arguments, result, call.server, cacheScope);
       return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
     } catch (err) {
       return {
@@ -535,7 +556,8 @@ export async function handleBatch(
   upstream: UpstreamManager,
   cache: CallCache,
   args: unknown,
-  maxConcurrency: number
+  maxConcurrency: number,
+  context?: ToolCallContext
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
@@ -561,14 +583,15 @@ export async function handleBatch(
     await semaphore.acquire();
     const callStart = Date.now();
     try {
-      const cached = cache.get(tool, item.arguments, server);
+      const cacheScope = cacheScopeForCall(upstream, tool, server, context);
+      const cached = cache.get(tool, item.arguments, server, cacheScope);
       if (cached) {
         succeeded++;
         return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(tool, item.arguments, server);
-      cache.set(tool, item.arguments, result, server);
+      const result = await upstream.callTool(tool, item.arguments, server, context);
+      cache.set(tool, item.arguments, result, server, cacheScope);
       if (result.isError) failed++;
       else succeeded++;
       return { index, result: unwrapResult(result), durationMs: Date.now() - callStart };
@@ -598,7 +621,8 @@ export async function handleBatch(
 export async function handlePipeline(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: unknown
+  args: unknown,
+  context?: ToolCallContext
 ): Promise<CallToolResult> {
   const parsedArgs = validatePipelineArgs(args);
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
@@ -624,11 +648,12 @@ export async function handlePipeline(
     }
 
     try {
-      const cached = cache.get(step.tool, mergedArgs, step.server);
-      const result = cached ?? await upstream.callTool(step.tool, mergedArgs, step.server);
+      const cacheScope = cacheScopeForCall(upstream, step.tool, step.server, context);
+      const cached = cache.get(step.tool, mergedArgs, step.server, cacheScope);
+      const result = cached ?? await upstream.callTool(step.tool, mergedArgs, step.server, context);
 
       if (!cached) {
-        cache.set(step.tool, mergedArgs, result, step.server);
+        cache.set(step.tool, mergedArgs, result, step.server, cacheScope);
       }
 
       const durationMs = Date.now() - callStart;
@@ -667,7 +692,8 @@ export async function handlePipeline(
 export async function handleDryRun(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: unknown
+  args: unknown,
+  context?: ToolCallContext
 ): Promise<CallToolResult> {
   const parsed = validateDryRunArgs(args);
   if (isToolErrorResult(parsed)) return parsed;
@@ -695,7 +721,8 @@ export async function handleDryRun(
       continue;
     }
 
-    const cacheHit = cache.get(call.tool, call.arguments, call.server) !== null;
+    const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, context);
+    const cacheHit = cache.get(call.tool, call.arguments, call.server, cacheScope) !== null;
     if (cacheHit) cacheHitCandidates++;
 
     const resolvedArguments = prepare.resolvedArguments;
@@ -741,7 +768,8 @@ export async function handleDryRun(
 export async function handleCall(
   upstream: UpstreamManager,
   cache: CallCache,
-  args: unknown
+  args: unknown,
+  context?: ToolCallContext
 ): Promise<CallToolResult> {
   if (!isRecord(args)) {
     return errorResult("invalid_arguments", '"tool" must be a non-empty string', {
@@ -771,11 +799,12 @@ export async function handleCall(
   }
   if ("error" in resolved) return resolved.error;
 
-  const cached = cache.get(tool, parsedArgs, server);
+  const cacheScope = cacheScopeForCall(upstream, tool, server, context);
+  const cached = cache.get(tool, parsedArgs, server, cacheScope);
   if (cached) return cached;
 
-  const result = await upstream.callTool(tool, parsedArgs, server);
-  cache.set(tool, parsedArgs, result, server);
+  const result = await upstream.callTool(tool, parsedArgs, server, context);
+  cache.set(tool, parsedArgs, result, server, cacheScope);
   return result;
 }
 

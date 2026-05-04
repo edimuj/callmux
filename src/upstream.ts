@@ -7,19 +7,21 @@ import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
-import { isHttpServerConfig } from "./types.js";
+import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import type {
   InstanceIdentity,
   ServerConfig,
   ServerInfo,
   StdioServerConfig,
   HttpServerConfig,
+  ToolCallContext,
   UpstreamConnection,
   UpstreamConnectionFailure,
 } from "./types.js";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS = 600;
 const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
 const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
 
@@ -63,6 +65,7 @@ interface ConnectedServer {
 interface UpstreamConnectOptions {
   maxConcurrency?: number;
   connectTimeoutMs?: number;
+  sessionCwdIdleTtlSeconds?: number;
   strictStartup?: boolean;
 }
 
@@ -71,6 +74,14 @@ interface PreparedToolCall {
   server: string;
   actualName: string;
   resolvedArguments?: Record<string, unknown>;
+}
+
+interface ScopedClient {
+  client: Client;
+  transport: Transport;
+  tools: Set<string>;
+  activeCalls: number;
+  idleTimer?: ReturnType<typeof setTimeout>;
 }
 
 function errorMessage(error: unknown): string {
@@ -277,6 +288,9 @@ async function withTimeout<T>(
 export class UpstreamManager {
   private clients = new Map<string, Client>();
   private transports = new Map<string, Transport>();
+  private sessionClients = new Map<string, ScopedClient>();
+  private sessionClientConnects = new Map<string, Promise<ScopedClient>>();
+  private serverConfigs = new Map<string, ServerConfig>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
   private unqualifiedToolMap = new Map<string, { server: string; tool: Tool } | null>();
   private exposedToolsByServer = new Map<string, Set<string>>();
@@ -284,6 +298,8 @@ export class UpstreamManager {
   private serverInfoMap = new Map<string, ServerInfo>();
   private serverConcurrency = new Map<string, number>();
   private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
+  private connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
+  private sessionCwdIdleTtlMs = DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS * 1000;
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
 
@@ -296,13 +312,24 @@ export class UpstreamManager {
   }
 
   private async resetConnectionState(): Promise<void> {
+    for (const scoped of this.sessionClients.values()) {
+      if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
+    }
     await Promise.all(
-      Array.from(this.clients.entries()).map(([name, client]) =>
-        this.closeQuietly(client, this.transports.get(name))
-      )
+      [
+        ...Array.from(this.clients.entries()).map(([name, client]) =>
+          this.closeQuietly(client, this.transports.get(name))
+        ),
+        ...Array.from(this.sessionClients.values()).map(({ client, transport }) =>
+          this.closeQuietly(client, transport)
+        ),
+      ]
     );
     this.clients.clear();
     this.transports.clear();
+    this.sessionClients.clear();
+    this.sessionClientConnects.clear();
+    this.serverConfigs.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
@@ -324,12 +351,12 @@ export class UpstreamManager {
     }
   }
 
-  private createStdioTransport(config: StdioServerConfig): Transport {
+  private createStdioTransport(config: StdioServerConfig, cwd?: string): Transport {
     return new StdioClientTransport({
       command: config.command,
       args: config.args,
       env: { ...process.env, ...config.env } as Record<string, string>,
-      cwd: config.cwd,
+      cwd: cwd ?? config.cwd,
       stderr: "inherit",
     });
   }
@@ -439,6 +466,170 @@ export class UpstreamManager {
     }
   }
 
+  private sessionClientKey(server: string, cwd: string): string {
+    return `${server}\0${cwd}`;
+  }
+
+  private serverUsesSessionCwd(server: string): boolean {
+    const config = this.serverConfigs.get(server);
+    return Boolean(config && isStdioServerConfig(config) && config.cwdMode !== "global");
+  }
+
+  private shouldUseSessionCwd(server: string, context?: ToolCallContext): context is ToolCallContext & { cwd: string } {
+    return Boolean(context?.cwd && this.serverUsesSessionCwd(server));
+  }
+
+  usesSessionCwd(toolName: string, serverHint?: string): boolean {
+    const resolved = this.resolveServer(toolName, serverHint);
+    if (!resolved || "error" in resolved) return false;
+    return this.serverUsesSessionCwd(resolved.server);
+  }
+
+  cacheScopeForCall(
+    toolName: string,
+    serverHint?: string,
+    context?: ToolCallContext
+  ): string | undefined {
+    return context?.cwd && this.usesSessionCwd(toolName, serverHint)
+      ? context.cwd
+      : undefined;
+  }
+
+  private refreshSessionClientIdleTimer(
+    key: string,
+    server: string,
+    cwd: string,
+    scoped: ScopedClient
+  ): void {
+    if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
+    if (this.sessionCwdIdleTtlMs <= 0) return;
+
+    scoped.idleTimer = setTimeout(() => {
+      if (this.sessionClients.get(key) !== scoped) return;
+      if (scoped.activeCalls > 0) return;
+      this.sessionClients.delete(key);
+      void this.closeQuietly(scoped.client, scoped.transport);
+      process.stderr.write(`[callmux] Session-scoped server "${server}" idle timeout (${cwd})\n`);
+    }, this.sessionCwdIdleTtlMs);
+    scoped.idleTimer.unref?.();
+  }
+
+  private closeSessionClientAfterCall(
+    key: string,
+    scoped: ScopedClient
+  ): void {
+    if (this.sessionCwdIdleTtlMs !== 0) return;
+    if (scoped.activeCalls > 0) return;
+    this.sessionClients.delete(key);
+    void this.closeQuietly(scoped.client, scoped.transport);
+  }
+
+  private acquireSessionClient(scoped: ScopedClient): void {
+    if (scoped.idleTimer) {
+      clearTimeout(scoped.idleTimer);
+      scoped.idleTimer = undefined;
+    }
+    scoped.activeCalls++;
+  }
+
+  private releaseSessionClient(scoped: ScopedClient): void {
+    scoped.activeCalls = Math.max(0, scoped.activeCalls - 1);
+  }
+
+  private validateSessionToolSurface(
+    server: string,
+    cwd: string,
+    allTools: Tool[]
+  ): Set<string> {
+    const available = new Set(allTools.map((tool) => tool.name));
+    const expected = this.exposedToolsByServer.get(server);
+    if (!expected) return available;
+
+    const missing = Array.from(expected).filter((tool) => !available.has(tool));
+    if (missing.length > 0) {
+      throw new Error(
+        `session-scoped server "${server}" at cwd "${cwd}" did not expose expected tool(s): ${missing.join(", ")}`
+      );
+    }
+
+    return available;
+  }
+
+  private async getSessionClient(
+    server: string,
+    cwd: string
+  ): Promise<ScopedClient | null> {
+    const config = this.serverConfigs.get(server);
+    if (!config || !isStdioServerConfig(config)) return null;
+
+    const key = this.sessionClientKey(server, cwd);
+    const existing = this.sessionClients.get(key);
+    if (existing) {
+      this.acquireSessionClient(existing);
+      return existing;
+    }
+
+    const connecting = this.sessionClientConnects.get(key);
+    if (connecting) {
+      const scoped = await connecting;
+      this.acquireSessionClient(scoped);
+      return scoped;
+    }
+
+    const promise = (async () => {
+      const transport = this.createStdioTransport(config, cwd);
+      const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
+      try {
+        await withTimeout(
+          client.connect(transport),
+          this.connectTimeoutMs,
+          `"${server}" connect (${cwd})`
+        );
+        const { tools: allTools } = await withTimeout(
+          client.listTools(),
+          this.connectTimeoutMs,
+          `"${server}" listTools (${cwd})`
+        );
+        const tools = this.validateSessionToolSurface(server, cwd, allTools);
+        const scoped: ScopedClient = { client, transport, tools, activeCalls: 0 };
+        this.sessionClients.set(key, scoped);
+
+        client.onclose = () => {
+          if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
+          this.sessionClients.delete(key);
+          process.stderr.write(`[callmux] Session-scoped server "${server}" disconnected (${cwd})\n`);
+        };
+        client.onerror = (err) => {
+          process.stderr.write(`[callmux] Session-scoped server "${server}" error (${cwd}): ${err.message}\n`);
+        };
+
+        return scoped;
+      } catch (error) {
+        await this.closeQuietly(client, transport);
+        throw error;
+      } finally {
+        this.sessionClientConnects.delete(key);
+      }
+    })();
+
+    this.sessionClientConnects.set(key, promise);
+    const scoped = await promise;
+    this.acquireSessionClient(scoped);
+    return scoped;
+  }
+
+  private async clientForCall(
+    server: string,
+    context?: ToolCallContext
+  ): Promise<Client | undefined> {
+    if (this.shouldUseSessionCwd(server, context)) {
+      const scoped = await this.getSessionClient(server, context.cwd);
+      if (scoped) return scoped.client;
+    }
+
+    return this.clients.get(server);
+  }
+
   async connect(
     servers: Record<string, ServerConfig>,
     options: UpstreamConnectOptions = {}
@@ -446,9 +637,13 @@ export class UpstreamManager {
     await this.resetConnectionState();
 
     const entries = Object.entries(servers);
+    this.serverConfigs = new Map(entries);
     const multiServer = entries.length > 1;
     const maxConcurrency = options.maxConcurrency ?? 20;
     const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.sessionCwdIdleTtlMs =
+      (options.sessionCwdIdleTtlSeconds ?? DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS) * 1000;
     const strictStartup = options.strictStartup ?? false;
     this.failedConnections = [];
 
@@ -928,13 +1123,17 @@ export class UpstreamManager {
   async callTool(
     toolName: string,
     args?: Record<string, unknown>,
-    serverHint?: string
+    serverHint?: string,
+    context?: ToolCallContext
   ): Promise<CallToolResult> {
     const prepared = await this.prepareToolCall(toolName, args, serverHint);
     if ("error" in prepared) return prepared.error;
+    const scopedKey = this.shouldUseSessionCwd(prepared.server, context)
+      ? this.sessionClientKey(prepared.server, context.cwd)
+      : undefined;
 
     try {
-      const client = this.clients.get(prepared.server);
+      const client = await this.clientForCall(prepared.server, context);
       if (!client) {
         return this.toolNotFound(toolName);
       }
@@ -956,6 +1155,23 @@ export class UpstreamManager {
         rootCause: normalized.rootCause,
         retryable: normalized.retryable,
       });
+    } finally {
+      if (scopedKey) {
+        const scoped = this.sessionClients.get(scopedKey);
+        if (scoped) {
+          this.releaseSessionClient(scoped);
+          if (this.sessionCwdIdleTtlMs === 0) {
+            this.closeSessionClientAfterCall(scopedKey, scoped);
+          } else {
+            this.refreshSessionClientIdleTimer(
+              scopedKey,
+              prepared.server,
+              context?.cwd ?? "",
+              scoped
+            );
+          }
+        }
+      }
     }
   }
 
@@ -999,15 +1215,31 @@ export class UpstreamManager {
   }
 
   async close(): Promise<void> {
-    for (const [name, client] of this.clients) {
-      try {
-        await client.close();
-      } catch {
-        process.stderr.write(`[callmux] Warning: error closing "${name}"\n`);
-      }
+    for (const scoped of this.sessionClients.values()) {
+      if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
     }
+    await Promise.all([
+      ...Array.from(this.clients.entries()).map(async ([name, client]) => {
+        try {
+          await client.close();
+        } catch {
+          process.stderr.write(`[callmux] Warning: error closing "${name}"\n`);
+        }
+      }),
+      ...Array.from(this.sessionClients.entries()).map(async ([key, { client }]) => {
+        try {
+          await client.close();
+        } catch {
+          const [name] = key.split("\0", 1);
+          process.stderr.write(`[callmux] Warning: error closing session-scoped "${name}"\n`);
+        }
+      }),
+    ]);
     this.clients.clear();
     this.transports.clear();
+    this.sessionClients.clear();
+    this.sessionClientConnects.clear();
+    this.serverConfigs.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();

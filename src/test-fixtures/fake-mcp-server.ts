@@ -81,6 +81,7 @@ for (const tool of tools) {
         server: process.env.FAKE_MCP_NAME ?? "fake-mcp-server",
         tool: tool.name,
         arguments: args,
+        cwd: process.cwd(),
       })
     );
   });

@@ -7,6 +7,8 @@ export interface StdioServerConfig {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  /** Working directory behavior. Listener mode defaults to "session"; stdio mode defaults to "global". */
+  cwdMode?: "global" | "session";
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
@@ -174,6 +176,8 @@ export interface CallmuxConfig {
   connectTimeoutMs?: number;
   /** Timeout in milliseconds for downstream tool calls */
   callTimeoutMs?: number;
+  /** Idle TTL in seconds for listener-mode session cwd stdio clients (0 = close after each call) */
+  sessionCwdIdleTtlSeconds?: number;
   /** When true, any downstream startup failure prevents callmux from starting */
   strictStartup?: boolean;
   /** Maximum cached entries before oldest entries are evicted */
@@ -207,6 +211,13 @@ export interface InstanceIdentity {
   namespace?: string;
   /** Stable fingerprint for this callmux instance */
   instanceId: string;
+}
+
+export interface ToolCallContext {
+  /** Project/session working directory resolved from MCP roots or listener metadata */
+  cwd?: string;
+  /** Client session identifier when available */
+  sessionId?: string;
 }
 
 // ─── Meta-tool call shapes ─────────────────────────────────────
