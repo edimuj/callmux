@@ -7,6 +7,7 @@ import type {
   BatchItem,
   PipelineStep,
   InstanceIdentity,
+  RecipeConfig,
   ToolCallContext,
   ListenerRuntimeDiagnostics,
 } from "./types.js";
@@ -339,6 +340,14 @@ function resolveServerForConcurrency(
 
 type DryRunMode = "call" | "parallel" | "batch" | "pipeline";
 
+type RecipeArgs = { recipe: string; arguments?: Record<string, unknown> };
+
+type ExpandedRecipeInvocation = {
+  recipeName: string;
+  recipe: RecipeConfig;
+  args: Record<string, unknown>;
+};
+
 interface DryRunCall {
   tool: string;
   server?: string;
@@ -480,6 +489,113 @@ function extractStructuredError(result: CallToolResult): {
   return {
     code: "unknown_error",
     message: extractText(result) || "unknown error",
+  };
+}
+
+function validateRecipeArgs(args: unknown): RecipeArgs | CallToolResult {
+  if (!isRecord(args)) {
+    return errorResult("invalid_arguments", '"recipe" must be a non-empty string', {
+      field: "recipe",
+    });
+  }
+
+  const recipe = validateToolName(args.recipe, "recipe");
+  if (typeof recipe !== "string") return recipe;
+
+  const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
+  if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+
+  return {
+    recipe,
+    ...(parsedArgs ? { arguments: parsedArgs } : {}),
+  };
+}
+
+function substituteRecipeValue(
+  value: unknown,
+  provided: Record<string, unknown>,
+  path: string
+): unknown | CallToolResult {
+  if (Array.isArray(value)) {
+    const replaced: unknown[] = [];
+    for (let index = 0; index < value.length; index++) {
+      const nested = substituteRecipeValue(value[index], provided, `${path}[${index}]`);
+      if (isToolErrorResult(nested)) return nested;
+      replaced.push(nested);
+    }
+    return replaced;
+  }
+
+  if (!isRecord(value)) return value;
+
+  const entries = Object.entries(value);
+  if (entries.length === 1 && entries[0][0] === "$param") {
+    const name = entries[0][1];
+    if (typeof name !== "string" || name.trim().length === 0) {
+      return errorResult(
+        "invalid_arguments",
+        `${path}.$param must be a non-empty string`,
+        { field: `${path}.$param` }
+      );
+    }
+    if (!Object.prototype.hasOwnProperty.call(provided, name)) {
+      return errorResult(
+        "invalid_arguments",
+        `recipe argument "${name}" is required`,
+        { field: `arguments.${name}`, parameter: name }
+      );
+    }
+    return provided[name];
+  }
+
+  const replaced: Record<string, unknown> = {};
+  for (const [key, nestedValue] of entries) {
+    const nested = substituteRecipeValue(
+      nestedValue,
+      provided,
+      path ? `${path}.${key}` : key
+    );
+    if (isToolErrorResult(nested)) return nested;
+    replaced[key] = nested;
+  }
+  return replaced;
+}
+
+export function expandRecipeInvocation(
+  recipes: Record<string, RecipeConfig> | undefined,
+  args: unknown
+): ExpandedRecipeInvocation | CallToolResult {
+  const parsed = validateRecipeArgs(args);
+  if (isToolErrorResult(parsed)) return parsed;
+
+  const recipe = recipes?.[parsed.recipe];
+  if (!recipe) {
+    return errorResult("recipe_not_found", `recipe "${parsed.recipe}" not found`, {
+      recipe: parsed.recipe,
+      availableRecipes: Object.keys(recipes ?? {}).sort(),
+    });
+  }
+
+  const substituted = substituteRecipeValue(
+    recipe,
+    parsed.arguments ?? {},
+    `recipes.${parsed.recipe}`
+  );
+  if (isToolErrorResult(substituted)) return substituted;
+
+  const expandedRecipe = substituted as RecipeConfig;
+  const expandedArgs: Record<string, unknown> = { mode: expandedRecipe.mode };
+  if (expandedRecipe.server !== undefined) expandedArgs.server = expandedRecipe.server;
+  if (expandedRecipe.tool !== undefined) expandedArgs.tool = expandedRecipe.tool;
+  if (expandedRecipe.arguments !== undefined) expandedArgs.arguments = expandedRecipe.arguments;
+  if (expandedRecipe.calls !== undefined) expandedArgs.calls = expandedRecipe.calls;
+  if (expandedRecipe.items !== undefined) expandedArgs.items = expandedRecipe.items;
+  if (expandedRecipe.steps !== undefined) expandedArgs.steps = expandedRecipe.steps;
+
+  return {
+    recipeName: parsed.recipe,
+    recipe,
+    args: expandedArgs,
   };
 }
 
@@ -809,6 +925,48 @@ export async function handleCall(
   return result;
 }
 
+export async function handleRecipeRun(
+  upstream: UpstreamManager,
+  cache: CallCache,
+  recipes: Record<string, RecipeConfig> | undefined,
+  args: unknown,
+  maxConcurrency: number,
+  context?: ToolCallContext
+): Promise<CallToolResult> {
+  const expanded = expandRecipeInvocation(recipes, args);
+  if (isToolErrorResult(expanded)) return expanded;
+
+  switch (expanded.recipe.mode) {
+    case "call":
+      return handleCall(upstream, cache, expanded.args, context);
+    case "parallel":
+      return handleParallel(upstream, cache, expanded.args, maxConcurrency, context);
+    case "batch":
+      return handleBatch(upstream, cache, expanded.args, maxConcurrency, context);
+    case "pipeline":
+      return handlePipeline(upstream, cache, expanded.args, context);
+  }
+}
+
+export async function handleRecipeDryRun(
+  upstream: UpstreamManager,
+  cache: CallCache,
+  recipes: Record<string, RecipeConfig> | undefined,
+  args: unknown,
+  context?: ToolCallContext
+): Promise<CallToolResult> {
+  const expanded = expandRecipeInvocation(recipes, args);
+  if (isToolErrorResult(expanded)) return expanded;
+
+  const result = await handleDryRun(upstream, cache, expanded.args, context);
+  if (result.isError || !isRecord(result.structuredContent)) return result;
+
+  return jsonResult({
+    recipe: expanded.recipeName,
+    ...result.structuredContent,
+  });
+}
+
 export function handleCacheClear(
   cache: CallCache,
   args: unknown
@@ -860,7 +1018,8 @@ export function handleStatus(
   defaultDescriptionMaxLength: number | undefined,
   instanceIdentity: InstanceIdentity,
   args: unknown,
-  listenerDiagnostics?: ListenerRuntimeDiagnostics
+  listenerDiagnostics?: ListenerRuntimeDiagnostics,
+  recipes?: Record<string, RecipeConfig>
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
@@ -896,6 +1055,9 @@ export function handleStatus(
         if (info.toolFilter) base.toolFilter = info.toolFilter;
         if (info.totalTools !== info.exposedTools) base.totalTools = info.totalTools;
         if (info.maxConcurrency) base.maxConcurrency = info.maxConcurrency;
+        if (info.error) base.error = info.error;
+        if (info.reconnectAttempts !== undefined) base.reconnectAttempts = info.reconnectAttempts;
+        if (info.nextRetryAt) base.nextRetryAt = info.nextRetryAt;
       }
 
       if (includeDescriptions) {
@@ -951,8 +1113,17 @@ export function handleStatus(
     ...serverNames,
     ...failedServers.map((failure) => failure.name),
   ])].sort();
+  const unhealthyServers = servers.filter((server) => server.state && server.state !== "connected");
 
   const recommendations: Array<{ when: string; use: string; note: string }> = [];
+  const recipeSummaries = Object.entries(recipes ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, recipe]) => ({
+      name,
+      mode: recipe.mode,
+      ...(recipe.description ? { description: recipe.description } : {}),
+    }));
+
   if (metaOnly) {
     recommendations.push({
       when: "Single downstream call in meta-only mode",
@@ -982,6 +1153,13 @@ export function handleStatus(
       note: "Resolve refs and detect ambiguity without running downstream tools.",
     }
   );
+  if (recipeSummaries.length > 0) {
+    recommendations.push({
+      when: "Repeat a configured multi-call workflow",
+      use: "callmux_recipe_run",
+      note: "Invoke named config recipes with runtime arguments.",
+    });
+  }
   if (wrappedServers.length > 1 && !serverFilter) {
     recommendations.push({
       when: "Avoid ambiguity across multiple wrapped servers",
@@ -991,7 +1169,7 @@ export function handleStatus(
   }
 
   return jsonResult({
-    status: failedServers.length > 0 ? "degraded" : "ok",
+    status: failedServers.length > 0 || unhealthyServers.length > 0 ? "degraded" : "ok",
     mode: metaOnly ? "meta-only" : "standard",
     ...(instanceIdentity.namespace ? { namespace: instanceIdentity.namespace } : {}),
     instanceId: instanceIdentity.instanceId,
@@ -1001,6 +1179,9 @@ export function handleStatus(
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
     maxConcurrency,
+    ...(recipeSummaries.length > 0
+      ? { recipes: recipeSummaries, recipeCount: recipeSummaries.length }
+      : {}),
     ...(includeSessions && listenerDiagnostics ? { listener: listenerDiagnostics } : {}),
     ...(includeRecommendations ? { recommendations } : {}),
   });

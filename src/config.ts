@@ -13,6 +13,8 @@ import type {
   CallmuxConfig,
   ConfigFormat,
   MetricsConfig,
+  RecipeConfig,
+  RecipeMode,
   ServerConfig,
 } from "./types.js";
 import { hashBearerToken, parseScryptTokenHash } from "./auth.js";
@@ -398,6 +400,191 @@ function parseMetricsConfig(
   };
 }
 
+function parseNonEmptyString(value: unknown, optionName: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${optionName} must be a non-empty string`);
+  }
+  return value;
+}
+
+function parseArgumentsRecord(
+  value: unknown,
+  optionName: string
+): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+  return value;
+}
+
+function parseRecipeMode(value: unknown, optionName: string): RecipeMode {
+  if (
+    value !== "call" &&
+    value !== "parallel" &&
+    value !== "batch" &&
+    value !== "pipeline"
+  ) {
+    throw new Error(
+      `${optionName} must be one of "call", "parallel", "batch", or "pipeline"`
+    );
+  }
+  return value;
+}
+
+function parseRecipeConfig(
+  value: unknown,
+  optionName: string
+): RecipeConfig {
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const description =
+    value.description === undefined
+      ? undefined
+      : parseNonEmptyString(value.description, `${optionName}.description`);
+  const mode = parseRecipeMode(value.mode, `${optionName}.mode`);
+  const server =
+    value.server === undefined
+      ? undefined
+      : parseNonEmptyString(value.server, `${optionName}.server`);
+
+  if (mode === "call") {
+    const tool = parseNonEmptyString(value.tool, `${optionName}.tool`);
+    const args = parseArgumentsRecord(value.arguments, `${optionName}.arguments`);
+    return {
+      ...(description ? { description } : {}),
+      mode,
+      ...(server ? { server } : {}),
+      tool,
+      ...(args ? { arguments: args } : {}),
+    };
+  }
+
+  if (mode === "parallel") {
+    if (!Array.isArray(value.calls)) {
+      throw new Error(`${optionName}.calls must be an array`);
+    }
+    const calls = value.calls.map((call, index) => {
+      if (!isRecord(call)) {
+        throw new Error(`${optionName}.calls[${index}] must be an object`);
+      }
+      const tool = parseNonEmptyString(call.tool, `${optionName}.calls[${index}].tool`);
+      const callServer =
+        call.server === undefined
+          ? undefined
+          : parseNonEmptyString(call.server, `${optionName}.calls[${index}].server`);
+      const args = parseArgumentsRecord(
+        call.arguments,
+        `${optionName}.calls[${index}].arguments`
+      );
+      return {
+        tool,
+        ...(callServer ? { server: callServer } : {}),
+        ...(args ? { arguments: args } : {}),
+      };
+    });
+    return {
+      ...(description ? { description } : {}),
+      mode,
+      calls,
+    };
+  }
+
+  if (mode === "batch") {
+    const tool = parseNonEmptyString(value.tool, `${optionName}.tool`);
+    if (!Array.isArray(value.items)) {
+      throw new Error(`${optionName}.items must be an array`);
+    }
+    const items = value.items.map((item, index) => {
+      if (!isRecord(item)) {
+        throw new Error(`${optionName}.items[${index}] must be an object`);
+      }
+      const args = parseArgumentsRecord(
+        item.arguments,
+        `${optionName}.items[${index}].arguments`
+      );
+      if (!args) {
+        throw new Error(`${optionName}.items[${index}].arguments must be an object`);
+      }
+      return { arguments: args };
+    });
+    return {
+      ...(description ? { description } : {}),
+      mode,
+      ...(server ? { server } : {}),
+      tool,
+      items,
+    };
+  }
+
+  if (!Array.isArray(value.steps)) {
+    throw new Error(`${optionName}.steps must be an array`);
+  }
+  if (value.steps.length === 0) {
+    throw new Error(`${optionName}.steps must contain at least one step`);
+  }
+  const steps = value.steps.map((step, index) => {
+    if (!isRecord(step)) {
+      throw new Error(`${optionName}.steps[${index}] must be an object`);
+    }
+    const tool = parseNonEmptyString(step.tool, `${optionName}.steps[${index}].tool`);
+    const stepServer =
+      step.server === undefined
+        ? undefined
+        : parseNonEmptyString(step.server, `${optionName}.steps[${index}].server`);
+    const args = parseArgumentsRecord(
+      step.arguments,
+      `${optionName}.steps[${index}].arguments`
+    );
+    let inputMapping: Record<string, string> | undefined;
+    if (step.inputMapping !== undefined) {
+      if (!isRecord(step.inputMapping)) {
+        throw new Error(`${optionName}.steps[${index}].inputMapping must be an object of string expressions`);
+      }
+      const entries = Object.entries(step.inputMapping);
+      if (!entries.every(([, nested]) => typeof nested === "string")) {
+        throw new Error(`${optionName}.steps[${index}].inputMapping must be an object of string expressions`);
+      }
+      inputMapping = Object.fromEntries(entries) as Record<string, string>;
+    }
+    return {
+      tool,
+      ...(stepServer ? { server: stepServer } : {}),
+      ...(args ? { arguments: args } : {}),
+      ...(inputMapping ? { inputMapping } : {}),
+    };
+  });
+  return {
+    ...(description ? { description } : {}),
+    mode,
+    steps,
+  };
+}
+
+function parseRecipesConfig(
+  value: unknown,
+  optionName: string
+): Record<string, RecipeConfig> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length === 0) return undefined;
+
+  return Object.fromEntries(
+    entries.map(([name, recipe]) => {
+      if (name.trim().length === 0) {
+        throw new Error(`${optionName} recipe names must be non-empty strings`);
+      }
+      return [name, parseRecipeConfig(recipe, `${optionName}.${name}`)];
+    })
+  );
+}
+
 function parseAuthConfig(
   value: unknown,
   optionName: string,
@@ -701,6 +888,7 @@ function parseConfigDocument(
     );
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
+    const recipes = parseRecipesConfig(parsed.recipes, "recipes");
     return {
       cacheTtlSeconds:
         parsed.cacheTtlSeconds === undefined
@@ -790,6 +978,7 @@ function parseConfigDocument(
       ...(abuseControls ? { abuseControls } : {}),
       ...(auditLog ? { auditLog } : {}),
       ...(metrics ? { metrics } : {}),
+      ...(recipes ? { recipes } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {
             allowInsecureRemoteListener:

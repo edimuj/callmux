@@ -21,6 +21,9 @@ import {
   handlePipeline,
   handleCall,
   handleDryRun,
+  handleRecipeRun,
+  handleRecipeDryRun,
+  expandRecipeInvocation,
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
@@ -609,6 +612,24 @@ export class CallmuxListener {
       return false;
     }
 
+    if (name === "callmux_recipe_run" || name === "callmux_recipe_dry_run") {
+      const expanded = expandRecipeInvocation(this.options.config.recipes, args);
+      if (!isRecord(expanded) || !isRecord(expanded.args)) return false;
+      const recipeArgs = expanded.args;
+      if (targetUsesSessionCwd(recipeArgs.tool, recipeArgs.server)) return true;
+      if (Array.isArray(recipeArgs.calls)) {
+        return recipeArgs.calls.some((call) =>
+          isRecord(call) && targetUsesSessionCwd(call.tool, call.server)
+        );
+      }
+      if (Array.isArray(recipeArgs.steps)) {
+        return recipeArgs.steps.some((step) =>
+          isRecord(step) && targetUsesSessionCwd(step.tool, step.server)
+        );
+      }
+      return false;
+    }
+
     return upstream.usesSessionCwd(name);
   }
 
@@ -657,6 +678,23 @@ export class CallmuxListener {
           return handleCacheClear(cache, args);
         case "callmux_dry_run":
           return handleDryRun(upstream, cache, args, toolContext);
+        case "callmux_recipe_run":
+          return handleRecipeRun(
+            upstream,
+            cache,
+            config.recipes,
+            args,
+            maxConcurrency,
+            toolContext
+          );
+        case "callmux_recipe_dry_run":
+          return handleRecipeDryRun(
+            upstream,
+            cache,
+            config.recipes,
+            args,
+            toolContext
+          );
         case "callmux_status":
           return handleStatus(
             upstream,
@@ -666,7 +704,8 @@ export class CallmuxListener {
             config.descriptionMaxLength,
             upstream.getInstanceIdentity(),
             args,
-            this.getRuntimeDiagnostics()
+            this.getRuntimeDiagnostics(),
+            config.recipes
           );
       }
 
@@ -836,6 +875,15 @@ export class CallmuxListener {
 
     if (name === "callmux_status" || name === "callmux_cache_clear") {
       return [];
+    }
+
+    if (name === "callmux_recipe_run" || name === "callmux_recipe_dry_run") {
+      const expanded = expandRecipeInvocation(this.options.config.recipes, args);
+      if (!isRecord(expanded) || !isRecord(expanded.args)) return [];
+      return this.extractAuthorizationTargets(
+        expanded.args.mode === "call" ? "callmux_call" : `callmux_${expanded.args.mode}`,
+        expanded.args
+      );
     }
 
     if (name === "callmux_dry_run") {
@@ -1162,6 +1210,22 @@ export class CallmuxListener {
       for (const step of args.steps) {
         if (!isRecord(step)) continue;
         addResolvedToolTarget(step.tool, step.server);
+      }
+    } else if (
+      (name === "callmux_recipe_run" || name === "callmux_recipe_dry_run") &&
+      isRecord(args)
+    ) {
+      const expanded = expandRecipeInvocation(this.options.config.recipes, args);
+      if (isRecord(expanded) && isRecord(expanded.args)) {
+        const recipeName = expanded.args.mode === "call"
+          ? "callmux_call"
+          : `callmux_${expanded.args.mode}`;
+        for (const target of this.extractServerTargets({
+          method: "tools/call",
+          params: { name: recipeName, arguments: expanded.args },
+        })) {
+          targets.add(target);
+        }
       }
     } else {
       addResolvedToolTarget(name, undefined);

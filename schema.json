@@ -29,6 +29,11 @@
       "description": "Downstream MCP servers to proxy (MCP-compatible format)",
       "additionalProperties": { "$ref": "#/$defs/serverConfig" }
     },
+    "recipes": {
+      "type": "object",
+      "description": "Named reusable callmux meta-tool recipes",
+      "additionalProperties": { "$ref": "#/$defs/recipeConfig" }
+    },
     "cacheTtlSeconds": {
       "type": "integer",
       "minimum": 0,
@@ -215,6 +220,78 @@
           "description": "Never cache matching tools (exact names or 'prefix*' wildcards). Takes precedence over allowTools."
         }
       },
+      "additionalProperties": false
+    },
+    "recipeArguments": {
+      "type": "object",
+      "description": "Arguments object. Use {\"$param\":\"name\"} as a value to substitute callmux_recipe_run arguments.",
+      "additionalProperties": true
+    },
+    "recipeCall": {
+      "type": "object",
+      "required": ["tool"],
+      "properties": {
+        "server": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "arguments": { "$ref": "#/$defs/recipeArguments" }
+      },
+      "additionalProperties": false
+    },
+    "recipeBatchItem": {
+      "type": "object",
+      "required": ["arguments"],
+      "properties": {
+        "arguments": { "$ref": "#/$defs/recipeArguments" }
+      },
+      "additionalProperties": false
+    },
+    "recipePipelineStep": {
+      "type": "object",
+      "required": ["tool"],
+      "properties": {
+        "server": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "inputMapping": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "recipeConfig": {
+      "type": "object",
+      "description": "Reusable named callmux workflow. Runs as callmux_call, callmux_parallel, callmux_batch, or callmux_pipeline.",
+      "required": ["mode"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "mode": {
+          "type": "string",
+          "enum": ["call", "parallel", "batch", "pipeline"]
+        },
+        "server": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "calls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/recipeCall" }
+        },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/recipeBatchItem" }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/recipePipelineStep" }
+        }
+      },
+      "oneOf": [
+        { "properties": { "mode": { "const": "call" } }, "required": ["tool"] },
+        { "properties": { "mode": { "const": "parallel" } }, "required": ["calls"] },
+        { "properties": { "mode": { "const": "batch" } }, "required": ["tool", "items"] },
+        { "properties": { "mode": { "const": "pipeline" } }, "required": ["steps"] }
+      ],
       "additionalProperties": false
     },
     "authConfig": {

@@ -15,6 +15,8 @@ import {
   handlePipeline,
   handleCall,
   handleDryRun,
+  handleRecipeRun,
+  handleRecipeDryRun,
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
@@ -199,6 +201,23 @@ export class CallmuxProxy {
           args
         );
 
+      case "callmux_recipe_run":
+        return handleRecipeRun(
+          this.upstream,
+          this.cache,
+          this.config.recipes,
+          args,
+          this.maxConcurrency
+        );
+
+      case "callmux_recipe_dry_run":
+        return handleRecipeDryRun(
+          this.upstream,
+          this.cache,
+          this.config.recipes,
+          args
+        );
+
       case "callmux_status":
         return handleStatus(
           this.upstream,
@@ -207,7 +226,9 @@ export class CallmuxProxy {
           this.config.metaOnly ?? false,
           this.config.descriptionMaxLength,
           this.instanceIdentity,
-          args
+          args,
+          undefined,
+          this.config.recipes
         );
     }
 

@@ -196,6 +196,48 @@ export const META_TOOLS: Tool[] = [
     },
   },
   {
+    name: "callmux_recipe_run",
+    description:
+      "Run a named recipe from callmux config. Recipes expand into call, parallel, batch, " +
+      "or pipeline meta-tool calls and support structured parameter substitution.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        recipe: {
+          type: "string",
+          description: "Configured recipe name to run",
+        },
+        arguments: {
+          type: "object",
+          description: "Runtime values for { \"$param\": \"name\" } placeholders in the recipe",
+        },
+      },
+      required: ["recipe"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "callmux_recipe_dry_run",
+    description:
+      "Preview a named recipe without executing downstream tools. Expands recipe parameters, " +
+      "then validates routing, argument references, cache-hit candidates, and per-call errors.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        recipe: {
+          type: "string",
+          description: "Configured recipe name to preview",
+        },
+        arguments: {
+          type: "object",
+          description: "Runtime values for { \"$param\": \"name\" } placeholders in the recipe",
+        },
+      },
+      required: ["recipe"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "callmux_cache_clear",
     description: "Clear the callmux result cache. Optionally scope by tool name and/or server.",
     inputSchema: {

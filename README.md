@@ -22,7 +22,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
-| 40+ tools bloating the system prompt | 7 meta-tools via meta-only mode |
+| 40+ tools bloating the system prompt | 9 meta-tools via meta-only mode |
 | 6 sessions × 5 servers = 30 processes | 1 shared callmux + 5 servers |
 
 <p align="center">
@@ -47,7 +47,7 @@ On machines running multiple agent sessions, callmux's [shared server mode](#sha
 - **Batch operations** -- same tool, many items, one call (bulk create, bulk fetch)
 - **Pipelining** -- chain tools where each step feeds into the next via input mapping
 - **Caching** -- TTL-based result cache with wildcard allow/deny policies, per-server overrides
-- **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 7 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
+- **Meta-only mode** -- hide all downstream tools from the agent's listing, expose only 9 meta-tools. Keeps the system prompt fixed-size regardless of how many servers you connect
 - **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
 - **Tool scoping** -- whitelist which tools each server exposes. Gives any MCP client per-server tool filtering, even if the client doesn't support it natively (Codex, Cursor, Windsurf, etc.)
 - **Shared server mode** -- run callmux once with `--listen <port>`, connect all sessions via URL. One set of downstream servers shared across every agent session on the machine
@@ -312,6 +312,34 @@ Validate and preview calls without executing downstream tools. Resolves routing 
 }
 ```
 
+### `callmux_recipe_run`
+
+Run a named recipe from config. Recipes expand into the existing call, parallel, batch, or pipeline meta-tools and can substitute runtime arguments with structured placeholders.
+
+```json
+{
+  "recipe": "open_bug",
+  "arguments": {
+    "title": "Crash on startup",
+    "body": "Steps to reproduce..."
+  }
+}
+```
+
+### `callmux_recipe_dry_run`
+
+Preview a named recipe without executing downstream tools.
+
+```json
+{
+  "recipe": "open_bug",
+  "arguments": {
+    "title": "Crash on startup",
+    "body": "Steps to reproduce..."
+  }
+}
+```
+
 ### `callmux_cache_clear`
 
 Invalidate cached results. Scope by tool, server, or clear everything.
@@ -570,7 +598,7 @@ By default, binds to `127.0.0.1` (localhost only). Use `--host 0.0.0.0` to expos
 
 By default, callmux exposes all downstream tools alongside its meta-tools. With multiple servers this can mean 50-100+ tool definitions in the system prompt on every API turn.
 
-**Meta-only mode** hides all proxied tools and exposes only the 7 meta-tools (`callmux_parallel`, `callmux_batch`, `callmux_pipeline`, `callmux_call`, `callmux_dry_run`, `callmux_cache_clear`, `callmux_status`). The agent discovers available tools via `callmux_status` and invokes them through `callmux_call` or the batch/parallel meta-tools.
+**Meta-only mode** hides all proxied tools and exposes only the 9 meta-tools (`callmux_parallel`, `callmux_batch`, `callmux_pipeline`, `callmux_call`, `callmux_dry_run`, `callmux_recipe_run`, `callmux_recipe_dry_run`, `callmux_cache_clear`, `callmux_status`). The agent discovers available tools via `callmux_status` and invokes them through `callmux_call`, recipes, or the batch/parallel meta-tools.
 
 ```json
 {
@@ -582,10 +610,10 @@ By default, callmux exposes all downstream tools alongside its meta-tools. With 
 
 | | Standard mode | Meta-only mode |
 |:---|:---|:---|
-| Tools in listing | All downstream + 7 meta-tools | 7 meta-tools only |
+| Tools in listing | All downstream + 9 meta-tools | 9 meta-tools only |
 | Single tool call | Direct by name | `callmux_call` |
 | Tool discovery | Automatic (in listing) | `callmux_status` with `descriptions: true` |
-| System prompt size | Grows with server count | Fixed at 7 tools |
+| System prompt size | Grows with server count | Fixed at 9 tools |
 
 Enable via config (`"metaOnly": true`), CLI flag (`--meta-only`), or the setup wizard.
 
@@ -781,6 +809,7 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
 | `servers` | object | *(required)* | Map of server name → server config |
+| `recipes` | object | — | Named reusable callmux workflows |
 | `cacheTtlSeconds` | integer | `0` | Cache TTL in seconds (0 = disabled) |
 | `cachePolicy` | object | — | Global cache allow/deny rules (see [Caching](#caching)) |
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
@@ -799,6 +828,35 @@ Also accepts MCP-compatible format (`{ "mcpServers": { ... } }`).
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools |
 | `descriptionMaxLength` | integer | — | Default max chars for tool descriptions in `callmux_status` |
+
+**Recipes:**
+
+Recipes are config-defined wrappers around the existing meta-tools. Use `{ "$param": "name" }` as an entire JSON value to substitute a runtime argument from `callmux_recipe_run` or `callmux_recipe_dry_run`.
+
+```json
+{
+  "recipes": {
+    "open_bug": {
+      "description": "Create a labeled bug issue",
+      "mode": "call",
+      "server": "github",
+      "tool": "create_issue",
+      "arguments": {
+        "title": { "$param": "title" },
+        "body": { "$param": "body" },
+        "labels": ["bug"]
+      }
+    },
+    "triage_pair": {
+      "mode": "parallel",
+      "calls": [
+        { "server": "github", "tool": "get_issue", "arguments": { "issue_number": { "$param": "first" } } },
+        { "server": "github", "tool": "get_issue", "arguments": { "issue_number": { "$param": "second" } } }
+      ]
+    }
+  }
+}
+```
 
 **Stdio server config** (local process):
 

@@ -44,7 +44,7 @@ import {
   runDoctor,
   runServerTest,
 } from "./doctor.js";
-import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleStatus } from "./handlers.js";
+import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleRecipeDryRun, handleRecipeRun, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
 import { mapBounded, UpstreamManager } from "./upstream.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -1823,6 +1823,161 @@ test("UpstreamManager reconnect rebuilds unqualified tool resolution index", asy
   assert.deepEqual(resolved.content, [{ type: "text", text: "gamma:shared_tool" }]);
 });
 
+test("UpstreamManager reconnects a disconnected stdio server before the next call", async () => {
+  const upstream = new UpstreamManager();
+  const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    const tool = mockTool("get_issue");
+    const client = {
+      onclose: undefined as undefined | (() => void),
+      async callTool() {
+        return textResult(`client-${connectCount}`);
+      },
+      async close() {},
+    };
+    clients.push(client);
+    return {
+      name,
+      config,
+      client,
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  clients[0].onclose?.();
+
+  const infoAfterClose = upstream.getServerInfo("github");
+  assert.equal(infoAfterClose?.state, "reconnecting");
+  assert.equal(upstream.getServerTools("github")[0], "get_issue");
+
+  const result = await upstream.callTool("get_issue", { id: 1 }, "github");
+
+  assert.equal(connectCount, 2);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.content, [{ type: "text", text: "client-2" }]);
+  assert.equal(upstream.getServerInfo("github")?.state, "connected");
+
+  await upstream.close();
+});
+
+test("UpstreamManager coalesces concurrent reconnects for a disconnected server", async () => {
+  const upstream = new UpstreamManager();
+  const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
+  let connectCount = 0;
+  let releaseReconnect: (() => void) | undefined;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    if (connectCount === 2) {
+      await new Promise<void>((resolve) => {
+        releaseReconnect = resolve;
+      });
+    }
+    const tool = mockTool("get_issue");
+    const client = {
+      onclose: undefined as undefined | (() => void),
+      async callTool() {
+        return textResult(`client-${connectCount}`);
+      },
+      async close() {},
+    };
+    clients.push(client);
+    return {
+      name,
+      config,
+      client,
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  clients[0].onclose?.();
+
+  const first = upstream.callTool("get_issue", { id: 1 }, "github");
+  const second = upstream.callTool("get_issue", { id: 2 }, "github");
+  while (!releaseReconnect) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  releaseReconnect?.();
+  const results = await Promise.all([first, second]);
+
+  assert.equal(connectCount, 2);
+  assert.deepEqual(results.map((result) => (result.content?.[0] as { text: string }).text), [
+    "client-2",
+    "client-2",
+  ]);
+
+  await upstream.close();
+});
+
+test("UpstreamManager returns a retryable downstream error when reconnect fails", async () => {
+  const upstream = new UpstreamManager();
+  const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    if (connectCount > 1) throw new Error("spawn failed");
+    const tool = mockTool("get_issue");
+    const client = {
+      onclose: undefined as undefined | (() => void),
+      async callTool() {
+        return textResult("old");
+      },
+      async close() {},
+    };
+    clients.push(client);
+    return {
+      name,
+      config,
+      client,
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  clients[0].onclose?.();
+
+  const result = await upstream.callTool("get_issue", { id: 1 }, "github");
+  const structured = result.structuredContent as {
+    error: { code: string; details?: Record<string, unknown> };
+  };
+
+  assert.equal(result.isError, true);
+  assert.equal(structured.error.code, "downstream_unavailable");
+  assert.equal(structured.error.details?.server, "github");
+  assert.equal(structured.error.details?.retryable, true);
+  assert.equal(structured.error.details?.lastError, "spawn failed");
+  assert.equal(upstream.getServerInfo("github")?.state, "reconnecting");
+
+  await upstream.close();
+});
+
 test("UpstreamManager call timeout returns a structured tool error", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
@@ -2704,6 +2859,60 @@ test("formatServerList handles mixed stdio and http servers", () => {
   assert.match(output, /transport: sse/);
 });
 
+test("loadConfig parses reusable recipes from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-recipes-"));
+  const configPath = join(dir, "callmux.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        recipes: {
+          open_bug: {
+            description: "Create a labeled bug",
+            mode: "call",
+            server: "github",
+            tool: "create_issue",
+            arguments: {
+              title: { $param: "title" },
+              labels: ["bug"],
+            },
+          },
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.recipes?.open_bug.mode, "call");
+    assert.equal(config.recipes?.open_bug.tool, "create_issue");
+    assert.deepEqual(config.recipes?.open_bug.arguments?.labels, ["bug"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid recipe shape", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-recipes-invalid-"));
+  const configPath = join(dir, "callmux.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        recipes: {
+          broken: { mode: "batch", tool: "create_issue" },
+        },
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /recipes\.broken\.items must be an array/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── Config detection tests ───────────────────────────────────
 
 test("detectExistingConfigs finds servers from .mcp.json in cwd", async () => {
@@ -2746,13 +2955,13 @@ function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
     clients: Map<string, { callTool: (req: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
     toolMap: Map<string, { server: string; tool: Tool }>;
     exposedToolsByServer: Map<string, Set<string>>;
-    serverInfoMap: Map<string, { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number; error?: string }>;
+    serverInfoMap: Map<string, { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number; error?: string; reconnectAttempts?: number; nextRetryAt?: string }>;
     serverConcurrency: Map<string, number>;
     callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
     resolveServer: (toolName: string, serverHint?: string) => { client: unknown; actualName: string; server: string } | { error: CallToolResult } | null;
     getServerNames: () => string[];
     getServerTools: (server: string) => string[];
-    getServerInfo: (server: string) => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number } | undefined;
+    getServerInfo: (server: string) => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number; toolFilter?: string[]; maxConcurrency?: number; error?: string; reconnectAttempts?: number; nextRetryAt?: string } | undefined;
     getServerConcurrency: (server: string) => number | undefined;
     getToolsWithDescriptions: (server: string) => Array<{ name: string; description?: string }>;
   };
@@ -2867,6 +3076,110 @@ test("handleDryRun validates mode and shape", async () => {
     (result.structuredContent as { error: { message: string } }).error.message,
     /mode/
   );
+});
+
+test("handleRecipeRun expands params and delegates to configured mode", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("create_issue") },
+  ]);
+  const cache = new CallCache(0);
+
+  const result = await handleRecipeRun(
+    upstream as never,
+    cache,
+    {
+      open_bug: {
+        mode: "call",
+        server: "github",
+        tool: "create_issue",
+        arguments: {
+          title: { $param: "title" },
+          body: { $param: "body" },
+          labels: ["bug"],
+        },
+      },
+    },
+    {
+      recipe: "open_bug",
+      arguments: { title: "Crash", body: "Steps" },
+    },
+    20
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.equal(
+    result.content[0].type === "text" ? result.content[0].text : "",
+    'github:create_issue:{"title":"Crash","body":"Steps","labels":["bug"]}'
+  );
+});
+
+test("handleRecipeRun reports missing recipe parameters", async () => {
+  const result = await handleRecipeRun(
+    createMockUpstream([]) as never,
+    new CallCache(0),
+    {
+      open_bug: {
+        mode: "call",
+        tool: "create_issue",
+        arguments: { title: { $param: "title" } },
+      },
+    },
+    { recipe: "open_bug", arguments: {} },
+    20
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "invalid_arguments"
+  );
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /title/
+  );
+});
+
+test("handleRecipeDryRun previews expanded recipe calls", async () => {
+  const upstream = {
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      return {
+        toolName: tool,
+        server: server ?? "github",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+  };
+
+  const result = await handleRecipeDryRun(
+    upstream as never,
+    new CallCache(0),
+    {
+      pair: {
+        mode: "parallel",
+        calls: [
+          { server: "github", tool: "get_issue", arguments: { issue_number: { $param: "first" } } },
+          { server: "github", tool: "get_issue", arguments: { issue_number: { $param: "second" } } },
+        ],
+      },
+    },
+    { recipe: "pair", arguments: { first: 1, second: 2 } }
+  );
+
+  const content = result.structuredContent as {
+    recipe: string;
+    mode: string;
+    summary: { totalCalls: number };
+    items: Array<{ resolvedArguments?: Record<string, unknown> }>;
+  };
+  assert.equal(content.recipe, "pair");
+  assert.equal(content.mode, "parallel");
+  assert.equal(content.summary.totalCalls, 2);
+  assert.deepEqual(content.items[0].resolvedArguments, { issue_number: 1 });
 });
 
 test("handleCall passes through to upstream and caches result", async () => {
@@ -3219,6 +3532,47 @@ test("handleStatus includes transport, state, and connectDurationMs per server",
   assert.equal(typeof content.servers[0].connectDurationMs, "number");
 });
 
+test("handleStatus reports reconnecting downstreams as degraded", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+  upstream.serverInfoMap.set("github", {
+    transport: "stdio",
+    state: "reconnecting",
+    connectDurationMs: 42,
+    totalTools: 1,
+    exposedTools: 1,
+    error: "transport closed",
+    reconnectAttempts: 1,
+    nextRetryAt: "2026-05-04T20:00:00.000Z",
+  });
+
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {}
+  );
+  const content = result.structuredContent as {
+    status: string;
+    servers: Array<{
+      state: string;
+      error: string;
+      reconnectAttempts: number;
+      nextRetryAt: string;
+    }>;
+  };
+
+  assert.equal(content.status, "degraded");
+  assert.equal(content.servers[0].state, "reconnecting");
+  assert.equal(content.servers[0].error, "transport closed");
+  assert.equal(content.servers[0].reconnectAttempts, 1);
+  assert.equal(content.servers[0].nextRetryAt, "2026-05-04T20:00:00.000Z");
+});
+
 test("handleStatus includes toolFilter when tools are filtered", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -3316,8 +3670,9 @@ test("meta-only proxy exposes only meta-tools", async () => {
 
   const allTools = (proxy as unknown as { allTools: Tool[] }).allTools;
   // allTools is empty until start() is called, but META_TOOLS should be the reference
-  assert.equal(META_TOOLS.length, 7);
+  assert.equal(META_TOOLS.length, 9);
   assert.ok(META_TOOLS.some((t) => t.name === "callmux_call"));
+  assert.ok(META_TOOLS.some((t) => t.name === "callmux_recipe_run"));
 });
 
 test("configFromArgs parses --meta-only flag", () => {
@@ -4448,6 +4803,42 @@ test("proxy routes callmux_dry_run to handleDryRun", async () => {
   };
   assert.equal(content.mode, "call");
   assert.equal(content.summary.totalCalls, 1);
+});
+
+test("proxy routes callmux_recipe_run to handleRecipeRun", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+    recipes: {
+      get_one: {
+        mode: "call",
+        tool: "get_issue",
+        arguments: { id: { $param: "id" } },
+      },
+    },
+  });
+
+  (proxy as unknown as {
+    upstream: {
+      callTool: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+      resolveServer: () => { server: string; actualName: string };
+    }
+  }).upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      return textResult(`${tool}:${JSON.stringify(args)}`);
+    },
+    resolveServer() { return { server: "default", actualName: "get_issue" }; },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_recipe_run", {
+    recipe: "get_one",
+    arguments: { id: 42 },
+  });
+
+  assert.equal(result.content[0].type === "text" ? result.content[0].text : "", 'get_issue:{"id":42}');
 });
 
 test("proxy routes callmux_status to handleStatus", async () => {

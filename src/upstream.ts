@@ -25,6 +25,9 @@ const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS = 600;
 const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
 const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
+const RECONNECT_INITIAL_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 10_000;
+const RECONNECT_MAX_BACKGROUND_ATTEMPTS = 5;
 
 export async function mapBounded<T, R>(
   items: T[],
@@ -291,7 +294,12 @@ export class UpstreamManager {
   private transports = new Map<string, Transport>();
   private sessionClients = new Map<string, ScopedClient>();
   private sessionClientConnects = new Map<string, Promise<ScopedClient>>();
+  private reconnects = new Map<string, Promise<boolean>>();
+  private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private reconnectAttempts = new Map<string, number>();
+  private connectionGenerations = new Map<string, number>();
   private serverConfigs = new Map<string, ServerConfig>();
+  private toolsByServer = new Map<string, Tool[]>();
   private toolMap = new Map<string, { server: string; tool: Tool }>();
   private unqualifiedToolMap = new Map<string, { server: string; tool: Tool } | null>();
   private exposedToolsByServer = new Map<string, Set<string>>();
@@ -301,6 +309,8 @@ export class UpstreamManager {
   private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
   private connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
   private sessionCwdIdleTtlMs = DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS * 1000;
+  private closing = false;
+  private lifecycleGeneration = 0;
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
 
@@ -313,6 +323,12 @@ export class UpstreamManager {
   }
 
   private async resetConnectionState(): Promise<void> {
+    this.closing = true;
+    this.lifecycleGeneration++;
+    for (const timer of this.reconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.reconnectTimers.clear();
     for (const scoped of this.sessionClients.values()) {
       if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
     }
@@ -330,12 +346,17 @@ export class UpstreamManager {
     this.transports.clear();
     this.sessionClients.clear();
     this.sessionClientConnects.clear();
+    this.reconnects.clear();
+    this.reconnectAttempts.clear();
+    this.connectionGenerations.clear();
     this.serverConfigs.clear();
+    this.toolsByServer.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();
+    this.closing = false;
   }
 
   private async closeQuietly(client?: Client, transport?: Transport): Promise<void> {
@@ -465,6 +486,276 @@ export class UpstreamManager {
       await this.closeQuietly(client, transport);
       throw error;
     }
+  }
+
+  private resolvedTransportFor(
+    config: ServerConfig,
+    resolvedTransport?: "stdio" | "streamable-http" | "sse"
+  ): "stdio" | "streamable-http" | "sse" {
+    if (resolvedTransport) return resolvedTransport;
+    if (!isHttpServerConfig(config)) return "stdio";
+    return config.transport ?? "streamable-http";
+  }
+
+  private rebuildToolIndexes(): void {
+    this.toolMap.clear();
+    this.unqualifiedToolMap.clear();
+    const multiServer = this.serverConfigs.size > 1;
+
+    for (const [server, tools] of this.toolsByServer) {
+      for (const tool of tools) {
+        const qualifiedName = multiServer
+          ? `${server}__${tool.name}`
+          : tool.name;
+        this.toolMap.set(qualifiedName, { server, tool });
+        this.indexUnqualifiedTool(server, tool);
+      }
+    }
+  }
+
+  private upsertFailedConnection(
+    name: string,
+    config: ServerConfig,
+    error: string
+  ): void {
+    const existing = this.failedConnections.findIndex((failure) => failure.name === name);
+    const next = { name, config, error };
+    if (existing === -1) {
+      this.failedConnections.push(next);
+    } else {
+      this.failedConnections[existing] = next;
+    }
+  }
+
+  private clearFailedConnection(name: string): void {
+    this.failedConnections = this.failedConnections.filter((failure) => failure.name !== name);
+  }
+
+  private installConnectedServer(connected: ConnectedServer): void {
+    const {
+      name,
+      config,
+      client,
+      transport,
+      resolvedTransport,
+      allTools,
+      tools,
+      connectDurationMs,
+    } = connected;
+    const oldClient = this.clients.get(name);
+    const oldTransport = this.transports.get(name);
+    const generation = (this.connectionGenerations.get(name) ?? 0) + 1;
+    this.connectionGenerations.set(name, generation);
+
+    client.onclose = () => {
+      if (this.closing || this.connectionGenerations.get(name) !== generation) return;
+      process.stderr.write(`[callmux] Server "${name}" disconnected\n`);
+      const info = this.serverInfoMap.get(name);
+      if (info) {
+        this.serverInfoMap.set(name, {
+          ...info,
+          state: "disconnected",
+          error: "transport closed",
+        });
+      }
+      this.scheduleReconnect(name);
+    };
+
+    client.onerror = (err) => {
+      process.stderr.write(`[callmux] Server "${name}" error: ${err.message}\n`);
+    };
+
+    this.clients.set(name, client);
+    this.transports.set(name, transport);
+    this.toolsByServer.set(name, tools);
+    this.exposedToolsByServer.set(
+      name,
+      new Set(tools.map((tool) => tool.name))
+    );
+    if (config.maxConcurrency) {
+      this.serverConcurrency.set(name, config.maxConcurrency);
+    } else {
+      this.serverConcurrency.delete(name);
+    }
+    this.serverInfoMap.set(name, {
+      transport: this.resolvedTransportFor(config, resolvedTransport),
+      state: "connected",
+      connectDurationMs: connectDurationMs ?? 0,
+      totalTools: allTools.length,
+      exposedTools: tools.length,
+      ...(config.tools ? { toolFilter: config.tools } : {}),
+      ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
+    });
+    this.clearFailedConnection(name);
+    this.reconnectAttempts.delete(name);
+    this.rebuildToolIndexes();
+
+    if (oldClient && oldClient !== client) {
+      void this.closeQuietly(oldClient, oldTransport);
+    }
+  }
+
+  private reconnectDelayMs(attempts: number): number {
+    return Math.min(
+      RECONNECT_MAX_DELAY_MS,
+      RECONNECT_INITIAL_DELAY_MS * (2 ** Math.max(0, attempts))
+    );
+  }
+
+  private scheduleReconnect(name: string): void {
+    if (this.closing) return;
+    if (this.reconnects.has(name) || this.reconnectTimers.has(name)) return;
+    const config = this.serverConfigs.get(name);
+    if (!config) return;
+
+    const attempts = this.reconnectAttempts.get(name) ?? 0;
+    if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS) {
+      const info = this.serverInfoMap.get(name);
+      this.serverInfoMap.set(name, {
+        transport: info?.transport ?? this.resolvedTransportFor(config),
+        state: "failed",
+        connectDurationMs: info?.connectDurationMs ?? 0,
+        totalTools: info?.totalTools ?? 0,
+        exposedTools: info?.exposedTools ?? 0,
+        ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
+        ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
+        error: info?.error ?? "reconnect attempts exhausted",
+        reconnectAttempts: attempts,
+      });
+      return;
+    }
+
+    const delayMs = this.reconnectDelayMs(attempts);
+    const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
+    const info = this.serverInfoMap.get(name);
+    this.serverInfoMap.set(name, {
+      transport: info?.transport ?? this.resolvedTransportFor(config),
+      state: "reconnecting",
+      connectDurationMs: info?.connectDurationMs ?? 0,
+      totalTools: info?.totalTools ?? 0,
+      exposedTools: info?.exposedTools ?? 0,
+      ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
+      ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
+      ...(info?.error ? { error: info.error } : {}),
+      reconnectAttempts: attempts,
+      nextRetryAt,
+    });
+
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(name);
+      void this.reconnectServer(name, "background");
+    }, delayMs);
+    timer.unref?.();
+    this.reconnectTimers.set(name, timer);
+  }
+
+  private async reconnectServer(
+    name: string,
+    trigger: "background" | "call"
+  ): Promise<boolean> {
+    const existing = this.reconnects.get(name);
+    if (existing) return existing;
+
+    const config = this.serverConfigs.get(name);
+    if (!config) return false;
+
+    const timer = this.reconnectTimers.get(name);
+    if (timer) {
+      clearTimeout(timer);
+      this.reconnectTimers.delete(name);
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
+
+    const promise = (async () => {
+      let attempts = this.reconnectAttempts.get(name) ?? 0;
+      if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS && trigger === "background") {
+        return false;
+      }
+      if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS && trigger === "call") {
+        attempts = 0;
+      }
+
+      attempts++;
+      this.reconnectAttempts.set(name, attempts);
+      const previous = this.serverInfoMap.get(name);
+      this.serverInfoMap.set(name, {
+        transport: previous?.transport ?? this.resolvedTransportFor(config),
+        state: "reconnecting",
+        connectDurationMs: previous?.connectDurationMs ?? 0,
+        totalTools: previous?.totalTools ?? 0,
+        exposedTools: previous?.exposedTools ?? 0,
+        ...(previous?.toolFilter ? { toolFilter: previous.toolFilter } : {}),
+        ...(previous?.maxConcurrency ? { maxConcurrency: previous.maxConcurrency } : {}),
+        ...(previous?.error ? { error: previous.error } : {}),
+        reconnectAttempts: attempts,
+      });
+
+      let shouldSchedule = false;
+      try {
+        const connected = await this.connectOne(name, config, this.connectTimeoutMs);
+        if (this.closing || this.lifecycleGeneration !== lifecycleGeneration) {
+          await this.closeQuietly(connected.client, connected.transport);
+          return false;
+        }
+        this.installConnectedServer(connected);
+        const info = this.serverInfoMap.get(name);
+        process.stderr.write(
+          `[callmux] Reconnected "${name}": ${info?.exposedTools ?? connected.tools.length} tools\n`
+        );
+        return true;
+      } catch (error) {
+        const message = errorMessage(error);
+        if (this.closing || this.lifecycleGeneration !== lifecycleGeneration) {
+          return false;
+        }
+        const exhausted = attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS;
+        const previousInfo = this.serverInfoMap.get(name);
+        this.serverInfoMap.set(name, {
+          transport: previousInfo?.transport ?? this.resolvedTransportFor(config),
+          state: exhausted ? "failed" : "disconnected",
+          connectDurationMs: previousInfo?.connectDurationMs ?? 0,
+          totalTools: previousInfo?.totalTools ?? 0,
+          exposedTools: previousInfo?.exposedTools ?? 0,
+          ...(previousInfo?.toolFilter ? { toolFilter: previousInfo.toolFilter } : {}),
+          ...(previousInfo?.maxConcurrency ? { maxConcurrency: previousInfo.maxConcurrency } : {}),
+          error: message,
+          reconnectAttempts: attempts,
+        });
+        this.upsertFailedConnection(name, config, message);
+        shouldSchedule = !exhausted;
+        process.stderr.write(
+          `[callmux] Warning: reconnect failed "${name}": ${message}\n`
+        );
+        return false;
+      } finally {
+        this.reconnects.delete(name);
+        if (shouldSchedule && !this.closing) {
+          this.scheduleReconnect(name);
+        }
+      }
+    })();
+
+    this.reconnects.set(name, promise);
+    return promise;
+  }
+
+  private downstreamUnavailable(server: string, toolName: string): CallToolResult {
+    const info = this.serverInfoMap.get(server);
+    return errorResult(
+      "downstream_unavailable",
+      `server "${server}" is not available for tool "${toolName}"`,
+      {
+        server,
+        tool: toolName,
+        retryable: true,
+        ...(info?.state ? { state: info.state } : {}),
+        ...(info?.error ? { lastError: info.error } : {}),
+        ...(info?.reconnectAttempts !== undefined
+          ? { reconnectAttempts: info.reconnectAttempts }
+          : {}),
+        ...(info?.nextRetryAt ? { nextRetryAt: info.nextRetryAt } : {}),
+      }
+    );
   }
 
   private sessionClientKey(server: string, cwd: string): string {
@@ -641,11 +932,20 @@ export class UpstreamManager {
 
   private async clientForCall(
     server: string,
+    toolName: string,
     context?: ToolCallContext
-  ): Promise<Client | undefined> {
+  ): Promise<Client | { error: CallToolResult } | undefined> {
     if (this.shouldUseSessionCwd(server, context)) {
       const scoped = await this.getSessionClient(server, context.cwd);
       if (scoped) return scoped.client;
+    }
+
+    const info = this.serverInfoMap.get(server);
+    if (info && info.state !== "connected") {
+      const reconnected = await this.reconnectServer(server, "call");
+      if (!reconnected) {
+        return { error: this.downstreamUnavailable(server, toolName) };
+      }
     }
 
     return this.clients.get(server);
@@ -659,7 +959,6 @@ export class UpstreamManager {
 
     const entries = Object.entries(servers);
     this.serverConfigs = new Map(entries);
-    const multiServer = entries.length > 1;
     const maxConcurrency = options.maxConcurrency ?? 20;
     const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.connectTimeoutMs = connectTimeoutMs;
@@ -711,49 +1010,10 @@ export class UpstreamManager {
 
     const connections: UpstreamConnection[] = [];
 
-    for (const { name, config, client, transport, resolvedTransport, allTools, tools, connectDurationMs } of connected) {
-      this.exposedToolsByServer.set(
-        name,
-        new Set(tools.map((tool) => tool.name))
-      );
-
-      for (const tool of tools) {
-        const qualifiedName = multiServer
-          ? `${name}__${tool.name}`
-          : tool.name;
-        this.toolMap.set(qualifiedName, { server: name, tool });
-        this.indexUnqualifiedTool(name, tool);
-      }
-
-      client.onclose = () => {
-        process.stderr.write(`[callmux] Server "${name}" disconnected\n`);
-        const info = this.serverInfoMap.get(name);
-        if (info) {
-          this.serverInfoMap.set(name, { ...info, state: "disconnected" });
-        }
-      };
-
-      client.onerror = (err) => {
-        process.stderr.write(`[callmux] Server "${name}" error: ${err.message}\n`);
-      };
-
-      this.clients.set(name, client);
-      this.transports.set(name, transport);
+    for (const connectedServer of connected) {
+      const { name, config, allTools, tools, connectDurationMs, resolvedTransport } = connectedServer;
+      this.installConnectedServer(connectedServer);
       connections.push({ name, config, tools });
-
-      if (config.maxConcurrency) {
-        this.serverConcurrency.set(name, config.maxConcurrency);
-      }
-
-      this.serverInfoMap.set(name, {
-        transport: resolvedTransport,
-        state: "connected",
-        connectDurationMs,
-        totalTools: allTools.length,
-        exposedTools: tools.length,
-        ...(config.tools ? { toolFilter: config.tools } : {}),
-        ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
-      });
 
       const filtered = config.tools ? ` (filtered from ${allTools.length})` : "";
       const transportLabel = isHttpServerConfig(config) ? ` [${resolvedTransport}]` : "";
@@ -777,6 +1037,7 @@ export class UpstreamManager {
       process.stderr.write(
         `[callmux] Warning: failed to connect "${failure.name}": ${failure.error} (${failDuration}ms)\n`
       );
+      this.scheduleReconnect(failure.name);
     }
 
     return connections;
@@ -807,6 +1068,7 @@ export class UpstreamManager {
     return Array.from(
       new Set([
         ...Array.from(this.clients.keys()),
+        ...Array.from(this.serverConfigs.keys()),
         ...this.failedConnections.map((failure) => failure.name),
       ])
     ).sort();
@@ -1154,7 +1416,8 @@ export class UpstreamManager {
       : undefined;
 
     try {
-      const client = await this.clientForCall(prepared.server, context);
+      const client = await this.clientForCall(prepared.server, prepared.actualName, context);
+      if (client && "error" in client) return client.error;
       if (!client) {
         return this.toolNotFound(toolName);
       }
@@ -1169,6 +1432,17 @@ export class UpstreamManager {
       return result as unknown as CallToolResult;
     } catch (error) {
       const normalized = normalizeToolCallFailure(error);
+      if (normalized.retryable && ["transport", "session", "timeout"].includes(normalized.category)) {
+        const info = this.serverInfoMap.get(prepared.server);
+        if (info?.state === "connected") {
+          this.serverInfoMap.set(prepared.server, {
+            ...info,
+            state: "disconnected",
+            error: normalized.message,
+          });
+          this.scheduleReconnect(prepared.server);
+        }
+      }
       return errorResult("tool_call_failed", normalized.message, {
         tool: toolName,
         ...(serverHint ? { server: serverHint } : {}),
@@ -1236,6 +1510,12 @@ export class UpstreamManager {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    this.lifecycleGeneration++;
+    for (const timer of this.reconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.reconnectTimers.clear();
     for (const scoped of this.sessionClients.values()) {
       if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
     }
@@ -1260,12 +1540,17 @@ export class UpstreamManager {
     this.transports.clear();
     this.sessionClients.clear();
     this.sessionClientConnects.clear();
+    this.reconnects.clear();
+    this.reconnectAttempts.clear();
+    this.connectionGenerations.clear();
     this.serverConfigs.clear();
+    this.toolsByServer.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();
     this.failedConnections = [];
+    this.closing = false;
   }
 }

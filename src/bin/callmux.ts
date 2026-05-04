@@ -228,6 +228,8 @@ Meta-tools exposed:
   callmux_pipeline      Chain tool calls with output mapping
   callmux_call          Call a single downstream tool by name
   callmux_dry_run       Validate and preview calls without execution
+  callmux_recipe_run    Run a named config recipe
+  callmux_recipe_dry_run Preview a named config recipe without execution
   callmux_cache_clear   Clear result cache
   callmux_status        Report callmux/downstream health and diagnostics
 

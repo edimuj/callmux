@@ -166,6 +166,8 @@ export interface MetricsConfig {
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
+  /** Named reusable meta-tool calls */
+  recipes?: Record<string, RecipeConfig>;
   /** Cache TTL in seconds for read operations (0 = disabled) */
   cacheTtlSeconds?: number;
   /** Optional global cache policy; supports exact names or "*" wildcards */
@@ -285,6 +287,19 @@ export interface PipelineStep {
   inputMapping?: Record<string, string>;
 }
 
+export type RecipeMode = "call" | "parallel" | "batch" | "pipeline";
+
+export interface RecipeConfig {
+  description?: string;
+  mode: RecipeMode;
+  server?: string;
+  tool?: string;
+  arguments?: Record<string, unknown>;
+  calls?: ParallelCall[];
+  items?: BatchItem[];
+  steps?: PipelineStep[];
+}
+
 export interface PipelineResult {
   steps: Array<{
     step: number;
@@ -324,11 +339,13 @@ export interface UpstreamConnectionFailure {
 
 export interface ServerInfo {
   transport: "stdio" | "streamable-http" | "sse";
-  state: "connected" | "failed" | "disconnected";
+  state: "connected" | "failed" | "disconnected" | "reconnecting";
   connectDurationMs: number;
   totalTools: number;
   exposedTools: number;
   toolFilter?: string[];
   maxConcurrency?: number;
   error?: string;
+  reconnectAttempts?: number;
+  nextRetryAt?: string;
 }
