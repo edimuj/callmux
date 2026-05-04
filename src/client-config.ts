@@ -8,6 +8,7 @@ interface ClientConfigOptions {
   configPath?: string;
   serverName?: string;
   url?: string;
+  bridge?: boolean;
 }
 
 interface ClientConfigMutationOptions extends ClientConfigOptions {
@@ -38,9 +39,19 @@ interface ClientConfigMutationResult {
   serverName: string;
 }
 
-function getCallmuxArgs(configPath?: string): string[] {
+function getCallmuxArgs(options?: Pick<ClientConfigOptions, "configPath" | "url" | "bridge">): string[] {
+  if (options?.bridge) {
+    const url = getClientUrl(options.url);
+    if (!url) {
+      throw new Error("bridge client config requires --url");
+    }
+    return ["bridge", "--url", url];
+  }
+
   const defaultPath = getDefaultConfigPath();
-  return configPath && configPath !== defaultPath ? ["--config", configPath] : [];
+  return options?.configPath && options.configPath !== defaultPath
+    ? ["--config", options.configPath]
+    : [];
 }
 
 function getClientUrl(url?: string): string | undefined {
@@ -75,19 +86,19 @@ export function buildClaudeEntry(options?: ClientConfigOptions): {
 } {
   getClientServerName(options?.serverName);
   const url = getClientUrl(options?.url);
-  if (url) {
+  if (url && !options?.bridge) {
     return { url };
   }
   return {
     command: "callmux",
-    args: getCallmuxArgs(options?.configPath),
+    args: getCallmuxArgs(options),
   };
 }
 
 export function buildCodexSnippet(options?: ClientConfigOptions): string {
   const serverName = getClientServerName(options?.serverName);
   const url = getClientUrl(options?.url);
-  if (url) {
+  if (url && !options?.bridge) {
     return [
       `[mcp_servers.${serverName}]`,
       `url = ${JSON.stringify(url)}`,
@@ -97,7 +108,7 @@ export function buildCodexSnippet(options?: ClientConfigOptions): string {
   return [
     `[mcp_servers.${serverName}]`,
     `command = "callmux"`,
-    `args = ${JSON.stringify(getCallmuxArgs(options?.configPath))}`,
+    `args = ${JSON.stringify(getCallmuxArgs(options))}`,
   ].join("\n");
 }
 

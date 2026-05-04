@@ -472,7 +472,7 @@ export function formatServerList(config: CallmuxConfig): string {
 
 export function renderClientSnippet(
   client: ClientKind,
-  options?: { configPath?: string; serverName?: string; url?: string }
+  options?: { configPath?: string; serverName?: string; url?: string; bridge?: boolean }
 ): string {
   const serverName = options?.serverName ?? "callmux";
 
@@ -492,5 +492,6 @@ export function renderClientSnippet(
     configPath: options?.configPath,
     serverName,
     url: options?.url,
+    bridge: options?.bridge,
   });
 }

@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallmuxBridge } from "../bridge.js";
 import { CallmuxProxy } from "../proxy.js";
 import { CallmuxListener } from "../listener.js";
 import {
@@ -62,6 +63,7 @@ Usage:
   callmux                                    Auto-detect config file
   callmux --config <path>                    Explicit config file
   callmux --listen <port>                    Shared server mode (SSE/HTTP)
+  callmux bridge --url <listener-url>        Stdio bridge to shared HTTP listener with cwd header
   callmux [options] -- <command> [args...]   Single-server mode
   callmux setup [--config <path>]            Interactive setup wizard
   callmux init [--config <path>] [--force]
@@ -74,10 +76,10 @@ Usage:
   callmux server test --all [--tool <tool>] [--json]
   callmux server remove <name> [--config <path>]
   callmux server list [--config <path>] [--json]
-  callmux client print <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>]
-  callmux client attach <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>] [--file <path>] [--dry-run] [--yes] [--json]
+  callmux client print <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>] [--bridge]
+  callmux client attach <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>] [--bridge] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client detach <claude|codex> [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
-  callmux client status [claude|codex] [--config <path>] [--name <id>] [--url <listener-url>] [--file <path>] [--json]
+  callmux client status [claude|codex] [--config <path>] [--name <id>] [--url <listener-url>] [--bridge] [--file <path>] [--json]
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
@@ -99,6 +101,12 @@ Options:
                          Send SIGHUP to reload runtime security config (when using a config file)
   --help, -h            Show this help
   --version, -v         Show version
+
+Bridge Options:
+  --url <listener-url>  Shared Streamable HTTP MCP endpoint (for example http://localhost:4860/mcp)
+  --cwd <path>          Project cwd to send as x-callmux-cwd (default: process cwd)
+  --header Name:Value   Extra HTTP header for the shared listener (repeatable)
+  --call-timeout <ms>   Timeout for forwarded tool calls (default: SDK default)
 
 Server Add Options:
   --tools <list>        Comma-separated downstream tool whitelist
@@ -202,6 +210,7 @@ Also accepts MCP-compatible format:
 Examples:
   callmux --listen 4860
   callmux --listen 4860 --config callmux.json
+  callmux bridge --url http://localhost:4860/mcp
   callmux --config callmux.json
   callmux --cache 60 -- node my-mcp-server.js
   callmux --cache 60 --cache-allow get_*,list_* -- npx -y @modelcontextprotocol/server-github
@@ -217,6 +226,7 @@ Examples:
   callmux doctor --url http://localhost:4860/mcp --cwd "$PWD"
   callmux client print codex
   callmux client print codex --url http://localhost:4860/mcp
+  callmux client print codex --url http://localhost:4860/mcp --bridge
   callmux client status
   callmux client attach codex
   callmux client attach codex --yes
@@ -558,6 +568,7 @@ async function handleClientMutation(
   let dryRun = false;
   let json = false;
   let url: string | undefined;
+  let bridge = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--name" && i + 1 < args.length) {
@@ -566,6 +577,8 @@ async function handleClientMutation(
       filePath = args[++i];
     } else if (args[i] === "--url" && i + 1 < args.length) {
       url = args[++i];
+    } else if (args[i] === "--bridge") {
+      bridge = true;
     } else if (args[i] === "--yes") {
       yes = true;
     } else if (args[i] === "--dry-run") {
@@ -581,10 +594,10 @@ async function handleClientMutation(
   const mutation =
     client === "claude"
       ? action === "attach"
-        ? attachClaudeConfig({ source, configPath, serverName: name, url })
+        ? attachClaudeConfig({ source, configPath, serverName: name, url, bridge })
         : detachClaudeConfig({ source, serverName: name })
       : action === "attach"
-        ? attachCodexConfig({ source, configPath, serverName: name, url })
+        ? attachCodexConfig({ source, configPath, serverName: name, url, bridge })
         : detachCodexConfig({ source, serverName: name });
   const shouldWrite = yes && !dryRun;
   const preview =
@@ -593,6 +606,7 @@ async function handleClientMutation(
           configPath,
           serverName: name,
           url,
+          bridge,
         })
       : client === "claude"
         ? `Remove mcpServers.${name}`
@@ -612,6 +626,7 @@ async function handleClientMutation(
     wrote: shouldWrite,
     dryRun: !shouldWrite,
     ...(url ? { url } : {}),
+    ...(bridge ? { bridge } : {}),
     ...(mutation.changed ? { preview } : {}),
   };
 
@@ -652,6 +667,7 @@ async function handleClientCommand(
     let filePath: string | undefined;
     let json = false;
     let url: string | undefined;
+    let bridge = false;
 
     if (args[1] === "claude" || args[1] === "codex") {
       client = args[1];
@@ -664,6 +680,8 @@ async function handleClientCommand(
         filePath = args[++i];
       } else if (args[i] === "--url" && i + 1 < args.length) {
         url = args[++i];
+      } else if (args[i] === "--bridge") {
+        bridge = true;
       } else if (args[i] === "--json") {
         json = true;
       } else {
@@ -671,8 +689,8 @@ async function handleClientCommand(
       }
     }
 
-    if (!client && (filePath || url)) {
-      throw new Error("Usage: callmux client status <claude|codex> [--file <path>] [--name <id>] [--url <listener-url>] [--json]");
+    if (!client && (filePath || url || bridge)) {
+      throw new Error("Usage: callmux client status <claude|codex> [--file <path>] [--name <id>] [--url <listener-url>] [--bridge] [--json]");
     }
 
     const clients = client ? [client] : (["claude", "codex"] as ClientKind[]);
@@ -682,8 +700,8 @@ async function handleClientCommand(
         const source = await readTextFileIfExists(path);
         const status =
           kind === "claude"
-            ? getClaudeConfigStatus({ source, configPath, serverName: name, url })
-            : getCodexConfigStatus({ source, configPath, serverName: name, url });
+            ? getClaudeConfigStatus({ source, configPath, serverName: name, url, bridge })
+            : getCodexConfigStatus({ source, configPath, serverName: name, url, bridge });
         return { ...status, path };
       })
     );
@@ -703,11 +721,14 @@ async function handleClientCommand(
   const client = validateClientKind(args[1]);
   let name = "callmux";
   let url: string | undefined;
+  let bridge = false;
   for (let i = 2; i < args.length; i++) {
     if (args[i] === "--name" && i + 1 < args.length) {
       name = args[++i];
     } else if (args[i] === "--url" && i + 1 < args.length) {
       url = args[++i];
+    } else if (args[i] === "--bridge") {
+      bridge = true;
     } else {
       throw new Error(`Unknown client print option "${args[i]}"`);
     }
@@ -718,6 +739,7 @@ async function handleClientCommand(
       configPath,
       serverName: name,
       url,
+      bridge,
     })
   );
 }
@@ -796,6 +818,60 @@ async function handleDoctorCommand(
   }
 }
 
+async function handleBridgeCommand(args: string[]): Promise<void> {
+  let url: string | undefined;
+  let cwd = process.cwd();
+  let callTimeoutMs: number | undefined;
+  const headers: Record<string, string> = {};
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--url" && i + 1 < args.length) {
+      url = args[++i];
+    } else if (arg === "--cwd" && i + 1 < args.length) {
+      cwd = resolve(args[++i]);
+    } else if (arg === "--header" && i + 1 < args.length) {
+      const raw = args[++i];
+      const separator = raw.indexOf(":");
+      if (separator <= 0) {
+        throw new Error("--header must use Name:Value format");
+      }
+      headers[raw.slice(0, separator).trim()] = raw.slice(separator + 1).trim();
+    } else if (arg === "--call-timeout" && i + 1 < args.length) {
+      callTimeoutMs = parseInt(args[++i], 10);
+      if (!Number.isFinite(callTimeoutMs) || callTimeoutMs < 0) {
+        throw new Error("--call-timeout must be a non-negative integer");
+      }
+    } else {
+      throw new Error(`Unknown bridge option "${arg}"`);
+    }
+  }
+
+  if (!url) {
+    throw new Error("Usage: callmux bridge --url <listener-url> [--cwd <path>] [--header Name:Value]");
+  }
+
+  const bridge = new CallmuxBridge({
+    url,
+    cwd,
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
+  });
+  const transport = new StdioServerTransport();
+
+  process.on("SIGINT", async () => {
+    await bridge.close();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", async () => {
+    await bridge.close();
+    process.exit(0);
+  });
+
+  await bridge.start(transport);
+}
+
 async function discoverServerTools(
   name: string,
   config: ServerConfig
@@ -872,6 +948,11 @@ async function main(): Promise<void> {
 
   if (args[0] === "doctor") {
     await handleDoctorCommand(args.slice(1), configPath);
+    return;
+  }
+
+  if (args[0] === "bridge") {
+    await handleBridgeCommand(args.slice(1));
     return;
   }
 

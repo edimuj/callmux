@@ -551,6 +551,7 @@ Generate ready-to-use client snippets:
 
 ```bash
 callmux client print codex --url http://localhost:4860/mcp
+callmux client print codex --url http://localhost:4860/mcp --bridge
 callmux client print claude --url http://localhost:4860/sse
 ```
 
@@ -559,6 +560,14 @@ callmux client print claude --url http://localhost:4860/sse
 ```toml
 [mcp_servers.callmux]
 url = "http://localhost:4860/mcp"
+```
+
+If your Codex MCP client does not send MCP roots or a project cwd to HTTP servers, use the stdio bridge instead. Codex starts one lightweight bridge per project session; the bridge connects to the shared listener and sends `x-callmux-cwd` from its process cwd, so wrapped path-sensitive stdio servers still see the project cwd:
+
+```toml
+[mcp_servers.callmux]
+command = "callmux"
+args = ["bridge","--url","http://localhost:4860/mcp"]
 ```
 
 **Claude Code** (legacy SSE transport):
@@ -674,11 +683,13 @@ When adding a server without `--tools`, callmux probes it automatically and lets
 | `callmux server remove <name>` | Remove a server |
 | `callmux doctor [--json]` | Validate config + probe all servers |
 | `callmux doctor --url <listener-url> [--cwd <path>] [--header Name:Value] [--json]` | Smoke-test a running shared listener |
+| `callmux bridge --url <listener-url> [--cwd <path>] [--header Name:Value]` | Stdio bridge to a shared listener, injecting `x-callmux-cwd` |
 | `callmux client status [claude\|codex]` | Check client configuration state |
 | `callmux client attach <client> [--yes]` | Write command-mode callmux into client config |
 | `callmux client attach <client> --url <listener-url> [--yes]` | Write shared listener URL into client config |
+| `callmux client attach <client> --url <listener-url> --bridge [--yes]` | Write stdio bridge config for a shared listener |
 | `callmux client detach <client> [--yes]` | Remove callmux from client config |
-| `callmux client print <client> [--url <listener-url>]` | Output ready-to-paste snippet |
+| `callmux client print <client> [--url <listener-url>] [--bridge]` | Output ready-to-paste snippet |
 
 **Inline flags** (single-server mode):
 

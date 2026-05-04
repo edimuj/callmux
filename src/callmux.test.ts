@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createSign, generateKeyPairSync } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallCache } from "./cache.js";
 import {
   configFromArgs,
@@ -1128,6 +1130,21 @@ test("attachCodexConfig can write shared listener URL entries", () => {
   assert.doesNotMatch(result.content, /command = "callmux"/);
 });
 
+test("attachCodexConfig can write shared listener bridge entries", () => {
+  const result = attachCodexConfig({
+    source: "",
+    serverName: "callmux",
+    url: "http://localhost:4860/mcp",
+    bridge: true,
+  });
+
+  assert.equal(result.changed, true);
+  assert.match(result.content, /\[mcp_servers\.callmux\]/);
+  assert.match(result.content, /command = "callmux"/);
+  assert.match(result.content, /args = \["bridge","--url","http:\/\/localhost:4860\/mcp"\]/);
+  assert.doesNotMatch(result.content, /^url = /m);
+});
+
 test("detachCodexConfig refuses to remove unmanaged entries", () => {
   assert.throws(
     () =>
@@ -1272,6 +1289,37 @@ test("renderClientSnippet emits shared listener URL snippets", () => {
     [
       "[mcp_servers.callmux]",
       'url = "http://localhost:4860/mcp"',
+    ].join("\n")
+  );
+});
+
+test("renderClientSnippet emits shared listener bridge snippets", () => {
+  assert.deepEqual(
+    JSON.parse(renderClientSnippet("claude", {
+      serverName: "callmux",
+      url: "http://localhost:4860/mcp",
+      bridge: true,
+    })),
+    {
+      mcpServers: {
+        callmux: {
+          command: "callmux",
+          args: ["bridge", "--url", "http://localhost:4860/mcp"],
+        },
+      },
+    }
+  );
+
+  assert.equal(
+    renderClientSnippet("codex", {
+      serverName: "callmux",
+      url: "http://localhost:4860/mcp",
+      bridge: true,
+    }),
+    [
+      "[mcp_servers.callmux]",
+      'command = "callmux"',
+      'args = ["bridge","--url","http://localhost:4860/mcp"]',
     ].join("\n")
   );
 });
@@ -5935,6 +5983,81 @@ test("listener scopes stdio downstream cwd per MCP session", async () => {
     await upstream.close();
     await rm(rootA, { recursive: true, force: true });
     await rm(rootB, { recursive: true, force: true });
+  }
+});
+
+test("stdio bridge forwards calls to shared listener with cwd header", async () => {
+  const upstream = new UpstreamManager();
+  const root = await mkdtemp(join(tmpdir(), "callmux-bridge-cwd-"));
+  const cache = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+  let bridgeClient: Client | undefined;
+  let bridgeTransport: StdioClientTransport | undefined;
+
+  try {
+    await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([
+          { name: "get_item", description: "Get a fake item" },
+        ]),
+      }),
+    });
+
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { fake: fakeMcpServer("fake") } },
+      upstream,
+      cache,
+      allTools,
+      maxConcurrency: 10,
+    });
+
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    (listener as any).options.port = port;
+    await listener.start();
+
+    bridgeTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        join(process.cwd(), "dist-test", "bin", "callmux.js"),
+        "bridge",
+        "--url",
+        `http://127.0.0.1:${port}/mcp`,
+        "--cwd",
+        root,
+      ],
+    });
+    bridgeClient = new Client(
+      { name: "bridge-test", version: "1.0" },
+      { capabilities: {} }
+    );
+    await bridgeClient.connect(bridgeTransport);
+
+    const { tools } = await bridgeClient.listTools();
+    assert.ok(tools.some((tool) => tool.name === "get_item"));
+
+    const result = await bridgeClient.callTool({
+      name: "get_item",
+      arguments: { id: 99 },
+    }) as unknown as CallToolResult;
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse((result.content[0] as { text: string }).text) as {
+      cwd: string;
+      arguments: { id: number };
+    };
+    assert.equal(payload.cwd, root);
+    assert.deepEqual(payload.arguments, { id: 99 });
+  } finally {
+    await bridgeClient?.close();
+    await bridgeTransport?.close();
+    await listener?.close();
+    await upstream.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 
