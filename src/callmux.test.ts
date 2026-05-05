@@ -60,7 +60,7 @@ import { evaluateToolAuthorization } from "./authorization.js";
 import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
 import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
-import { RuntimeEventStore } from "./dashboard.js";
+import { renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -6104,6 +6104,14 @@ test("RuntimeEventStore tracks callmux and real tool call totals", () => {
 
   assert.equal(store.stats().callmuxToolCalls, 1);
   assert.equal(store.stats().realToolCalls, 3);
+});
+
+test("dashboard hides successful transport HTTP events by default", () => {
+  const html = renderDashboardHtml({ enabled: true, path: "/dashboard", maxEvents: 500 });
+  assert.match(html, /id="hide-transport" type="checkbox" checked/);
+  assert.match(html, /function isTransportHttpEvent/);
+  assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
+  assert.ok(html.includes("Number(event.status ?? 0) < 400"));
 });
 
 test("listener dashboard summarizes meta-tool fanout without arguments", () => {

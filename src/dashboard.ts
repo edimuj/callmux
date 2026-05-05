@@ -199,6 +199,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .ok { color: #167447; font-weight: 600; }
     .bad { color: #b42318; font-weight: 600; }
     .muted { color: #667085; }
+    .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; margin-bottom: 10px; }
+    .toolbar h2 { margin: 0; }
+    .toggle { align-items: center; color: #536070; display: inline-flex; font-size: 13px; gap: 7px; user-select: none; }
+    .toggle input { margin: 0; }
     .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; }
     .detail-item { border: 1px solid #e4e7ec; border-radius: 6px; padding: 8px; }
     .detail-label { color: #667085; font-size: 12px; margin-bottom: 4px; }
@@ -211,7 +215,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       tr.event-row:hover { background: #1e2936; }
       tr.selected { background: #17304a; }
       .detail-item { border-color: #303946; }
-      th, .muted { color: #a7b0be; }
+      th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
       header { align-items: flex-start; flex-direction: column; padding: 14px 16px; }
@@ -246,7 +250,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
     </section>
     <section class="panel" style="margin-top:18px">
-      <h2>Recent Events</h2>
+      <div class="toolbar">
+        <h2>Recent Events</h2>
+        <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
+      </div>
       <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
       <div id="event-detail" class="muted" style="margin-top:12px">Select an event for details.</div>
     </section>
@@ -256,6 +263,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
     let snapshot = null;
     let selectedEventKey = null;
+    let hideTransportHttp = true;
 
     function cell(value, className = "", label = "") {
       return "<td" + (className ? " class=\\"" + className + "\\"" : "") + (label ? " data-label=\\"" + esc(label) + "\\"" : "") + ">" + String(value ?? "") + "</td>";
@@ -280,6 +288,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const calls = event.realToolCalls !== undefined ? "real " + event.realToolCalls + " / callmux " + (event.callmuxToolCalls ?? 0) : "";
       if (event.type === "http_request") return [event.method + " " + event.durationMs + "ms", event.jsonRpcMethod, calls].filter(Boolean).join(" · ");
       return [event.operation, event.durationMs ? event.durationMs + "ms" : "", calls].filter(Boolean).join(" · ");
+    }
+    function isTransportHttpEvent(event) {
+      return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
     }
     function detailItem(label, value) {
       return "<div class=\\"detail-item\\"><div class=\\"detail-label\\">" + esc(label) + "</div><div class=\\"detail-value\\">" + esc(value ?? "") + "</div></div>";
@@ -337,7 +348,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
         return "<tr>" + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
       }).join("");
-      const displayedEvents = data.events.slice(-80).reverse();
+      const displayedEvents = data.events.filter(event => !hideTransportHttp || !isTransportHttpEvent(event)).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
         const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.success !== false;
@@ -354,6 +365,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       });
       renderEventDetail(displayedEvents.find(event => eventKey(event) === selectedEventKey));
     }
+    document.getElementById("hide-transport").addEventListener("change", event => {
+      hideTransportHttp = event.target.checked;
+      if (snapshot) render(snapshot);
+    });
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
       if (res.ok) render(await res.json());
