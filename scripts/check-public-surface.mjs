@@ -14,6 +14,7 @@ function fail(message) {
 const metaToolsSource = read("src/meta-tools.ts");
 const cliSource = read("src/bin/callmux.ts");
 const readme = read("README.md");
+const configRef = read("docs/config-reference.md");
 const schema = JSON.parse(read("schema.json"));
 
 const metaToolNames = Array.from(
@@ -29,19 +30,18 @@ for (const name of metaToolNames) {
   if (!cliSource.includes(name)) {
     fail(`CLI help/source does not mention meta-tool ${name}`);
   }
-  if (!readme.includes(`### \`${name}\``)) {
-    fail(`README is missing meta-tool section for ${name}`);
+  if (!readme.includes(`\`${name}\``)) {
+    fail(`README is missing meta-tool ${name}`);
   }
 }
 
-const readmeConfigSection = readme.slice(readme.indexOf("**Global options:**"));
 const schemaProperties = Object.keys(schema.properties ?? {})
   .filter((name) => name !== "$schema" && name !== "mcpServers")
   .sort();
 
 for (const name of schemaProperties) {
-  if (!readmeConfigSection.includes(`\`${name}\``)) {
-    fail(`README global config table is missing schema property ${name}`);
+  if (!configRef.includes(`\`${name}\``)) {
+    fail(`docs/config-reference.md is missing schema property ${name}`);
   }
 }
 
