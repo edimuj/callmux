@@ -1074,7 +1074,7 @@ export class CallmuxListener {
       serverHint: unknown,
       count = 1
     ): DashboardDownstreamTarget[] => {
-      if (typeof toolName !== "string" || toolName.length === 0 || count <= 0) {
+      if (typeof toolName !== "string" || toolName.length === 0 || count < 0) {
         return [];
       }
       const server = typeof serverHint === "string" && serverHint.length > 0
@@ -1093,8 +1093,12 @@ export class CallmuxListener {
     }
 
     if (name === "callmux_batch") {
-      if (!isRecord(args) || !Array.isArray(args.items)) return [];
-      return resolvedTarget(args.tool, args.server, args.items.length);
+      if (!isRecord(args)) return [];
+      return resolvedTarget(
+        args.tool,
+        args.server,
+        Array.isArray(args.items) ? args.items.length : 0
+      );
     }
 
     if (name === "callmux_parallel") {

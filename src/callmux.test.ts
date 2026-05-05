@@ -6150,6 +6150,20 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
   );
   assert.equal(invalid.realToolCalls, 0);
   assert.deepEqual(invalid.downstreamTargets, []);
+
+  const invalidBatch = (listener as any).summarizeDashboardToolCall(
+    "callmux_batch",
+    {
+      tool: "get_issue",
+      server: "github",
+      items: { bad: true },
+    },
+    errorResult("invalid_arguments", '"items" must be an array')
+  );
+  assert.equal(invalidBatch.realToolCalls, 0);
+  assert.deepEqual(invalidBatch.downstreamTargets, [
+    { server: "github", tool: "get_issue", count: 0 },
+  ]);
 });
 
 test("listener dashboard uses listener authentication", async () => {

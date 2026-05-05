@@ -286,7 +286,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function targetList(targets) {
       if (!Array.isArray(targets) || targets.length === 0) return "None";
-      return targets.map(target => (target.server ? target.server + "__" : "") + target.tool + " x" + target.count).join(", ");
+      return targets.map(target => (target.server ? target.server + "__" : "") + target.tool + (target.count === 0 ? " planned, 0 calls" : " x" + target.count)).join(", ");
     }
     function renderEventDetail(event) {
       const detail = document.getElementById("event-detail");
