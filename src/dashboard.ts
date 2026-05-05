@@ -40,6 +40,7 @@ export interface DashboardConfig {
 
 interface DashboardRuntimeSummary {
   eventCount: number;
+  totalEvents: number;
   maxEvents: number;
   recentErrors: number;
 }
@@ -85,6 +86,7 @@ export function extractToolError(result: CallToolResult): string | undefined {
 
 export class RuntimeEventStore {
   private events: RuntimeEvent[] = [];
+  private totalEvents = 0;
   private subscribers = new Set<(event: RuntimeEvent) => void>();
 
   constructor(private maxEvents = DEFAULT_MAX_EVENTS) {}
@@ -95,6 +97,7 @@ export class RuntimeEventStore {
   }
 
   append(event: RuntimeEvent): void {
+    this.totalEvents += 1;
     this.events.push(event);
     this.evictOldest();
     for (const subscriber of this.subscribers) {
@@ -109,6 +112,7 @@ export class RuntimeEventStore {
   stats(): DashboardRuntimeSummary {
     return {
       eventCount: this.events.length,
+      totalEvents: this.totalEvents,
       maxEvents: this.maxEvents,
       recentErrors: this.events.filter((event) =>
         event.type === "http_request"
@@ -195,23 +199,34 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\\"": "&quot;", "'": "&#39;" }[c]));
     }
+    function compactCount(value) {
+      const count = Number(value ?? 0);
+      if (!Number.isFinite(count) || count < 1000) return String(value ?? 0);
+      return Math.floor(count / 1000) + "K+";
+    }
     function render(data) {
       snapshot = data;
       document.getElementById("updated").textContent = "Updated " + new Date(data.generatedAt).toLocaleTimeString();
       const status = data.status || {};
       const cache = status.cache || {};
       const responseStore = status.responseStore || {};
+      const servers = Array.isArray(status.servers)
+        ? status.servers
+        : Object.entries(status.servers || {}).map(([name, server]) => ({ name, ...server }));
       document.getElementById("summary").innerHTML = [
-        ["Servers", Object.keys(status.servers || {}).length],
+        ["Servers", servers.length],
         ["Sessions", status.listener?.activeSessions ?? 0],
         ["Cache entries", cache.entries ?? 0],
         ["Stored refs", responseStore.entries ?? 0],
-        ["Events", data.summary.eventCount],
+        ["Events", compactCount(data.summary.totalEvents ?? data.summary.eventCount)],
         ["Recent errors", data.summary.recentErrors],
       ].map(([label, value]) => "<div class=\\"panel\\"><div class=\\"muted\\">" + esc(label) + "</div><div class=\\"metric\\">" + esc(value) + "</div></div>").join("");
-      document.getElementById("servers").innerHTML = Object.entries(status.servers || {}).map(([name, server]) => {
+      document.getElementById("servers").innerHTML = servers.map((server) => {
         const stateClass = server.state === "connected" ? "ok" : "bad";
-        return "<tr>" + cell(esc(name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc((server.exposedTools ?? 0) + "/" + (server.totalTools ?? 0))) + cell(esc((server.connectDurationMs ?? "") + "ms")) + "</tr>";
+        const toolCount = server.toolCount ?? server.exposedTools ?? (Array.isArray(server.tools) ? server.tools.length : 0);
+        const totalTools = server.totalTools ?? toolCount;
+        const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
+        return "<tr>" + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
       }).join("");
       document.getElementById("events").innerHTML = data.events.slice(-80).reverse().map(event => {
         const ok = event.type === "http_request" ? event.status < 400 : event.success !== false;

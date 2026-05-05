@@ -1066,6 +1066,7 @@ export class CallmuxListener {
         ...(context.principal ? { principal: context.principal } : {}),
         ...(context.payload !== undefined ? { payload: context.payload } : {}),
       });
+      if (this.isDashboardPath(context.path)) return;
       this.runtimeEvents.append({
         type: "http_request",
         timestamp: new Date().toISOString(),

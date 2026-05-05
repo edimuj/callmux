@@ -60,6 +60,7 @@ import { evaluateToolAuthorization } from "./authorization.js";
 import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
 import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
+import { RuntimeEventStore } from "./dashboard.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -6039,6 +6040,7 @@ test("listener dashboard serves read-only runtime data when enabled", async () =
 
     const health = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(health.status, 200);
+    await health.text();
     (listener as any).recordToolCallEvent(
       "get_item",
       { server: "fake", tool: "get_item" },
@@ -6050,17 +6052,39 @@ test("listener dashboard serves read-only runtime data when enabled", async () =
     const data = await fetch(`http://127.0.0.1:${port}/dashboard/data`);
     assert.equal(data.status, 200);
     const body = await data.json() as {
-      summary: { eventCount: number; maxEvents: number };
+      summary: { eventCount: number; totalEvents: number; maxEvents: number };
       status: { listener: { activeSessions: number } };
-      events: Array<{ type: string; tool?: string; cacheHit?: boolean }>;
+      events: Array<{ type: string; tool?: string; cacheHit?: boolean; path?: string }>;
     };
     assert.equal(body.summary.maxEvents, 10);
+    assert.equal(body.summary.eventCount, 2);
+    assert.equal(body.summary.totalEvents, 2);
     assert.equal(body.status.listener.activeSessions, 0);
-    assert.ok(body.summary.eventCount >= 1);
+    assert.ok(body.events.some((event) => event.type === "http_request" && event.path === "/health"));
+    assert.ok(!body.events.some((event) => event.path === "/dashboard" || event.path === "/dashboard/data"));
     assert.ok(body.events.some((event) => event.type === "tool_call" && event.tool === "get_item" && event.cacheHit === true));
   } finally {
     await listener.close();
   }
+});
+
+test("RuntimeEventStore tracks total events separately from retained history", () => {
+  const store = new RuntimeEventStore(2);
+  for (let i = 0; i < 3; i += 1) {
+    store.append({
+      type: "http_request",
+      timestamp: new Date(0).toISOString(),
+      requestId: String(i),
+      method: "GET",
+      path: `/request-${i}`,
+      status: 200,
+      durationMs: 1,
+    });
+  }
+
+  assert.equal(store.stats().eventCount, 2);
+  assert.equal(store.stats().totalEvents, 3);
+  assert.deepEqual(store.list().map((event) => event.type === "http_request" ? event.path : ""), ["/request-1", "/request-2"]);
 });
 
 test("listener dashboard uses listener authentication", async () => {
