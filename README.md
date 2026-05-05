@@ -24,6 +24,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | Same data fetched 3 times per session | Cached after first call |
 | 40+ tools bloating the system prompt | 9 meta-tools via meta-only mode |
 | 6 sessions × 5 servers = 30 processes | 1 shared callmux + 5 servers |
+| Temporary MCP server restart breaks the session | Stdio bridge reconnects to the shared listener |
 
 <p align="center">
   <img src="docs/diagram.png" alt="callmux: 7 sequential calls reduced to 1 batched call" width="720">
@@ -51,6 +52,7 @@ On machines running multiple agent sessions, callmux's [shared server mode](#sha
 - **Multi-server** -- wrap multiple MCP servers through one callmux instance with automatic namespacing
 - **Tool scoping** -- whitelist which tools each server exposes. Gives any MCP client per-server tool filtering, even if the client doesn't support it natively (Codex, Cursor, Windsurf, etc.)
 - **Shared server mode** -- run callmux once with `--listen <port>`, connect all sessions via URL. One set of downstream servers shared across every agent session on the machine
+- **Resilient bridge mode** -- keep clients like Codex attached to a stable local stdio bridge while callmux reconnects to the shared listener after temporary MCP session, transport, or server restart failures
 - **Per-server concurrency** -- protect fragile downstreams with per-server call limits alongside the global concurrency cap
 - **Degraded startup** -- servers that fail to connect are skipped instead of blocking startup, with full diagnostics in `callmux_status`
 - **Multi-transport** -- local stdio, Streamable HTTP, and SSE with auto-fallback
@@ -562,7 +564,7 @@ callmux client print claude --url http://localhost:4860/sse
 url = "http://localhost:4860/mcp"
 ```
 
-If your Codex MCP client does not send MCP roots or a project cwd to HTTP servers, use the stdio bridge instead. Codex starts one lightweight bridge per project session; the bridge connects to the shared listener and sends `x-callmux-cwd` from its process cwd, so wrapped path-sensitive stdio servers still see the project cwd. If the shared listener restarts, the bridge reconnects on the next session/transport failure and retries the request once:
+If your Codex MCP client does not send MCP roots or a project cwd to HTTP servers, use the stdio bridge instead. Codex starts one lightweight bridge per project session; the bridge connects to the shared listener and sends `x-callmux-cwd` from its process cwd, so wrapped path-sensitive stdio servers still see the project cwd. Because Codex stays attached to the local stdio bridge, temporary shared-listener restarts or MCP session/transport failures can recover on the next tool call: the bridge reconnects and retries the request once.
 
 ```toml
 [mcp_servers.callmux]
