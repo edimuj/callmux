@@ -1,20 +1,27 @@
-# Callmux Release Profiles
+[← Back to Enterprise Deployment](../enterprise.md)
 
-Date: 2026-04-30  
-Purpose: baseline security posture presets for `dev`, `staging`, and `prod`.
+# Release Profiles
+
+*Last updated: 2026-04-30*
+
+When deploying callmux as a [shared listener](../shared-server.md), the security posture should match the environment. These profiles provide baseline configurations for development, staging, and production, progressively enabling security controls.
+
+For full configuration details, see [Enterprise Deployment](../enterprise.md). For the threat model behind these controls, see [Threat Model](2026-04-30-enterprise-threat-model.md).
+
+---
 
 ## Dev Profile
 
-Use when running locally on loopback for interactive development.
+**Use when:** Running locally on loopback for interactive development.
 
-- Listener bind: `127.0.0.1`
-- Auth: optional, but recommended for shared machines
-- Authorization: optional
-- Abuse controls: optional/minimal
-- Audit: optional
-- Metrics: optional
-
-Example:
+| Control | Setting |
+|:--------|:--------|
+| Listener bind | `127.0.0.1` (default) |
+| Auth | Optional (recommended on shared machines) |
+| Authorization | Optional |
+| Abuse controls | Optional/minimal |
+| Audit | Optional |
+| Metrics | Optional |
 
 ```json
 {
@@ -32,18 +39,20 @@ Example:
 }
 ```
 
+---
+
 ## Staging Profile
 
-Use for pre-production validation with production-like controls.
+**Use when:** Pre-production validation with production-like controls.
 
-- Listener bind: non-loopback allowed only with auth
-- Auth: required (`oidc_jwt` preferred)
-- Authorization: enabled, default deny
-- Abuse controls: enabled
-- Audit: enabled with request body redaction/truncation
-- Metrics: enabled, usually authenticated
-
-Example:
+| Control | Setting |
+|:--------|:--------|
+| Listener bind | Non-loopback allowed (with auth) |
+| Auth | Required — OIDC JWT preferred |
+| Authorization | Enabled, default deny |
+| Abuse controls | Enabled |
+| Audit | Enabled with request body redaction |
+| Metrics | Enabled, authenticated |
 
 ```json
 {
@@ -77,33 +86,58 @@ Example:
 }
 ```
 
-## Prod Profile
+---
 
-Use for enterprise shared deployments.
+## Production Profile
 
-- Listener bind: explicit host; TLS termination required
-- Auth: required (`oidc_jwt` strongly preferred)
-- Authorization: required, deny-by-default
-- Abuse controls: required
-- Audit: required (redaction tuned for compliance)
-- Metrics: enabled and authenticated
-- Secret handling: use `hashRef`/`tokenRef` via environment or mounted files
+**Use when:** Enterprise shared deployments serving multiple teams or agent sessions.
 
-Recommended minimums:
+| Control | Setting |
+|:--------|:--------|
+| Listener bind | Explicit host with TLS termination |
+| Auth | Required — OIDC JWT strongly preferred |
+| Authorization | Required, deny-by-default |
+| Abuse controls | Required |
+| Audit | Required, redaction tuned for compliance |
+| Metrics | Enabled, authenticated |
+| Secrets | `hashRef`/`tokenRef` via environment or mounted files only |
 
+**Recommended minimums:**
 - `requestBodyMaxBytes` set explicitly
-- `allowRequestBodyMaxOverride = false` unless operationally required
-- `allowInsecureRemoteListener = false`
+- `allowRequestBodyMaxOverride: false` unless operationally required
+- `allowInsecureRemoteListener: false` (the default)
 
-## Reload Policy
-
-- Runtime security settings can be reloaded with `SIGHUP`.
-- Structural changes (servers/tool wiring/cache topology/concurrency model) require restart.
+---
 
 ## Promotion Checklist
 
-1. `callmux doctor` reports no blocking security issues.
-2. Auth and authorization policies are validated with real principals.
-3. Rate-limit/in-flight limits validated under load.
-4. Audit logs and metrics integrated with monitoring stack.
-5. Secret references resolve from deployment environment without plaintext config values.
+Before promoting a callmux shared listener to the next environment:
+
+- [ ] `callmux doctor` reports no blocking security issues
+- [ ] Auth and authorization policies validated with real principals
+- [ ] Rate-limit and in-flight caps validated under realistic load
+- [ ] Audit logs and metrics integrated with monitoring stack
+- [ ] All secret references resolve from deployment environment (no plaintext config values)
+- [ ] TLS termination verified for non-loopback listeners
+
+---
+
+## SIGHUP Reload Policy
+
+Security settings can be hot-reloaded without restarting the listener:
+
+```bash
+kill -HUP <callmux-pid>
+```
+
+**Reloads:** auth, authorization, abuseControls, auditLog, metrics, requestBodyMaxBytes, allowRequestBodyMaxOverride, allowInsecureRemoteListener
+
+**Requires restart:** servers, tool wiring, cache topology, concurrency model
+
+---
+
+## See Also
+
+- [Enterprise Deployment](../enterprise.md) — full configuration guide
+- [Threat Model](2026-04-30-enterprise-threat-model.md) — threat analysis and controls
+- [Config Reference](../config-reference.md) — all configuration fields
