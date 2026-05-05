@@ -43,10 +43,12 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) for zer
 | `abuseControls` | object | — | Rate limits, in-flight caps, CIDR allowlist ([details](enterprise.md#rate-limiting-and-abuse-controls)) |
 | `auditLog` | object | — | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
 | `metrics` | object | — | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
+| `dashboard` | object | disabled | Read-only listener dashboard ([details](shared-server.md#read-only-dashboard)) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |
 | `descriptionMaxLength` | integer | — | Default max chars for tool descriptions in `callmux_status` |
+| `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
 
 ---
 
@@ -65,6 +67,7 @@ Local process servers use `command` to launch:
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
 | `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | — | Per-server cache allow/deny rules |
+| `responseShield` | object | — | Per-server response shielding overrides |
 
 ---
 
@@ -81,6 +84,7 @@ Remote servers use `url` instead of `command`:
 | `maxConcurrency` | integer | — | Max concurrent calls to this server |
 | `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | — | Per-server cache allow/deny rules |
+| `responseShield` | object | — | Per-server response shielding overrides |
 
 Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
 
@@ -109,6 +113,92 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
 - Per-server policies combine with the global policy
 - Oldest cache entries are evicted after `maxCacheEntries` (default: 1000)
 - `callmux_cache_clear` invalidates manually
+
+---
+
+## Response Shielding
+
+Response shielding is enabled by default. When a tool result is too large, callmux stores the full result in memory and returns a compact preview with `_callmux.ref`. Use `callmux_get_result` to page through the stored result.
+
+Defaults:
+
+| Field | Default | Description |
+|:------|:--------|:------------|
+| `enabled` | `true` | Enable response shielding |
+| `maxResultBytes` | `65536` | Store and compact responses larger than this many serialized bytes |
+| `maxStringChars` | `8192` | Truncate individual string fields longer than this |
+| `maxArrayItems` | `50` | Truncate arrays longer than this |
+| `maxStoredResults` | `100` | Global stored-result capacity before oldest refs are evicted |
+| `allowTools` | — | Only shield matching tools when set |
+| `denyTools` | — | Never shield matching tools; takes precedence |
+
+Global example:
+
+```json
+{
+  "responseShield": {
+    "maxResultBytes": 32768,
+    "maxStringChars": 4000,
+    "maxArrayItems": 25,
+    "maxStoredResults": 200,
+    "denyTools": ["download_*"]
+  }
+}
+```
+
+Per-server override:
+
+```json
+{
+  "servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "responseShield": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+Retrieve a stored result:
+
+```json
+{
+  "ref": "r_...",
+  "offset": 0,
+  "limit": 50,
+  "fields": ["id", "name"],
+  "search": "failed"
+}
+```
+
+`callmux_status` includes `responseStore` stats: active stored refs, capacity, stored bytes, and total stored results since startup.
+
+---
+
+## Dashboard
+
+The dashboard is disabled by default. Enable it only for listener deployments where the HTTP endpoint is trusted or protected by listener auth:
+
+```json
+{
+  "dashboard": {
+    "enabled": true,
+    "path": "/dashboard",
+    "maxEvents": 500
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `enabled` | boolean | `false` | Serve the read-only dashboard endpoints |
+| `path` | string | `"/dashboard"` | Dashboard base path |
+| `maxEvents` | integer | `500` | Bounded in-memory event history size |
+
+When auth is configured, dashboard requests use the same listener authentication as `/mcp`.
 
 ---
 
@@ -237,6 +327,11 @@ The `server` field in meta-tool calls lets you target specific servers:
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80,
+  "responseShield": {
+    "maxResultBytes": 65536,
+    "maxStoredResults": 100,
+    "denyTools": ["download_*"]
+  },
   "auth": {
     "mode": "bearer",
     "tokens": [{ "id": "ops", "hash": "scrypt$16384$8$1$<salt>$<derivedKey>" }],
@@ -264,6 +359,11 @@ The `server` field in meta-tool calls lets you target specific servers:
     "enabled": true,
     "path": "/metrics",
     "allowUnauthenticated": false
+  },
+  "dashboard": {
+    "enabled": true,
+    "path": "/dashboard",
+    "maxEvents": 500
   }
 }
 ```

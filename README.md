@@ -22,7 +22,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
-| 40+ tools bloating the system prompt | 9 meta-tools via [meta-only mode](docs/meta-only-mode.md) |
+| 40+ tools bloating the system prompt | 11 meta-tools via [meta-only mode](docs/meta-only-mode.md) |
 | 6 sessions × 5 servers = 30 processes | 1 [shared callmux](docs/shared-server.md) + 5 servers |
 | MCP restart kills the agent session | [Stdio bridge](docs/shared-server.md#codex-with-stdio-bridge-recommended) reconnects automatically |
 
@@ -95,6 +95,7 @@ Run callmux once, connect all sessions. One set of downstream servers, shared ca
 
 ```bash
 callmux --listen 4860
+callmux daemon install --start --enable
 ```
 
 [Full guide →](docs/shared-server.md)
@@ -117,15 +118,21 @@ args = ["bridge", "--url", "http://localhost:4860/mcp"]
 
 ### Meta-Only Mode — Fixed System Prompt Size
 
-50+ tool definitions bloat the system prompt on every API turn, costing tokens that compound across the session. Meta-only mode hides all downstream tools and exposes only 9 meta-tools. The agent discovers tools via `callmux_status` and calls them through `callmux_call`. System prompt size stays fixed regardless of how many servers you add.
+50+ tool definitions bloat the system prompt on every API turn, costing tokens that compound across the session. Meta-only mode hides all downstream tools and exposes only 11 meta-tools. The agent discovers tools via `callmux_search_tools` or `callmux_status` and calls them through `callmux_call`. System prompt size stays fixed regardless of how many servers you add.
 
 [Full guide →](docs/meta-only-mode.md)
 
 ### Enterprise-Ready Out of the Box
 
-Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access control, rate limiting, CIDR allowlists, structured audit logging, and Prometheus metrics. Hot-reload security settings with SIGHUP — no restart needed. Hardened defaults: non-loopback listeners refuse to start without auth.
+Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access control, rate limiting, CIDR allowlists, structured audit logging, and Prometheus metrics. Shared listeners hot-reload config-file changes and still support SIGHUP reloads. Hardened defaults: non-loopback listeners refuse to start without auth.
 
 [Full guide →](docs/enterprise.md)
+
+### Read-Only Dashboard — Live Runtime Visibility
+
+Optional dashboard for shared listeners. Disabled by default, then enabled with `dashboard.enabled`. It shows server health, active sessions, cache and response-store stats, recent tool calls, config reloads, and errors.
+
+[Full guide →](docs/shared-server.md#read-only-dashboard)
 
 ### Recipes — Team Workflows as Callable Names
 
@@ -152,6 +159,8 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 | `callmux_parallel` | Fire independent calls concurrently, get all results in one turn |
 | `callmux_batch` | Same tool, many items — the bulk operation pattern |
 | `callmux_pipeline` | Chain tools where each step feeds into the next |
+| `callmux_search_tools` | Search downstream tools by task, keyword, server, description, and input fields |
+| `callmux_get_result` | Page through a full stored result when callmux returns a truncated response ref |
 | `callmux_call` | Call a single downstream tool by name (primary path in [meta-only mode](docs/meta-only-mode.md)) |
 | `callmux_dry_run` | Validate and preview calls without executing |
 | `callmux_recipe_run` | Run a named [recipe](docs/recipes.md) from config |

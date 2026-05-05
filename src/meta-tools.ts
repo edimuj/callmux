@@ -105,10 +105,79 @@ export const META_TOOLS: Tool[] = [
     },
   },
   {
+    name: "callmux_search_tools",
+    description:
+      "Search downstream tools by name, server, description, and input field names. " +
+      "Use this first in meta-only mode when you know the task but not the exact tool name.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Search query. Empty or omitted returns the first available tools.",
+        },
+        server: {
+          type: "string",
+          description: "Optional server name filter.",
+        },
+        limit: {
+          type: "number",
+          description: "Max results to return (default 10, max 50).",
+        },
+        descriptionMaxLength: {
+          type: "number",
+          description:
+            "Max chars per tool description. 0 disables truncation for this call; omit uses the config default.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "callmux_get_result",
+    description:
+      "Retrieve a stored full result when a prior call returned a truncated _callmux.ref. " +
+      "Supports pagination, optional dot-path selection, field projection, and text search.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        ref: {
+          type: "string",
+          description: "Result ref returned in _callmux.ref by a truncated response.",
+        },
+        path: {
+          type: "string",
+          description:
+            "Optional dot path inside the stored result, for example preview.items or content.",
+        },
+        offset: {
+          type: "number",
+          description: "Start offset for arrays or strings (default 0).",
+        },
+        limit: {
+          type: "number",
+          description: "Items to return for arrays, or chunks of about 200 chars for strings (default 50, max 100).",
+        },
+        fields: {
+          type: "array",
+          description: "Optional field projection for arrays of objects.",
+          items: { type: "string" },
+        },
+        search: {
+          type: "string",
+          description: "Optional case-insensitive text search before pagination.",
+        },
+      },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "callmux_call",
     description:
       "Call a single tool on a downstream server. Primary way to invoke tools in meta-only mode. " +
-      "Use callmux_status with descriptions:true to discover available tools.",
+      "Use callmux_search_tools to find available tools.",
     inputSchema: {
       type: "object" as const,
       properties: {

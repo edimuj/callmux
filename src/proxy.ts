@@ -14,6 +14,8 @@ import {
   handleBatch,
   handlePipeline,
   handleCall,
+  handleSearchTools,
+  handleGetResult,
   handleDryRun,
   handleRecipeRun,
   handleRecipeDryRun,
@@ -21,6 +23,13 @@ import {
   handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig, InstanceIdentity, ServerConfig } from "./types.js";
+import {
+  createResponseStore,
+  ResponseStore,
+  resolveResponseShieldOptions,
+  shieldToolResult,
+  type ResponseShieldTarget,
+} from "./response-store.js";
 
 export class CallmuxProxy {
   private server: Server;
@@ -30,6 +39,7 @@ export class CallmuxProxy {
   private connectTimeoutMs: number;
   private allTools: Tool[] = [];
   private instanceIdentity: InstanceIdentity;
+  private responseStore: ResponseStore;
 
   private static buildInstanceId(config: CallmuxConfig): string {
     const serverFingerprint = Object.entries(config.servers)
@@ -84,6 +94,7 @@ export class CallmuxProxy {
     );
     this.maxConcurrency = config.maxConcurrency ?? 20;
     this.connectTimeoutMs = config.connectTimeoutMs ?? 30_000;
+    this.responseStore = createResponseStore(config);
     this.instanceIdentity = {
       namespace: process.env.CALLMUX_NAMESPACE,
       instanceId: CallmuxProxy.buildInstanceId(config),
@@ -148,6 +159,7 @@ export class CallmuxProxy {
   /** Shared state accessors for listener mode */
   getUpstream(): UpstreamManager { return this.upstream; }
   getCache(): CallCache { return this.cache; }
+  getResponseStore(): ResponseStore { return this.responseStore; }
   getMaxConcurrency(): number { return this.maxConcurrency; }
   getTools(): Tool[] { return this.allTools; }
   getConfig(): CallmuxConfig { return this.config; }
@@ -159,32 +171,57 @@ export class CallmuxProxy {
     // Meta-tools
     switch (name) {
       case "callmux_parallel":
-        return handleParallel(
-          this.upstream,
-          this.cache,
-          args,
-          this.maxConcurrency
+        return this.shieldResult(
+          { tool: name },
+          await handleParallel(
+            this.upstream,
+            this.cache,
+            args,
+            this.maxConcurrency
+          )
         );
 
       case "callmux_batch":
-        return handleBatch(
-          this.upstream,
-          this.cache,
-          args,
-          this.maxConcurrency
+        return this.shieldResult(
+          { tool: name },
+          await handleBatch(
+            this.upstream,
+            this.cache,
+            args,
+            this.maxConcurrency
+          )
         );
 
       case "callmux_pipeline":
-        return handlePipeline(
-          this.upstream,
-          this.cache,
-          args
+        return this.shieldResult(
+          { tool: name },
+          await handlePipeline(
+            this.upstream,
+            this.cache,
+            args
+          )
         );
 
       case "callmux_call":
-        return handleCall(
+        return this.shieldResult(
+          this.responseShieldTarget(name, args),
+          await handleCall(
+            this.upstream,
+            this.cache,
+            args
+          )
+        );
+
+      case "callmux_search_tools":
+        return handleSearchTools(
           this.upstream,
-          this.cache,
+          this.config.descriptionMaxLength,
+          args
+        );
+
+      case "callmux_get_result":
+        return handleGetResult(
+          this.responseStore,
           args
         );
 
@@ -202,12 +239,15 @@ export class CallmuxProxy {
         );
 
       case "callmux_recipe_run":
-        return handleRecipeRun(
-          this.upstream,
-          this.cache,
-          this.config.recipes,
-          args,
-          this.maxConcurrency
+        return this.shieldResult(
+          { tool: name },
+          await handleRecipeRun(
+            this.upstream,
+            this.cache,
+            this.config.recipes,
+            args,
+            this.maxConcurrency
+          )
         );
 
       case "callmux_recipe_dry_run":
@@ -228,17 +268,67 @@ export class CallmuxProxy {
           this.instanceIdentity,
           args,
           undefined,
-          this.config.recipes
+          this.config.recipes,
+          this.responseStore
         );
     }
 
     // Proxied tool — check cache first
     const cached = this.cache.get(name, args);
-    if (cached) return cached;
+    const target = this.responseShieldTarget(name, args);
+    if (cached) return this.shieldResult(target, cached);
 
     const result = await this.upstream.callTool(name, args);
     this.cache.set(name, args, result);
-    return result;
+    return this.shieldResult(target, result);
+  }
+
+  private responseShieldTarget(
+    tool: string,
+    args?: Record<string, unknown>
+  ): ResponseShieldTarget {
+    if (tool === "callmux_call" && args && typeof args.tool === "string") {
+      const server = typeof args.server === "string" ? args.server : undefined;
+      const resolved = this.upstream.resolveServer(args.tool, server);
+      if (resolved && !("error" in resolved)) {
+        return { tool: resolved.actualName, server: resolved.server };
+      }
+      return { tool: args.tool, ...(server ? { server } : {}) };
+    }
+
+    const separatorIndex = tool.indexOf("__");
+    if (separatorIndex > 0) {
+      return {
+        tool: tool.slice(separatorIndex + 2),
+        server: tool.slice(0, separatorIndex),
+      };
+    }
+
+    const maybeResolvable = this.upstream as UpstreamManager & {
+      resolveServer?: UpstreamManager["resolveServer"];
+    };
+    if (typeof maybeResolvable.resolveServer !== "function") {
+      return { tool };
+    }
+
+    const resolved = maybeResolvable.resolveServer(tool);
+    if (resolved && !("error" in resolved)) {
+      return { tool: resolved.actualName, server: resolved.server };
+    }
+
+    return { tool };
+  }
+
+  private shieldResult(
+    target: ResponseShieldTarget,
+    result: CallToolResult
+  ): CallToolResult {
+    return shieldToolResult(
+      this.responseStore,
+      target,
+      result,
+      resolveResponseShieldOptions(this.config, target)
+    );
   }
 
   async close(): Promise<void> {

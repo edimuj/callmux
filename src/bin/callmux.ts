@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { watch, type FSWatcher } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,14 @@ import {
   runDoctor,
   runServerTest,
 } from "../doctor.js";
+import {
+  createDaemonPlan,
+  detectDaemonEnvironment,
+  executeDaemonPlan,
+  formatDaemonPlan,
+  type DaemonAction,
+  type DaemonScope,
+} from "../daemon.js";
 import { runSetup } from "../setup.js";
 import * as p from "@clack/prompts";
 import { UpstreamManager } from "../upstream.js";
@@ -80,6 +89,7 @@ Usage:
   callmux client attach <claude|codex> [--config <path>] [--name <id>] [--url <listener-url>] [--bridge] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client detach <claude|codex> [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client status [claude|codex] [--config <path>] [--name <id>] [--url <listener-url>] [--bridge] [--file <path>] [--json]
+  callmux daemon <install|uninstall|start|stop|restart|enable|disable|status|logs> [options]
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
@@ -98,7 +108,7 @@ Options:
   --strict-startup      Fail startup if any downstream server fails (default: degraded)
   --listen <port>       Run as shared HTTP/SSE server (multiple clients connect via URL)
   --host <addr>         Bind address for --listen (default: 127.0.0.1)
-                         Send SIGHUP to reload runtime security config (when using a config file)
+                         Config files are watched and hot-reloaded in listener mode
   --help, -h            Show this help
   --version, -v         Show version
 
@@ -107,6 +117,20 @@ Bridge Options:
   --cwd <path>          Project cwd to send as x-callmux-cwd (default: process cwd)
   --header Name:Value   Extra HTTP header for the shared listener (repeatable)
   --call-timeout <ms>   Timeout for forwarded tool calls (default: SDK default)
+
+Daemon Options:
+  --port <n>            Listener port for install (default: 4860)
+  --host <addr>         Listener host for install (default: 127.0.0.1)
+  --name <id>           Service name (default: callmux)
+  --user                Install/control a user-scoped daemon (default)
+  --system              Install/control a system-scoped daemon where supported
+  --start               Start after install
+  --enable              Enable after install / at login
+  --binary <path>       callmux binary path for generated daemon file
+  --dry-run             Print daemon file and commands without changing anything
+  --force               Overwrite/remove unmanaged daemon files
+  --yes                 Skip confirmation prompts
+  --json                Print daemon plan/result as JSON
 
 Server Add Options:
   --tools <list>        Comma-separated downstream tool whitelist
@@ -231,11 +255,15 @@ Examples:
   callmux client attach codex
   callmux client attach codex --yes
   callmux client print claude --name github
+  callmux daemon install --config ~/.config/callmux/config.json --start --enable
+  callmux daemon status
 
 Meta-tools exposed:
   callmux_parallel      Execute N tool calls concurrently
   callmux_batch         Apply one tool across many items
   callmux_pipeline      Chain tool calls with output mapping
+  callmux_search_tools  Search downstream tools by task or keyword
+  callmux_get_result    Page through a stored truncated response
   callmux_call          Call a single downstream tool by name
   callmux_dry_run       Validate and preview calls without execution
   callmux_recipe_run    Run a named config recipe
@@ -287,51 +315,6 @@ function extractFlag(
   }
 
   return { remainingArgs, present };
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => stableValue(item));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, nested]) => [key, stableValue(nested)])
-    );
-  }
-  return value;
-}
-
-function isNonStructuralReloadCompatible(
-  current: CallmuxConfig,
-  next: CallmuxConfig
-): boolean {
-  const immutableCurrent = stableValue({
-    servers: current.servers,
-    cacheTtlSeconds: current.cacheTtlSeconds ?? 0,
-    cachePolicy: current.cachePolicy,
-    maxConcurrency: current.maxConcurrency ?? 20,
-    connectTimeoutMs: current.connectTimeoutMs,
-    callTimeoutMs: current.callTimeoutMs,
-    strictStartup: current.strictStartup ?? false,
-    maxCacheEntries: current.maxCacheEntries ?? 1000,
-    metaOnly: current.metaOnly ?? false,
-    descriptionMaxLength: current.descriptionMaxLength,
-  });
-  const immutableNext = stableValue({
-    servers: next.servers,
-    cacheTtlSeconds: next.cacheTtlSeconds ?? 0,
-    cachePolicy: next.cachePolicy,
-    maxConcurrency: next.maxConcurrency ?? 20,
-    connectTimeoutMs: next.connectTimeoutMs,
-    callTimeoutMs: next.callTimeoutMs,
-    strictStartup: next.strictStartup ?? false,
-    maxCacheEntries: next.maxCacheEntries ?? 1000,
-    metaOnly: next.metaOnly ?? false,
-    descriptionMaxLength: next.descriptionMaxLength,
-  });
-  return JSON.stringify(immutableCurrent) === JSON.stringify(immutableNext);
 }
 
 async function readTextFileIfExists(path: string): Promise<string> {
@@ -872,6 +855,118 @@ async function handleBridgeCommand(args: string[]): Promise<void> {
   await bridge.start(transport);
 }
 
+function parseDaemonAction(value: string | undefined): DaemonAction {
+  const actions = new Set<DaemonAction>([
+    "install",
+    "uninstall",
+    "start",
+    "stop",
+    "restart",
+    "enable",
+    "disable",
+    "status",
+    "logs",
+  ]);
+  if (!value || !actions.has(value as DaemonAction)) {
+    throw new Error(
+      "Usage: callmux daemon <install|uninstall|start|stop|restart|enable|disable|status|logs> [options]"
+    );
+  }
+  return value as DaemonAction;
+}
+
+async function handleDaemonCommand(
+  args: string[],
+  configPath: string
+): Promise<void> {
+  const action = parseDaemonAction(args[0]);
+  let name: string | undefined;
+  let port: number | undefined;
+  let host: string | undefined;
+  let scope: DaemonScope | undefined;
+  let binaryPath: string | undefined;
+  let start = false;
+  let enable = false;
+  let dryRun = false;
+  let force = false;
+  let yes = false;
+  let json = false;
+
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--name" && i + 1 < args.length) {
+      name = args[++i];
+    } else if (arg === "--port" && i + 1 < args.length) {
+      port = parseInt(args[++i], 10);
+    } else if (arg === "--host" && i + 1 < args.length) {
+      host = args[++i];
+    } else if (arg === "--user") {
+      scope = "user";
+    } else if (arg === "--system") {
+      scope = "system";
+    } else if (arg === "--binary" && i + 1 < args.length) {
+      binaryPath = args[++i];
+    } else if (arg === "--start") {
+      start = true;
+    } else if (arg === "--enable") {
+      enable = true;
+    } else if (arg === "--dry-run") {
+      dryRun = true;
+    } else if (arg === "--force") {
+      force = true;
+    } else if (arg === "--yes") {
+      yes = true;
+    } else if (arg === "--json") {
+      json = true;
+    } else {
+      throw new Error(`Unknown daemon option "${arg}"`);
+    }
+  }
+
+  if (action === "install") {
+    await loadConfig(configPath);
+  }
+
+  const env = await detectDaemonEnvironment();
+  const plan = createDaemonPlan(
+    {
+      action,
+      configPath,
+      ...(name ? { name } : {}),
+      ...(port !== undefined ? { port } : {}),
+      ...(host ? { host } : {}),
+      ...(scope ? { scope } : {}),
+      ...(binaryPath ? { binaryPath } : {}),
+      start,
+      enable,
+      force,
+      dryRun,
+    },
+    env
+  );
+
+  if (!dryRun && !json && (action === "install" || action === "uninstall") && !yes) {
+    const confirmed = await p.confirm({
+      message:
+        action === "install"
+          ? `Install ${plan.kind} ${plan.scope} daemon "${plan.name}"?`
+          : `Uninstall daemon "${plan.name}"?`,
+      initialValue: false,
+    });
+    if (p.isCancel(confirmed) || !confirmed) {
+      p.cancel("Daemon command cancelled.");
+      process.exit(0);
+    }
+  }
+
+  const result = await executeDaemonPlan(plan, { dryRun, force });
+  if (json) {
+    console.log(JSON.stringify({ plan: result.plan, output: result.output }, null, 2));
+  } else {
+    console.log(dryRun ? formatDaemonPlan(plan) : result.output);
+  }
+}
+
 async function discoverServerTools(
   name: string,
   config: ServerConfig
@@ -961,6 +1056,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === "daemon") {
+    await handleDaemonCommand(args.slice(1), configPath);
+    return;
+  }
+
   // Extract --listen and --host before config resolution
   let listenPort: number | undefined;
   let listenHost = "127.0.0.1";
@@ -1000,7 +1100,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const proxy = new CallmuxProxy(config);
+  let proxy = new CallmuxProxy(config);
 
   if (listenPort) {
     // Shared server mode: connect upstreams, then start HTTP listener
@@ -1012,6 +1112,7 @@ async function main(): Promise<void> {
       config,
       upstream: proxy.getUpstream(),
       cache: proxy.getCache(),
+      responseStore: proxy.getResponseStore(),
       allTools: proxy.getTools(),
       maxConcurrency: proxy.getMaxConcurrency(),
     });
@@ -1021,6 +1122,78 @@ async function main(): Promise<void> {
     // Sentinel keeps the event loop alive even if every other ref is dropped
     // (all child transports closed, no active HTTP connections, etc.)
     const keepalive = setInterval(() => {}, 30_000);
+    const staleProxyCloseDelayMs = 30_000;
+    let configWatcher: FSWatcher | undefined;
+    let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+    let reloadInProgress = false;
+    let reloadQueued = false;
+
+    const closeStaleProxyLater = (staleProxy: CallmuxProxy): void => {
+      const timer = setTimeout(() => {
+        staleProxy.close().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`[callmux] Stale upstream close failed: ${message}\n`);
+        });
+      }, staleProxyCloseDelayMs);
+      timer.unref?.();
+    };
+
+    const reloadConfig = async (trigger: string): Promise<void> => {
+      if (!activeConfigPath) return;
+      if (reloadInProgress) {
+        reloadQueued = true;
+        return;
+      }
+
+      reloadInProgress = true;
+      let nextProxy: CallmuxProxy | undefined;
+      try {
+        const nextConfig = await loadConfig(activeConfigPath);
+        nextProxy = new CallmuxProxy(nextConfig);
+        await nextProxy.connectUpstreams();
+
+        const previousProxy = proxy;
+        listener.applyReloadedState({
+          config: nextConfig,
+          upstream: nextProxy.getUpstream(),
+          cache: nextProxy.getCache(),
+          allTools: nextProxy.getTools(),
+          maxConcurrency: nextProxy.getMaxConcurrency(),
+        });
+        listener.recordConfigReload({ ok: true });
+        proxy = nextProxy;
+        nextProxy = undefined;
+        config = nextConfig;
+        closeStaleProxyLater(previousProxy);
+        process.stderr.write(
+          `[callmux] Reloaded config from ${activeConfigPath} (${trigger})\n`
+        );
+      } catch (error) {
+        if (nextProxy) {
+          try { await nextProxy.close(); } catch {}
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        listener.recordConfigReload({ ok: false, error: message });
+        process.stderr.write(
+          `[callmux] Config reload failed (${activeConfigPath}, ${trigger}): ${message}\n`
+        );
+      } finally {
+        reloadInProgress = false;
+        if (reloadQueued) {
+          reloadQueued = false;
+          void reloadConfig("queued");
+        }
+      }
+    };
+
+    const scheduleReload = (trigger: string): void => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        reloadTimer = undefined;
+        void reloadConfig(trigger);
+      }, 250);
+      reloadTimer.unref?.();
+    };
 
     process.on("uncaughtException", (err) => {
       process.stderr.write(`[callmux] Uncaught exception: ${err.stack ?? err.message}\n`);
@@ -1034,32 +1207,36 @@ async function main(): Promise<void> {
     const shutdown = async (signal: string) => {
       process.stderr.write(`[callmux] ${signal} received, shutting down\n`);
       clearInterval(keepalive);
+      if (reloadTimer) clearTimeout(reloadTimer);
+      configWatcher?.close();
       try { await listener.close(); } catch {}
       try { await proxy.close(); } catch {}
       process.exit(0);
     };
 
     if (activeConfigPath) {
-      process.on("SIGHUP", async () => {
-        try {
-          const nextConfig = await loadConfig(activeConfigPath!);
-          if (!isNonStructuralReloadCompatible(config, nextConfig)) {
-            process.stderr.write(
-              `[callmux] SIGHUP reload ignored: structural config changes detected in ${activeConfigPath}\n`
-            );
-            return;
+      try {
+        configWatcher = watch(activeConfigPath, (eventType) => {
+          if (eventType === "change" || eventType === "rename") {
+            scheduleReload(`file ${eventType}`);
           }
-          listener.applyRuntimeConfig(nextConfig);
-          config = nextConfig;
-          process.stderr.write(
-            `[callmux] Reloaded runtime security config from ${activeConfigPath}\n`
-          );
-        } catch (error) {
+        });
+        configWatcher.on("error", (error) => {
           const message = error instanceof Error ? error.message : String(error);
           process.stderr.write(
-            `[callmux] SIGHUP reload failed (${activeConfigPath}): ${message}\n`
+            `[callmux] Config watcher failed (${activeConfigPath}): ${message}\n`
           );
-        }
+        });
+        process.stderr.write(`[callmux] Watching config for hot reload: ${activeConfigPath}\n`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        process.stderr.write(
+          `[callmux] Config watcher unavailable (${activeConfigPath}): ${message}\n`
+        );
+      }
+
+      process.on("SIGHUP", () => {
+        void reloadConfig("SIGHUP");
       });
     }
 

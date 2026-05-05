@@ -122,17 +122,15 @@ Before promoting a callmux shared listener to the next environment:
 
 ---
 
-## SIGHUP Reload Policy
+## Config Reload Policy
 
-Security settings can be hot-reloaded without restarting the listener:
+Shared listeners launched from a config file hot-reload that file automatically. Operators can also trigger the same reload path with `SIGHUP`:
 
 ```bash
 kill -HUP <callmux-pid>
 ```
 
-**Reloads:** auth, authorization, abuseControls, auditLog, metrics, requestBodyMaxBytes, allowRequestBodyMaxOverride, allowInsecureRemoteListener
-
-**Requires restart:** servers, tool wiring, cache topology, concurrency model
+callmux builds and connects the new runtime before swapping it into the live listener. Failed reloads keep the previous runtime active and are visible through `callmux_status`.
 
 ---
 

@@ -17,6 +17,8 @@ export interface StdioServerConfig {
   maxConcurrency?: number;
   /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
   requestBodyMaxBytes?: number;
+  /** Optional per-server response shielding overrides */
+  responseShield?: ResponseShieldConfig;
 }
 
 export interface HttpServerConfig {
@@ -31,6 +33,8 @@ export interface HttpServerConfig {
   maxConcurrency?: number;
   /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
   requestBodyMaxBytes?: number;
+  /** Optional per-server response shielding overrides */
+  responseShield?: ResponseShieldConfig;
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig;
@@ -47,6 +51,21 @@ export interface CachePolicyConfig {
   /** Cache only matching tools when provided; supports exact names or "*" wildcards */
   allowTools?: string[];
   /** Never cache matching tools; supports exact names or "*" wildcards */
+  denyTools?: string[];
+}
+
+export interface ResponseShieldConfig {
+  /** Enable response shielding (default: true) */
+  enabled?: boolean;
+  /** Store and compact responses larger than this many serialized bytes */
+  maxResultBytes?: number;
+  /** Truncate individual string fields longer than this many characters */
+  maxStringChars?: number;
+  /** Truncate arrays longer than this many items */
+  maxArrayItems?: number;
+  /** Only shield matching tools when provided; supports exact names or "*" wildcards */
+  allowTools?: string[];
+  /** Never shield matching tools; supports exact names or "*" wildcards */
   denyTools?: string[];
 }
 
@@ -163,6 +182,15 @@ export interface MetricsConfig {
   allowUnauthenticated?: boolean;
 }
 
+export interface DashboardConfig {
+  /** Enable read-only dashboard endpoints */
+  enabled?: boolean;
+  /** Dashboard base path (default: /dashboard) */
+  path?: string;
+  /** Max runtime events kept in memory (default: 500) */
+  maxEvents?: number;
+}
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -188,6 +216,11 @@ export interface CallmuxConfig {
   metaOnly?: boolean;
   /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
   descriptionMaxLength?: number;
+  /** Response shielding and stored-result configuration */
+  responseShield?: ResponseShieldConfig & {
+    /** Maximum stored full results before oldest refs are evicted */
+    maxStoredResults?: number;
+  };
   /** Global max inbound request payload bytes (0 = unlimited; default: 1048576) */
   requestBodyMaxBytes?: number;
   /** Allow per-request override via x-callmux-max-body-bytes header */
@@ -202,6 +235,8 @@ export interface CallmuxConfig {
   auditLog?: AuditLogConfig;
   /** Listener metrics endpoint configuration */
   metrics?: MetricsConfig;
+  /** Optional read-only dashboard configuration */
+  dashboard?: DashboardConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */
   allowInsecureRemoteListener?: boolean;
 }
@@ -223,6 +258,10 @@ export interface ToolCallContext {
 }
 
 export interface ListenerRuntimeDiagnostics {
+  configReload?: {
+    lastReloadAt?: string;
+    lastReloadError?: string;
+  };
   activeSessions: number;
   sessions: Array<{
     id: string;

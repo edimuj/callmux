@@ -214,15 +214,15 @@ Control inbound request payload sizes to prevent abuse:
 
 ---
 
-## SIGHUP Runtime Reload
+## Config Hot-Reload
 
-Auth, authorization, and abuse controls can be hot-reloaded without restarting the listener:
+Shared listeners launched from a config file watch that file and hot-reload changes automatically. You can also trigger a reload with `SIGHUP`:
 
 ```bash
 kill -HUP <callmux-pid>
 ```
 
-See [Shared Server Mode](shared-server.md#sighup-hot-reload) for the full list of reloadable fields.
+See [Shared Server Mode](shared-server.md#config-hot-reload) for reload behavior and failure handling.
 
 ---
 

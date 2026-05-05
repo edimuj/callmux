@@ -8,6 +8,12 @@ import {
   getDefaultClientConfigPath,
   type ClientKind,
 } from "./client-config.js";
+import {
+  createDaemonPlan,
+  detectDaemonEnvironment,
+  executeDaemonPlan,
+  type DaemonScope,
+} from "./daemon.js";
 import { detectExistingConfigs, type DetectedServer } from "./detect.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -149,6 +155,7 @@ export async function runSetup(configPath?: string): Promise<void> {
     p.log.info(
       `Start the shared listener with: ${renderSharedListenerStartCommand(clientMode.listenerUrl, resolvedConfigPath)}`
     );
+    await offerDaemonInstall(resolvedConfigPath, clientMode.listenerUrl);
   }
 
   await attachToClients(resolvedConfigPath, clientMode);
@@ -158,6 +165,80 @@ export async function runSetup(configPath?: string): Promise<void> {
       ? "Setup complete. Start the listener, then clients will connect to the shared callmux URL."
       : "Setup complete. Your agent now has access to callmux meta-tools."
   );
+}
+
+async function offerDaemonInstall(
+  configPath: string,
+  listenerUrl: string
+): Promise<void> {
+  const installDaemon = await p.confirm({
+    message: "Install callmux as a background daemon for this shared listener?",
+    initialValue: true,
+  });
+
+  if (p.isCancel(installDaemon) || !installDaemon) {
+    return;
+  }
+
+  const scopeChoice = await p.select({
+    message: "Daemon scope:",
+    options: [
+      { value: "user", label: "User service", hint: "Recommended; no sudo required" },
+      { value: "system", label: "System service", hint: "Requires admin/root permissions" },
+    ],
+  });
+
+  if (p.isCancel(scopeChoice)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  const startNow = await p.confirm({
+    message: "Start the daemon now?",
+    initialValue: true,
+  });
+  if (p.isCancel(startNow)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  const enableAtLogin = await p.confirm({
+    message: "Enable the daemon at login/boot?",
+    initialValue: true,
+  });
+  if (p.isCancel(enableAtLogin)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  const url = new URL(listenerUrl);
+  const port = Number(url.port || (url.protocol === "https:" ? "443" : "80"));
+  const host = url.hostname;
+  const env = await detectDaemonEnvironment();
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath,
+      port,
+      ...(host !== "localhost" && host !== "127.0.0.1" && host !== "::1" ? { host } : {}),
+      scope: scopeChoice as DaemonScope,
+      start: startNow === true,
+      enable: enableAtLogin === true,
+    },
+    env
+  );
+
+  try {
+    const result = await executeDaemonPlan(plan);
+    p.log.success(`Daemon installed (${plan.kind}, ${plan.scope}).`);
+    if (result.output.trim()) {
+      p.log.info(result.output);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    p.log.error(`Daemon install failed: ${msg}`);
+    p.log.info("You can retry with `callmux daemon install --start --enable`.");
+  }
 }
 
 async function selectClientMode(): Promise<SetupClientMode> {

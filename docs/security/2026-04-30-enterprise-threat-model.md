@@ -94,8 +94,8 @@ For general callmux documentation, see the [README](../../README.md). For deploy
 **Threat:** Unsafe settings introduced via live config changes without full restart validation.
 
 **Controls:**
-- SIGHUP hot-reload is intentionally non-structural: only security-related fields reload
-- Server wiring, tool routing, and cache topology require a full restart
+- Config-file hot-reload builds and connects the replacement runtime before the live listener swaps over
+- Failed reloads keep the previous runtime active and surface through `callmux_status`
 - `callmux doctor` validates configuration integrity
 
 ### 6. Secret Exposure in Config Files

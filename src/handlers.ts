@@ -1,6 +1,7 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
+import type { ResponseStore } from "./response-store.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
   ParallelCall,
@@ -106,6 +107,26 @@ function validateToolName(
     });
   }
 
+  return value;
+}
+
+function validatePositiveInteger(
+  value: unknown,
+  field: string,
+  max: number
+): number | undefined | CallToolResult {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return errorResult("invalid_arguments", `${field} must be a positive integer`, {
+      field,
+    });
+  }
+  if (value > max) {
+    return errorResult("invalid_arguments", `${field} must be <= ${max}`, {
+      field,
+      max,
+    });
+  }
   return value;
 }
 
@@ -925,6 +946,207 @@ export async function handleCall(
   return result;
 }
 
+interface SearchableTool {
+  qualifiedName: string;
+  name: string;
+  server: string;
+  description?: string;
+  inputFields: string[];
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_./:-]+/g, " ")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .toLowerCase()
+    .trim();
+}
+
+function searchTokens(value: string): string[] {
+  const normalized = normalizeSearchText(value);
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function extractInputFields(schema: unknown): string[] {
+  if (!isRecord(schema)) return [];
+
+  if (isRecord(schema.properties)) {
+    return Object.keys(schema.properties).sort();
+  }
+
+  const nested = schema.inputSchema;
+  if (isRecord(nested)) {
+    return extractInputFields(nested);
+  }
+
+  return [];
+}
+
+function getSearchableTools(upstream: UpstreamManager): SearchableTool[] {
+  const withCatalog = upstream as UpstreamManager & {
+    getTools?: () => Array<{ qualifiedName: string; server: string; tool: Tool }>;
+  };
+
+  if (typeof withCatalog.getTools === "function") {
+    return withCatalog.getTools()
+      .map(({ qualifiedName, server, tool }) => ({
+        qualifiedName,
+        name: tool.name,
+        server,
+        ...(tool.description ? { description: tool.description } : {}),
+        inputFields: extractInputFields(tool.inputSchema),
+      }))
+      .sort((a, b) =>
+        a.server.localeCompare(b.server) || a.name.localeCompare(b.name)
+      );
+  }
+
+  return upstream.getServerNames().flatMap((server) =>
+    upstream.getToolsWithDescriptions(server).map((tool) => ({
+      qualifiedName: `${server}__${tool.name}`,
+      name: tool.name,
+      server,
+      ...(tool.description ? { description: tool.description } : {}),
+      inputFields: [],
+    }))
+  );
+}
+
+function scoreToolSearchResult(tool: SearchableTool, query: string): number {
+  const tokens = searchTokens(query);
+  if (tokens.length === 0) return 0;
+
+  const name = normalizeSearchText(tool.name);
+  const qualifiedName = normalizeSearchText(tool.qualifiedName);
+  const server = normalizeSearchText(tool.server);
+  const description = normalizeSearchText(tool.description ?? "");
+  const inputFields = normalizeSearchText(tool.inputFields.join(" "));
+  const haystack = `${qualifiedName} ${name} ${server} ${description} ${inputFields}`;
+
+  let score = 0;
+  for (const token of tokens) {
+    if (name === token) score += 12;
+    if (name.startsWith(token)) score += 8;
+    if (name.includes(token)) score += 6;
+    if (qualifiedName.includes(token)) score += 5;
+    if (inputFields.split(/\s+/).includes(token)) score += 4;
+    if (server === token || server.includes(token)) score += 3;
+    if (description.includes(token)) score += 2;
+    if (haystack.includes(token)) score += 1;
+  }
+
+  const queryNormalized = normalizeSearchText(query);
+  if (name.includes(queryNormalized)) score += 10;
+  if (qualifiedName.includes(queryNormalized)) score += 6;
+  if (description.includes(queryNormalized)) score += 3;
+
+  return score;
+}
+
+export function handleSearchTools(
+  upstream: UpstreamManager,
+  defaultDescriptionMaxLength: number | undefined,
+  args: unknown
+): CallToolResult {
+  if (args !== undefined && !isRecord(args)) {
+    return errorResult("invalid_arguments", "arguments must be an object", {
+      field: "arguments",
+    });
+  }
+
+  const parsed = isRecord(args) ? args : {};
+  if (parsed.query !== undefined && typeof parsed.query !== "string") {
+    return errorResult("invalid_arguments", "query must be a string", {
+      field: "query",
+    });
+  }
+
+  const server =
+    parsed.server === undefined ? undefined : validateToolName(parsed.server, "server");
+  if (server !== undefined && typeof server !== "string") return server;
+
+  const limit = validatePositiveInteger(parsed.limit, "limit", 50);
+  if (limit !== undefined && typeof limit !== "number") return limit;
+
+  let descriptionMaxLength =
+    defaultDescriptionMaxLength && defaultDescriptionMaxLength > 0
+      ? defaultDescriptionMaxLength
+      : undefined;
+  if (parsed.descriptionMaxLength !== undefined) {
+    if (
+      typeof parsed.descriptionMaxLength !== "number" ||
+      !Number.isInteger(parsed.descriptionMaxLength) ||
+      parsed.descriptionMaxLength < 0
+    ) {
+      return errorResult(
+        "invalid_arguments",
+        "descriptionMaxLength must be a non-negative integer",
+        { field: "descriptionMaxLength" }
+      );
+    }
+    descriptionMaxLength =
+      parsed.descriptionMaxLength > 0 ? parsed.descriptionMaxLength : undefined;
+  }
+
+  const query = typeof parsed.query === "string" ? parsed.query : "";
+  const allTools = getSearchableTools(upstream);
+  const serverTools = server
+    ? allTools.filter((tool) => tool.server === server)
+    : allTools;
+
+  if (server && !upstream.getServerNames().includes(server)) {
+    return errorResult("server_not_found", `server "${server}" not found`, {
+      server,
+      availableServers: upstream.getServerNames(),
+    });
+  }
+
+  const queryTokenCount = searchTokens(query).length;
+  const matches = serverTools
+    .map((tool) => ({ tool, score: scoreToolSearchResult(tool, query) }))
+    .filter((entry) => queryTokenCount === 0 || entry.score > 0)
+    .sort((a, b) =>
+      b.score - a.score ||
+      a.tool.server.localeCompare(b.tool.server) ||
+      a.tool.name.localeCompare(b.tool.name)
+    );
+
+  const resultLimit = limit ?? 10;
+  const truncate = (description: string | undefined): string | undefined => {
+    if (!description) return description;
+    if (!descriptionMaxLength || description.length <= descriptionMaxLength) {
+      return description;
+    }
+    return description.slice(0, descriptionMaxLength) + "...";
+  };
+
+  return jsonResult({
+    query,
+    ...(server ? { server } : {}),
+    totalTools: serverTools.length,
+    found: matches.length,
+    limit: resultLimit,
+    results: matches.slice(0, resultLimit).map(({ tool, score }) => ({
+      tool: tool.qualifiedName,
+      name: tool.name,
+      server: tool.server,
+      score,
+      ...(tool.description !== undefined
+        ? { description: truncate(tool.description) }
+        : {}),
+      ...(tool.inputFields.length > 0 ? { inputFields: tool.inputFields } : {}),
+    })),
+  });
+}
+
+export function handleGetResult(
+  responseStore: ResponseStore,
+  args: unknown
+): CallToolResult {
+  return responseStore.query(args);
+}
+
 export async function handleRecipeRun(
   upstream: UpstreamManager,
   cache: CallCache,
@@ -1019,7 +1241,8 @@ export function handleStatus(
   instanceIdentity: InstanceIdentity,
   args: unknown,
   listenerDiagnostics?: ListenerRuntimeDiagnostics,
-  recipes?: Record<string, RecipeConfig>
+  recipes?: Record<string, RecipeConfig>,
+  responseStore?: ResponseStore
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
@@ -1126,12 +1349,22 @@ export function handleStatus(
 
   if (metaOnly) {
     recommendations.push({
+      when: "Find the right downstream tool by task or keyword",
+      use: "callmux_search_tools",
+      note: "Search tool names, descriptions, servers, and input field hints.",
+    });
+    recommendations.push({
       when: "Single downstream call in meta-only mode",
       use: "callmux_call",
       note: "Call one proxied tool by name with optional server hint.",
     });
   }
   recommendations.push(
+    {
+      when: "A response includes _callmux.ref",
+      use: "callmux_get_result",
+      note: "Page through the full stored result with optional search and field projection.",
+    },
     {
       when: "Independent calls to different tools",
       use: "callmux_parallel",
@@ -1178,6 +1411,7 @@ export function handleStatus(
     failedServers: failed,
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
+    ...(responseStore ? { responseStore: responseStore.stats() } : {}),
     maxConcurrency,
     ...(recipeSummaries.length > 0
       ? { recipes: recipeSummaries, recipeCount: recipeSummaries.length }

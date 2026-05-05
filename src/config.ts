@@ -13,8 +13,10 @@ import type {
   CallmuxConfig,
   ConfigFormat,
   MetricsConfig,
+  DashboardConfig,
   RecipeConfig,
   RecipeMode,
+  ResponseShieldConfig,
   ServerConfig,
 } from "./types.js";
 import { hashBearerToken, parseScryptTokenHash } from "./auth.js";
@@ -131,6 +133,59 @@ function parseCachePolicy(
   return {
     ...(allowTools ? { allowTools } : {}),
     ...(denyTools ? { denyTools } : {}),
+  };
+}
+
+function parseResponseShieldConfig(
+  value: unknown,
+  optionName: string,
+  allowMaxStoredResults: boolean
+): (ResponseShieldConfig & { maxStoredResults?: number }) | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const maxResultBytes = value.maxResultBytes !== undefined
+    ? parsePositiveInteger(value.maxResultBytes, `${optionName}.maxResultBytes`)
+    : undefined;
+  const maxStringChars = value.maxStringChars !== undefined
+    ? parsePositiveInteger(value.maxStringChars, `${optionName}.maxStringChars`)
+    : undefined;
+  const maxArrayItems = value.maxArrayItems !== undefined
+    ? parsePositiveInteger(value.maxArrayItems, `${optionName}.maxArrayItems`)
+    : undefined;
+  const allowTools = parseStringArray(value.allowTools, `${optionName}.allowTools`);
+  const denyTools = parseStringArray(value.denyTools, `${optionName}.denyTools`);
+  const maxStoredResults = value.maxStoredResults !== undefined
+    ? allowMaxStoredResults
+      ? parsePositiveInteger(value.maxStoredResults, `${optionName}.maxStoredResults`)
+      : (() => {
+          throw new Error(`${optionName}.maxStoredResults is only supported in global responseShield`);
+        })()
+    : undefined;
+
+  if (
+    enabled === undefined &&
+    maxResultBytes === undefined &&
+    maxStringChars === undefined &&
+    maxArrayItems === undefined &&
+    !allowTools &&
+    !denyTools &&
+    maxStoredResults === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(maxResultBytes !== undefined ? { maxResultBytes } : {}),
+    ...(maxStringChars !== undefined ? { maxStringChars } : {}),
+    ...(maxArrayItems !== undefined ? { maxArrayItems } : {}),
+    ...(allowTools ? { allowTools } : {}),
+    ...(denyTools ? { denyTools } : {}),
+    ...(maxStoredResults !== undefined ? { maxStoredResults } : {}),
   };
 }
 
@@ -397,6 +452,41 @@ function parseMetricsConfig(
     ...(enabled !== undefined ? { enabled } : {}),
     ...(path ? { path } : {}),
     ...(allowUnauthenticated !== undefined ? { allowUnauthenticated } : {}),
+  };
+}
+
+function parseDashboardConfig(
+  value: unknown,
+  optionName: string
+): DashboardConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const path =
+    value.path === undefined
+      ? undefined
+      : typeof value.path === "string" && value.path.trim().length > 0
+        ? value.path.startsWith("/")
+          ? value.path
+          : `/${value.path}`
+        : (() => {
+            throw new Error(`${optionName}.path must be a non-empty string`);
+          })();
+  const maxEvents = value.maxEvents !== undefined
+    ? parsePositiveInteger(value.maxEvents, `${optionName}.maxEvents`)
+    : undefined;
+
+  if (enabled === undefined && path === undefined && maxEvents === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(path ? { path } : {}),
+    ...(maxEvents !== undefined ? { maxEvents } : {}),
   };
 }
 
@@ -788,6 +878,11 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     value.cachePolicy,
     `servers.${serverName}.cachePolicy`
   );
+  const responseShield = parseResponseShieldConfig(
+    value.responseShield,
+    `servers.${serverName}.responseShield`,
+    false
+  );
   const maxConcurrency = value.maxConcurrency !== undefined
     ? parsePositiveInteger(value.maxConcurrency, `servers.${serverName}.maxConcurrency`)
     : undefined;
@@ -801,6 +896,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   const shared = {
     ...(tools ? { tools } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
+    ...(responseShield ? { responseShield } : {}),
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
   };
@@ -877,6 +973,11 @@ function parseConfigDocument(
   const configBaseDir = sourcePath ? dirname(resolve(sourcePath)) : undefined;
   const parseSharedFields = () => {
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
+    const responseShield = parseResponseShieldConfig(
+      parsed.responseShield,
+      "responseShield",
+      true
+    );
     const auth = parseAuthConfig(parsed.auth, "auth", configBaseDir);
     const authorization = parseAuthorizationConfig(
       parsed.authorization,
@@ -888,6 +989,7 @@ function parseConfigDocument(
     );
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
+    const dashboard = parseDashboardConfig(parsed.dashboard, "dashboard");
     const recipes = parseRecipesConfig(parsed.recipes, "recipes");
     return {
       cacheTtlSeconds:
@@ -895,6 +997,7 @@ function parseConfigDocument(
           ? 0
           : parseNonNegativeInteger(parsed.cacheTtlSeconds, "cacheTtlSeconds"),
       ...(cachePolicy ? { cachePolicy } : {}),
+      ...(responseShield ? { responseShield } : {}),
       maxConcurrency:
         parsed.maxConcurrency === undefined
           ? 20
@@ -978,6 +1081,7 @@ function parseConfigDocument(
       ...(abuseControls ? { abuseControls } : {}),
       ...(auditLog ? { auditLog } : {}),
       ...(metrics ? { metrics } : {}),
+      ...(dashboard ? { dashboard } : {}),
       ...(recipes ? { recipes } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {

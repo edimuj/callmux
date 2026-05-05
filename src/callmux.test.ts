@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createSign, generateKeyPairSync } from "node:crypto";
+import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -46,7 +47,7 @@ import {
   runDoctor,
   runServerTest,
 } from "./doctor.js";
-import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleRecipeDryRun, handleRecipeRun, handleStatus } from "./handlers.js";
+import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleRecipeDryRun, handleRecipeRun, handleSearchTools, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
 import { mapBounded, UpstreamManager } from "./upstream.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -57,6 +58,8 @@ import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
 import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
+import { createResponseStore } from "./response-store.js";
+import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -199,6 +202,39 @@ async function parseMcpResponseBody(res: Response): Promise<any> {
     return JSON.parse(dataLine.slice(6));
   }
   return res.json();
+}
+
+async function getFreePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", resolve);
+    server.once("error", reject);
+  });
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!address || typeof address === "string") {
+    throw new Error("failed to allocate test port");
+  }
+  return address.port;
+}
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 5000,
+  intervalMs = 50
+): Promise<void> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      if (await predicate()) return;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
+  throw new Error(`condition not met within ${timeoutMs}ms${detail}`);
 }
 
 async function captureStderr<T>(
@@ -1341,6 +1377,125 @@ test("shared listener setup helpers derive client URLs and start command", () =>
     renderSharedListenerStartCommand("http://0.0.0.0:4860", "/tmp/callmux.json"),
     "callmux --listen 4860 --host 0.0.0.0 --config /tmp/callmux.json"
   );
+});
+
+test("daemon plan renders user systemd install safely by default", () => {
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath: "/tmp/callmux.json",
+      binaryPath: "/usr/local/bin/callmux",
+      start: true,
+      enable: true,
+    },
+    {
+      platform: "linux",
+      homeDir: "/home/alice",
+      uid: 1000,
+      hasSystemctl: true,
+    }
+  );
+
+  assert.equal(plan.kind, "systemd");
+  assert.equal(plan.scope, "user");
+  assert.equal(plan.serviceFilePath, "/home/alice/.config/systemd/user/callmux.service");
+  assert.ok(plan.file?.content.includes("callmux-managed-daemon"));
+  assert.ok(plan.file?.content.includes('ExecStart="/usr/local/bin/callmux" --config "/tmp/callmux.json" --listen 4860'));
+  assert.deepEqual(plan.commands, [
+    ["systemctl", "--user", "daemon-reload"],
+    ["systemctl", "--user", "enable", "callmux.service"],
+    ["systemctl", "--user", "start", "callmux.service"],
+  ]);
+});
+
+test("daemon plan supports system scope and explicit host", () => {
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath: "/etc/callmux/config.json",
+      binaryPath: "/usr/bin/callmux",
+      scope: "system",
+      host: "0.0.0.0",
+      port: 4870,
+    },
+    {
+      platform: "linux",
+      homeDir: "/root",
+      uid: 1000,
+      hasSystemctl: true,
+    }
+  );
+
+  assert.equal(plan.scope, "system");
+  assert.equal(plan.serviceFilePath, "/etc/systemd/system/callmux.service");
+  assert.ok(plan.file?.content.includes("WantedBy=multi-user.target"));
+  assert.ok(plan.file?.content.includes('--host "0.0.0.0"'));
+  assert.deepEqual(plan.commands, [["systemctl", "daemon-reload"]]);
+});
+
+test("daemon plan runs JavaScript entrypoints through node", () => {
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath: "/tmp/callmux.json",
+      binaryPath: "/opt/callmux/dist/bin/callmux.js",
+    },
+    {
+      platform: "linux",
+      homeDir: "/home/alice",
+      uid: 1000,
+      hasSystemctl: true,
+    }
+  );
+
+  assert.ok(
+    plan.file?.content.includes(`ExecStart="${process.execPath}" "/opt/callmux/dist/bin/callmux.js" --config "/tmp/callmux.json" --listen 4860`)
+  );
+});
+
+test("daemon plan renders macOS LaunchAgent", () => {
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath: "/Users/alice/.config/callmux/config.json",
+      binaryPath: "/opt/homebrew/bin/callmux",
+      start: true,
+    },
+    {
+      platform: "darwin",
+      homeDir: "/Users/alice",
+      uid: 501,
+    }
+  );
+
+  assert.equal(plan.kind, "launchd");
+  assert.equal(plan.scope, "user");
+  assert.equal(plan.label, "dev.callmux.callmux");
+  assert.equal(plan.serviceFilePath, "/Users/alice/Library/LaunchAgents/dev.callmux.callmux.plist");
+  assert.ok(plan.file?.content.includes("<string>/opt/homebrew/bin/callmux</string>"));
+  assert.deepEqual(plan.commands, [
+    ["launchctl", "bootstrap", "gui/501", "/Users/alice/Library/LaunchAgents/dev.callmux.callmux.plist"],
+    ["launchctl", "kickstart", "-k", "gui/501/dev.callmux.callmux"],
+  ]);
+});
+
+test("daemon plan falls back to manual command on unsupported platforms", () => {
+  const plan = createDaemonPlan(
+    {
+      action: "install",
+      configPath: "/tmp/callmux.json",
+      binaryPath: "/usr/local/bin/callmux",
+    },
+    {
+      platform: "win32",
+      homeDir: "C:\\Users\\alice",
+    }
+  );
+
+  assert.equal(plan.supported, false);
+  assert.equal(plan.kind, "unsupported");
+  assert.equal(plan.commands.length, 0);
+  assert.match(formatDaemonPlan(plan), /Manual command:/);
 });
 
 test("client config helpers reject unsafe server names", () => {
@@ -3050,11 +3205,20 @@ function createMockUpstream(tools: Array<{ server: string; tool: Tool }>) {
   return upstream;
 }
 
-function mockTool(name: string, description?: string): Tool {
+function mockTool(name: string, description?: string, inputFields: string[] = []): Tool {
   return {
     name,
     ...(description ? { description } : {}),
-    inputSchema: { type: "object" as const },
+    inputSchema: {
+      type: "object" as const,
+      ...(inputFields.length > 0
+        ? {
+          properties: Object.fromEntries(
+            inputFields.map((field) => [field, { type: "string" }])
+          ),
+        }
+        : {}),
+    },
   };
 }
 
@@ -3285,6 +3449,97 @@ test("handleCall validates missing tool name", async () => {
   );
 });
 
+test("handleSearchTools ranks matching tools and returns input field hints", () => {
+  const upstream = createMockUpstream([
+    {
+      server: "github",
+      tool: mockTool(
+        "get_issue",
+        "Get a specific issue by number",
+        ["owner", "repo", "issue_number"]
+      ),
+    },
+    {
+      server: "browser",
+      tool: mockTool("browser_navigate", "Navigate to a URL", ["url"]),
+    },
+    {
+      server: "github",
+      tool: mockTool("list_pull_requests", "List pull requests", ["owner", "repo"]),
+    },
+  ]);
+
+  const result = handleSearchTools(upstream as never, undefined, {
+    query: "issue number",
+    limit: 5,
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    query: string;
+    found: number;
+    results: Array<{
+      tool: string;
+      name: string;
+      server: string;
+      inputFields?: string[];
+      score: number;
+    }>;
+  };
+  assert.equal(content.query, "issue number");
+  assert.equal(content.results[0].tool, "github__get_issue");
+  assert.equal(content.results[0].name, "get_issue");
+  assert.equal(content.results[0].server, "github");
+  assert.deepEqual(content.results[0].inputFields, ["issue_number", "owner", "repo"]);
+  assert.ok(content.results[0].score > 0);
+});
+
+test("handleSearchTools supports server filter and description truncation", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get a specific issue by number") },
+    { server: "browser", tool: mockTool("browser_navigate", "Navigate to a URL") },
+  ]);
+
+  const result = handleSearchTools(upstream as never, 12, {
+    query: "",
+    server: "github",
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    totalTools: number;
+    results: Array<{ name: string; description?: string }>;
+  };
+  assert.equal(content.totalTools, 1);
+  assert.deepEqual(content.results.map((tool) => tool.name), ["get_issue"]);
+  assert.equal(content.results[0].description, "Get a specif...");
+});
+
+test("handleSearchTools validates limit and unknown server", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const invalidLimit = handleSearchTools(upstream as never, undefined, {
+    query: "issue",
+    limit: 51,
+  });
+  assert.equal(invalidLimit.isError, true);
+  assert.equal(
+    (invalidLimit.structuredContent as { error: { code: string } }).error.code,
+    "invalid_arguments"
+  );
+
+  const unknownServer = handleSearchTools(upstream as never, undefined, {
+    server: "linear",
+  });
+  assert.equal(unknownServer.isError, true);
+  assert.equal(
+    (unknownServer.structuredContent as { error: { code: string } }).error.code,
+    "server_not_found"
+  );
+});
+
 const TEST_INSTANCE_IDENTITY = { instanceId: "test-instance" };
 
 test("handleStatus includes mode field", () => {
@@ -3402,6 +3657,7 @@ test("handleStatus includes recommendations by default", () => {
   assert.ok(content.recommendations!.some((r) => r.use === "callmux_batch"));
   assert.ok(content.recommendations!.some((r) => r.use === "callmux_pipeline"));
   assert.ok(content.recommendations!.some((r) => r.use === "callmux_dry_run"));
+  assert.ok(content.recommendations!.some((r) => r.use === "callmux_search_tools"));
   assert.ok(content.recommendations!.some((r) => r.use === "callmux_call"));
   assert.ok(
     content.recommendations!.some((r) => r.use === "server hint or qualified tool names")
@@ -3718,7 +3974,9 @@ test("meta-only proxy exposes only meta-tools", async () => {
 
   const allTools = (proxy as unknown as { allTools: Tool[] }).allTools;
   // allTools is empty until start() is called, but META_TOOLS should be the reference
-  assert.equal(META_TOOLS.length, 9);
+  assert.equal(META_TOOLS.length, 11);
+  assert.ok(META_TOOLS.some((t) => t.name === "callmux_search_tools"));
+  assert.ok(META_TOOLS.some((t) => t.name === "callmux_get_result"));
   assert.ok(META_TOOLS.some((t) => t.name === "callmux_call"));
   assert.ok(META_TOOLS.some((t) => t.name === "callmux_recipe_run"));
 });
@@ -3810,6 +4068,108 @@ test("loadConfig parses request body limits from file", async () => {
     assert.equal(config.allowRequestBodyMaxOverride, true);
     assert.equal((config.servers.github as StdioServerConfig).requestBodyMaxBytes, 4096);
     assert.equal((config.servers.linear as StdioServerConfig).requestBodyMaxBytes, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses response shield settings from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-response-shield-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: {
+            command: "node",
+            args: ["server.js"],
+            responseShield: {
+              enabled: false,
+              denyTools: ["get_secret"],
+            },
+          },
+        },
+        responseShield: {
+          enabled: true,
+          maxResultBytes: 1000,
+          maxStringChars: 200,
+          maxArrayItems: 10,
+          maxStoredResults: 5,
+          allowTools: ["get_*", "list_*"],
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.responseShield?.enabled, true);
+    assert.equal(config.responseShield?.maxResultBytes, 1000);
+    assert.equal(config.responseShield?.maxStringChars, 200);
+    assert.equal(config.responseShield?.maxArrayItems, 10);
+    assert.equal(config.responseShield?.maxStoredResults, 5);
+    assert.deepEqual(config.responseShield?.allowTools, ["get_*", "list_*"]);
+    assert.equal(
+      (config.servers.github as StdioServerConfig).responseShield?.enabled,
+      false
+    );
+    assert.deepEqual(
+      (config.servers.github as StdioServerConfig).responseShield?.denyTools,
+      ["get_secret"]
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses dashboard settings from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-dashboard-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {},
+        dashboard: {
+          enabled: true,
+          path: "ops",
+          maxEvents: 25,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.dashboard?.enabled, true);
+    assert.equal(config.dashboard?.path, "/ops");
+    assert.equal(config.dashboard?.maxEvents, 25);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects per-server response shield maxStoredResults", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-response-shield-invalid-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: {
+            command: "node",
+            args: ["server.js"],
+            responseShield: { maxStoredResults: 5 },
+          },
+        },
+      })
+    );
+
+    await assert.rejects(
+      () => loadConfig(configPath),
+      /maxStoredResults is only supported in global responseShield/
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -4853,6 +5213,192 @@ test("proxy routes callmux_dry_run to handleDryRun", async () => {
   assert.equal(content.summary.totalCalls, 1);
 });
 
+test("proxy routes callmux_search_tools to handleSearchTools", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as {
+    upstream: UpstreamManager;
+  }).upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue", "Get an issue") },
+  ]) as unknown as UpstreamManager;
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_search_tools", {
+    query: "issue",
+  });
+
+  const content = result.structuredContent as {
+    results: Array<{ tool: string }>;
+  };
+  assert.equal(content.results[0].tool, "get_issue");
+});
+
+test("proxy shields large proxied results and pages stored refs", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  const largeItems = Array.from({ length: 120 }, (_, index) => ({
+    id: index + 1,
+    name: `item-${index + 1}`,
+    body: "x".repeat(200),
+  }));
+
+  (proxy as unknown as {
+    upstream: {
+      callTool: () => Promise<CallToolResult>;
+      getServerNames: () => string[];
+      getServerTools: () => string[];
+      getServerInfo: () => { transport: string; state: string; connectDurationMs: number; totalTools: number; exposedTools: number };
+      getFailedServers: () => [];
+    };
+  }).upstream = {
+    async callTool() {
+      return textResult(JSON.stringify(largeItems));
+    },
+    getServerNames: () => ["default"],
+    getServerTools: () => ["large_list"],
+    getServerInfo: () => ({ transport: "stdio", state: "connected", connectDurationMs: 1, totalTools: 1, exposedTools: 1 }),
+    getFailedServers: () => [],
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const shielded = await harness.handleToolCall("large_list", {});
+  assert.equal(shielded.isError, undefined);
+  const shieldedContent = shielded.structuredContent as {
+    _callmux: { truncated: boolean; ref: string; originalBytes: number };
+  };
+  assert.equal(shieldedContent._callmux.truncated, true);
+  assert.match(shieldedContent._callmux.ref, /^r_/);
+  assert.ok(shieldedContent._callmux.originalBytes > 8192);
+
+  const page = await harness.handleToolCall("callmux_get_result", {
+    ref: shieldedContent._callmux.ref,
+    limit: 3,
+    fields: ["id"],
+  });
+  const pageContent = page.structuredContent as {
+    type: string;
+    total: number;
+    count: number;
+    hasMore: boolean;
+    data: Array<{ id: number; body?: string }>;
+  };
+  assert.equal(pageContent.type, "array");
+  assert.equal(pageContent.total, 120);
+  assert.equal(pageContent.count, 3);
+  assert.equal(pageContent.hasMore, true);
+  assert.deepEqual(pageContent.data, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+  const status = await harness.handleToolCall("callmux_status", {});
+  const statusContent = status.structuredContent as {
+    responseStore: { entries: number; totalStored: number; storedBytes: number };
+  };
+  assert.equal(statusContent.responseStore.entries, 1);
+  assert.equal(statusContent.responseStore.totalStored, 1);
+  assert.ok(statusContent.responseStore.storedBytes > 0);
+});
+
+test("callmux_get_result reports missing refs", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_get_result", {
+    ref: "r_missing",
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "result_not_found"
+  );
+});
+
+test("responseShield can be disabled per server", async () => {
+  const proxy = new CallmuxProxy({
+    servers: {
+      github: {
+        command: "ignored",
+        responseShield: { enabled: false },
+      },
+    },
+  });
+
+  const largeText = "x".repeat(100_000);
+  (proxy as unknown as {
+    upstream: {
+      callTool: () => Promise<CallToolResult>;
+      resolveServer: (tool: string) => { server: string; actualName: string } | null;
+    };
+  }).upstream = {
+    async callTool() {
+      return textResult(largeText);
+    },
+    resolveServer(tool: string) {
+      return tool === "github__large_result"
+        ? { server: "github", actualName: "large_result" }
+        : null;
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("github__large_result", {});
+  assert.equal(result.structuredContent, undefined);
+  assert.equal(result.content[0].type === "text" ? result.content[0].text : "", largeText);
+});
+
+test("responseShield denyTools skips matching tools", async () => {
+  const proxy = new CallmuxProxy({
+    servers: {
+      github: { command: "ignored" },
+    },
+    responseShield: {
+      denyTools: ["github__large_result"],
+    },
+  });
+
+  const largeText = "x".repeat(100_000);
+  (proxy as unknown as {
+    upstream: {
+      callTool: () => Promise<CallToolResult>;
+      resolveServer: (tool: string) => { server: string; actualName: string } | null;
+    };
+  }).upstream = {
+    async callTool() {
+      return textResult(largeText);
+    },
+    resolveServer(tool: string) {
+      return tool === "github__large_result"
+        ? { server: "github", actualName: "large_result" }
+        : null;
+    },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("github__large_result", {});
+  assert.equal(result.structuredContent, undefined);
+  assert.equal(result.content[0].type === "text" ? result.content[0].text : "", largeText);
+});
+
 test("proxy routes callmux_recipe_run to handleRecipeRun", async () => {
   const proxy = new CallmuxProxy({
     servers: { default: { command: "ignored" } },
@@ -5179,6 +5725,210 @@ test("listener applyRuntimeConfig updates runtime security settings", async () =
   assert.equal(internals.metrics.getPath(), "/metrics-secure");
 });
 
+test("listener applyReloadedState swaps structural listener state", () => {
+  const upstreamA = new UpstreamManager();
+  const upstreamB = new UpstreamManager();
+  const cacheA = new CallCache(0, undefined, {}, 100);
+  const cacheB = new CallCache(30, undefined, {}, 50);
+  const responseStore = createResponseStore({
+    servers: {},
+    responseShield: { maxStoredResults: 4 },
+  });
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {}, maxConcurrency: 10 },
+    upstream: upstreamA,
+    cache: cacheA,
+    responseStore,
+    allTools: [
+      { name: "old_tool", description: "Old tool", inputSchema: { type: "object" } },
+    ],
+    maxConcurrency: 10,
+  });
+
+  listener.applyReloadedState({
+    config: {
+      servers: {},
+      maxConcurrency: 3,
+      metaOnly: true,
+      descriptionMaxLength: 12,
+      responseShield: { maxStoredResults: 2 },
+    },
+    upstream: upstreamB,
+    cache: cacheB,
+    allTools: [
+      { name: "new_tool", description: "New tool", inputSchema: { type: "object" } },
+    ],
+    maxConcurrency: 3,
+  });
+
+  const internals = listener as unknown as {
+    options: {
+      config: { metaOnly?: boolean; descriptionMaxLength?: number };
+      upstream: UpstreamManager;
+      cache: CallCache;
+      allTools: Tool[];
+      maxConcurrency: number;
+      responseStore: unknown;
+    };
+    responseStore: unknown;
+  };
+  assert.equal(internals.options.upstream, upstreamB);
+  assert.equal(internals.options.cache, cacheB);
+  assert.equal(internals.options.responseStore, responseStore);
+  assert.equal(internals.responseStore, responseStore);
+  assert.equal(responseStore.stats().maxEntries, 2);
+  assert.equal(internals.options.allTools[0].name, "new_tool");
+  assert.equal(internals.options.maxConcurrency, 3);
+  assert.equal(internals.options.config.metaOnly, true);
+  assert.equal(internals.options.config.descriptionMaxLength, 12);
+
+  listener.recordConfigReload({ ok: false, error: "bad config" });
+  let diagnostics = listener.getRuntimeDiagnostics();
+  assert.ok(diagnostics.configReload?.lastReloadAt);
+  assert.equal(diagnostics.configReload?.lastReloadError, "bad config");
+
+  listener.recordConfigReload({ ok: true });
+  diagnostics = listener.getRuntimeDiagnostics();
+  assert.ok(diagnostics.configReload?.lastReloadAt);
+  assert.equal(diagnostics.configReload?.lastReloadError, undefined);
+});
+
+test("standalone listener hot-reloads config file changes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-hot-reload-"));
+  const configPath = join(dir, "callmux.json");
+  const port = await getFreePort();
+  const fixture = join(process.cwd(), "dist-test", "test-fixtures", "fake-mcp-server.js");
+
+  const writeConfig = async (toolName: string) => {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          fake: {
+            command: process.execPath,
+            args: [fixture],
+            env: {
+              FAKE_MCP_NAME: "fake",
+              FAKE_MCP_TOOLS: JSON.stringify([
+                { name: toolName, description: `Tool ${toolName}` },
+              ]),
+            },
+          },
+        },
+        strictStartup: true,
+      })
+    );
+  };
+
+  await writeConfig("old_tool");
+  const child = spawn(
+    process.execPath,
+    [
+      join(process.cwd(), "dist-test", "bin", "callmux.js"),
+      "--config",
+      configPath,
+      "--listen",
+      String(port),
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+
+  const mcpHeaders = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+  };
+
+  const initialize = async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0" },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const sessionId = res.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+    return sessionId;
+  };
+
+  const listTools = async (sessionId: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 2 }),
+    });
+    assert.equal(res.status, 200);
+    const body = await parseMcpResponseBody(res);
+    return body.result.tools as Tool[];
+  };
+
+  const callStatus = async (sessionId: string) => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "callmux_status",
+          arguments: { sessions: true, recommendations: false },
+        },
+        id: 3,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = await parseMcpResponseBody(res);
+    return JSON.parse(body.result.content[0].text) as {
+      listener?: { configReload?: { lastReloadAt?: string; lastReloadError?: string } };
+    };
+  };
+
+  try {
+    await waitFor(async () => {
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      return res.status === 200;
+    });
+    const sessionId = await initialize();
+    assert.ok((await listTools(sessionId)).some((tool) => tool.name === "old_tool"));
+
+    await writeConfig("new_tool");
+    await waitFor(async () =>
+      (await listTools(sessionId)).some((tool) => tool.name === "new_tool")
+    );
+
+    const status = await callStatus(sessionId);
+    assert.ok(status.listener?.configReload?.lastReloadAt);
+    assert.equal(status.listener?.configReload?.lastReloadError, undefined);
+  } finally {
+    child.kill("SIGTERM");
+    await Promise.race([
+      closed,
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  assert.match(stderr, /Watching config for hot reload/);
+  assert.match(stderr, /Reloaded config from/);
+});
+
 test("listener applyRuntimeConfig rejects insecure remote runtime config", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
@@ -5234,6 +5984,115 @@ test("listener /health returns ok with session count", async () => {
     const body = await res.json();
     assert.equal(body.status, "ok");
     assert.equal(body.sessions, 0);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener dashboard is disabled by default", async () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard`);
+    assert.equal(res.status, 404);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener dashboard serves read-only runtime data when enabled", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      dashboard: { enabled: true, maxEvents: 10 },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const html = await fetch(`http://127.0.0.1:${port}/dashboard`);
+    assert.equal(html.status, 200);
+    assert.match(await html.text(), /callmux dashboard/);
+
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(health.status, 200);
+    (listener as any).recordToolCallEvent(
+      "get_item",
+      { server: "fake", tool: "get_item" },
+      textResult("ok"),
+      Date.now() - 5,
+      true
+    );
+
+    const data = await fetch(`http://127.0.0.1:${port}/dashboard/data`);
+    assert.equal(data.status, 200);
+    const body = await data.json() as {
+      summary: { eventCount: number; maxEvents: number };
+      status: { listener: { activeSessions: number } };
+      events: Array<{ type: string; tool?: string; cacheHit?: boolean }>;
+    };
+    assert.equal(body.summary.maxEvents, 10);
+    assert.equal(body.status.listener.activeSessions, 0);
+    assert.ok(body.summary.eventCount >= 1);
+    assert.ok(body.events.some((event) => event.type === "tool_call" && event.tool === "get_item" && event.cacheHit === true));
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener dashboard uses listener authentication", async () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      dashboard: { enabled: true },
+      auth: {
+        mode: "bearer",
+        tokens: [{ id: "ops", token: "top-secret" }],
+      },
+    },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/dashboard`);
+    assert.equal(unauthorized.status, 401);
+
+    const authorized = await fetch(`http://127.0.0.1:${port}/dashboard`, {
+      headers: { Authorization: "Bearer top-secret" },
+    });
+    assert.equal(authorized.status, 200);
   } finally {
     await listener.close();
   }

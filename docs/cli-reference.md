@@ -22,6 +22,9 @@
 | `callmux client attach <client> --url <url> --bridge [--yes]` | Write stdio bridge config for a shared listener |
 | `callmux client detach <client> [--yes]` | Remove callmux from client config |
 | `callmux client print <client> [--url <url>] [--bridge]` | Output ready-to-paste snippet |
+| `callmux daemon install [--start] [--enable] [--dry-run]` | Install a background shared-listener daemon |
+| `callmux daemon status\|logs\|start\|stop\|restart` | Inspect or control the daemon |
+| `callmux daemon enable\|disable` | Enable or disable launch at login/boot |
 
 ---
 
@@ -112,6 +115,17 @@ callmux client print claude --url http://localhost:4860/sse
 callmux --listen 4860
 callmux --listen 4860 --host 0.0.0.0   # expose on all interfaces (e.g. Tailscale)
 ```
+
+### Install as a Daemon
+
+```bash
+callmux daemon install --config ~/.config/callmux/config.json --start --enable
+callmux daemon status
+callmux daemon logs
+callmux daemon restart
+```
+
+`daemon install` picks the safest supported backend automatically: Linux user systemd units by default, Linux system units with `--system`, and macOS user LaunchAgents. Use `--dry-run` to inspect the generated unit/plist and commands before making changes.
 
 ---
 

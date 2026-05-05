@@ -86,6 +86,7 @@
       "minimum": 1,
       "description": "Default max chars for tool descriptions in callmux_status (omit = no limit)"
     },
+    "responseShield": { "$ref": "#/$defs/globalResponseShield" },
     "requestBodyMaxBytes": {
       "type": "integer",
       "minimum": 0,
@@ -102,6 +103,7 @@
     "abuseControls": { "$ref": "#/$defs/abuseControlsConfig" },
     "auditLog": { "$ref": "#/$defs/auditLogConfig" },
     "metrics": { "$ref": "#/$defs/metricsConfig" },
+    "dashboard": { "$ref": "#/$defs/dashboardConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
       "default": false,
@@ -161,7 +163,8 @@
           "type": "integer",
           "minimum": 0,
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
-        }
+        },
+        "responseShield": { "$ref": "#/$defs/serverResponseShield" }
       },
       "not": { "required": ["url"] },
       "additionalProperties": false
@@ -200,7 +203,8 @@
           "type": "integer",
           "minimum": 0,
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
-        }
+        },
+        "responseShield": { "$ref": "#/$defs/serverResponseShield" }
       },
       "not": { "required": ["command"] },
       "additionalProperties": false
@@ -218,6 +222,116 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Never cache matching tools (exact names or 'prefix*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    },
+    "responseShieldBase": {
+      "type": "object",
+      "description": "Response shielding policy. Large results are compacted, stored, and returned with a callmux_get_result ref.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable response shielding"
+        },
+        "maxResultBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 65536,
+          "description": "Store and compact responses larger than this many serialized bytes"
+        },
+        "maxStringChars": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8192,
+          "description": "Truncate individual string fields longer than this many characters"
+        },
+        "maxArrayItems": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "Truncate arrays longer than this many items"
+        },
+        "allowTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Only shield matching tools (exact names or '*' wildcards)"
+        },
+        "denyTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Never shield matching tools (exact names or '*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    },
+    "globalResponseShield": {
+      "type": "object",
+      "description": "Global response shielding policy. Large results are compacted, stored, and returned with a callmux_get_result ref.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable response shielding"
+        },
+        "maxResultBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 65536,
+          "description": "Store and compact responses larger than this many serialized bytes"
+        },
+        "maxStringChars": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8192,
+          "description": "Truncate individual string fields longer than this many characters"
+        },
+        "maxArrayItems": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "Truncate arrays longer than this many items"
+        },
+        "maxStoredResults": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100,
+          "description": "Maximum stored full results before oldest refs are evicted"
+        },
+        "allowTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Only shield matching tools (exact names or '*' wildcards)"
+        },
+        "denyTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Never shield matching tools (exact names or '*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    },
+    "serverResponseShield": { "$ref": "#/$defs/responseShieldBase" },
+    "dashboardConfig": {
+      "type": "object",
+      "description": "Read-only listener dashboard configuration. Disabled by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable read-only dashboard endpoints"
+        },
+        "path": {
+          "type": "string",
+          "default": "/dashboard",
+          "description": "Dashboard base path"
+        },
+        "maxEvents": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 500,
+          "description": "Maximum runtime events kept in memory"
         }
       },
       "additionalProperties": false

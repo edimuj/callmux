@@ -9,7 +9,7 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -20,6 +20,8 @@ import {
   handleBatch,
   handlePipeline,
   handleCall,
+  handleSearchTools,
+  handleGetResult,
   handleDryRun,
   handleRecipeRun,
   handleRecipeDryRun,
@@ -40,6 +42,20 @@ import { errorResult } from "./results.js";
 import { AbuseController } from "./abuse.js";
 import { AuditLogger } from "./audit.js";
 import { PrometheusMetrics } from "./metrics.js";
+import {
+  createResponseStore,
+  ResponseStore,
+  resolveResponseShieldOptions,
+  shieldToolResult,
+  type ResponseShieldTarget,
+} from "./response-store.js";
+import {
+  extractToolError,
+  normalizeDashboardConfig,
+  renderDashboardHtml,
+  RuntimeEventStore,
+  type DashboardSnapshot,
+} from "./dashboard.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
@@ -72,6 +88,7 @@ export interface ListenerOptions {
   config: CallmuxConfig;
   upstream: UpstreamManager;
   cache: CallCache;
+  responseStore?: ResponseStore;
   allTools: Tool[];
   maxConcurrency: number;
 }
@@ -89,9 +106,15 @@ export class CallmuxListener {
   private abuseController: AbuseController | undefined;
   private auditLogger: AuditLogger;
   private metrics: PrometheusMetrics;
+  private responseStore: ResponseStore;
+  private dashboardConfig: ReturnType<typeof normalizeDashboardConfig>;
+  private runtimeEvents: RuntimeEventStore;
+  private lastReloadAt: string | undefined;
+  private lastReloadError: string | undefined;
 
   constructor(options: ListenerOptions) {
     this.options = options;
+    this.responseStore = options.responseStore ?? createResponseStore(options.config);
     this.authConfig = options.config.auth;
     this.globalRequestBodyMaxBytes =
       options.config.requestBodyMaxBytes ?? DEFAULT_REQUEST_BODY_MAX_BYTES;
@@ -105,6 +128,8 @@ export class CallmuxListener {
     }
     this.auditLogger = new AuditLogger(options.config.auditLog);
     this.metrics = new PrometheusMetrics(options.config.metrics);
+    this.dashboardConfig = normalizeDashboardConfig(options.config.dashboard);
+    this.runtimeEvents = new RuntimeEventStore(this.dashboardConfig.maxEvents);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture(options.config, this.authConfig);
   }
@@ -124,6 +149,7 @@ export class CallmuxListener {
       : undefined;
     const nextAuditLogger = new AuditLogger(config.auditLog);
     const nextMetrics = new PrometheusMetrics(config.metrics);
+    const nextDashboardConfig = normalizeDashboardConfig(config.dashboard);
 
     this.validateSecurityPosture(config, nextAuthConfig);
 
@@ -138,7 +164,40 @@ export class CallmuxListener {
     this.abuseController = nextAbuseController;
     this.auditLogger = nextAuditLogger;
     this.metrics = nextMetrics;
+    this.dashboardConfig = nextDashboardConfig;
+    this.runtimeEvents.setMaxEvents(nextDashboardConfig.maxEvents);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
+  }
+
+  applyReloadedState(next: {
+    config: CallmuxConfig;
+    upstream: UpstreamManager;
+    cache: CallCache;
+    allTools: Tool[];
+    maxConcurrency: number;
+  }): void {
+    this.applyRuntimeConfig(next.config);
+    this.responseStore.setMaxEntries(next.config.responseShield?.maxStoredResults);
+    this.options = {
+      ...this.options,
+      config: next.config,
+      upstream: next.upstream,
+      cache: next.cache,
+      responseStore: this.responseStore,
+      allTools: next.allTools,
+      maxConcurrency: next.maxConcurrency,
+    };
+  }
+
+  recordConfigReload(result: { ok: boolean; error?: string }): void {
+    this.lastReloadAt = new Date().toISOString();
+    this.lastReloadError = result.ok ? undefined : result.error;
+    this.runtimeEvents.append({
+      type: "config_reload",
+      timestamp: this.lastReloadAt,
+      success: result.ok,
+      ...(result.error ? { error: result.error } : {}),
+    });
   }
 
   getRuntimeDiagnostics(): ListenerRuntimeDiagnostics {
@@ -149,6 +208,14 @@ export class CallmuxListener {
     }
 
     return {
+      ...((this.lastReloadAt || this.lastReloadError)
+        ? {
+            configReload: {
+              ...(this.lastReloadAt ? { lastReloadAt: this.lastReloadAt } : {}),
+              ...(this.lastReloadError ? { lastReloadError: this.lastReloadError } : {}),
+            },
+          }
+        : {}),
       activeSessions: this.sessions.size,
       sessions: Array.from(this.sessions.entries())
         .map(([id, session]) => ({
@@ -269,6 +336,8 @@ export class CallmuxListener {
           method === "GET"
         ) {
           this.handleMetrics(res, context);
+        } else if (this.isDashboardPath(path)) {
+          this.handleDashboard(req, res, path, context);
         } else if (path === "/sse" && req.method === "GET") {
           await this.handleSseConnect(req, res, context);
         } else if (path === "/messages" && req.method === "POST") {
@@ -302,6 +371,79 @@ export class CallmuxListener {
         this.writeJsonRpcError(res, 500, context, -32603, "Internal server error");
       }
     }
+  }
+
+  private isDashboardPath(path: string): boolean {
+    if (!this.dashboardConfig.enabled) return false;
+    const base = this.dashboardConfig.path;
+    return path === base || path === `${base}/data` || path === `${base}/events`;
+  }
+
+  private handleDashboard(
+    req: IncomingMessage,
+    res: ServerResponse,
+    path: string,
+    context: RequestContext
+  ): void {
+    if (req.method !== "GET") {
+      this.writeJson(res, 405, context, { error: "Method not allowed" });
+      return;
+    }
+
+    const base = this.dashboardConfig.path;
+    if (path === base) {
+      const html = renderDashboardHtml(this.dashboardConfig);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    }
+
+    if (path === `${base}/data`) {
+      this.writeJson(res, 200, context, this.createDashboardSnapshot());
+      return;
+    }
+
+    if (path === `${base}/events`) {
+      this.handleDashboardEvents(res);
+      return;
+    }
+
+    this.writeJson(res, 404, context, { error: "Not found" });
+  }
+
+  private createDashboardSnapshot(): DashboardSnapshot {
+    const status = handleStatus(
+      this.options.upstream,
+      this.options.cache,
+      this.options.maxConcurrency,
+      this.options.config.metaOnly ?? false,
+      this.options.config.descriptionMaxLength,
+      this.options.upstream.getInstanceIdentity(),
+      { sessions: true, recommendations: false },
+      this.getRuntimeDiagnostics(),
+      this.options.config.recipes,
+      this.responseStore
+    ).structuredContent;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      summary: this.runtimeEvents.stats(),
+      status,
+      events: this.runtimeEvents.list(),
+    };
+  }
+
+  private handleDashboardEvents(res: ServerResponse): void {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
+    res.write(`event: snapshot\ndata: ${JSON.stringify(this.createDashboardSnapshot())}\n\n`);
+    const unsubscribe = this.runtimeEvents.subscribe((event) => {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    });
+    res.on("close", unsubscribe);
   }
 
   // ─── Streamable HTTP ────────────────────────────────────────────
@@ -570,7 +712,12 @@ export class CallmuxListener {
       );
     };
 
-    if (name === "callmux_status" || name === "callmux_cache_clear") {
+    if (
+      name === "callmux_status" ||
+      name === "callmux_search_tools" ||
+      name === "callmux_get_result" ||
+      name === "callmux_cache_clear"
+    ) {
       return false;
     }
 
@@ -636,67 +783,107 @@ export class CallmuxListener {
   // ─── Session factory ───────────────────────────────────────────
 
   private createSession(transport: Transport): Server {
-    const { upstream, cache, allTools, maxConcurrency, config } = this.options;
-
     const server = new Server(
       { name: "callmux", version: "0.1.0" },
       { capabilities: { tools: {} } }
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: allTools,
+      tools: this.options.allTools,
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const { upstream, cache, maxConcurrency, config } = this.options;
       const name = request.params.name;
       const args = request.params.arguments;
+      const startedAt = Date.now();
+      let cacheHit = false;
+      let target: ResponseShieldTarget | undefined;
       const principal = this.authzContext.getStore();
       const authz = this.authorizeToolCall(name, args, principal);
       if (!authz.allowed) {
-        return errorResult("authorization_denied", "Authorization policy denied tool call", {
+        const denied = errorResult("authorization_denied", "Authorization policy denied tool call", {
           code: authz.code,
           reason: authz.reason,
           ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
           ...(authz.tool ? { tool: authz.tool } : {}),
         });
+        this.recordToolCallEvent(name, target, denied, startedAt);
+        return denied;
       }
       const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
       const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
         ? await this.resolveToolCallContext(session, server, extra)
         : this.bareToolCallContext(extra);
 
+      let result: CallToolResult;
       switch (name) {
         case "callmux_parallel":
-          return handleParallel(upstream, cache, args, maxConcurrency, toolContext);
+          target = { tool: name };
+          result = this.shieldResult(
+            target,
+            await handleParallel(upstream, cache, args, maxConcurrency, toolContext)
+          );
+          break;
         case "callmux_batch":
-          return handleBatch(upstream, cache, args, maxConcurrency, toolContext);
+          target = { tool: name };
+          result = this.shieldResult(
+            target,
+            await handleBatch(upstream, cache, args, maxConcurrency, toolContext)
+          );
+          break;
         case "callmux_pipeline":
-          return handlePipeline(upstream, cache, args, toolContext);
+          target = { tool: name };
+          result = this.shieldResult(
+            target,
+            await handlePipeline(upstream, cache, args, toolContext)
+          );
+          break;
         case "callmux_call":
-          return handleCall(upstream, cache, args, toolContext);
+          target = this.responseShieldTarget(upstream, name, args);
+          result = this.shieldResult(
+            target,
+            await handleCall(upstream, cache, args, toolContext)
+          );
+          break;
+        case "callmux_search_tools":
+          result = handleSearchTools(upstream, config.descriptionMaxLength, args);
+          break;
+        case "callmux_get_result":
+          target = { tool: name };
+          result = handleGetResult(this.responseStore, args);
+          break;
         case "callmux_cache_clear":
-          return handleCacheClear(cache, args);
+          result = handleCacheClear(cache, args);
+          break;
         case "callmux_dry_run":
-          return handleDryRun(upstream, cache, args, toolContext);
+          result = await handleDryRun(upstream, cache, args, toolContext);
+          break;
         case "callmux_recipe_run":
-          return handleRecipeRun(
-            upstream,
-            cache,
-            config.recipes,
-            args,
-            maxConcurrency,
-            toolContext
+          target = { tool: name };
+          result = this.shieldResult(
+            target,
+            await handleRecipeRun(
+              upstream,
+              cache,
+              config.recipes,
+              args,
+              maxConcurrency,
+              toolContext
+            )
           );
+          break;
         case "callmux_recipe_dry_run":
-          return handleRecipeDryRun(
+          result = await handleRecipeDryRun(
             upstream,
             cache,
             config.recipes,
             args,
             toolContext
           );
+          break;
         case "callmux_status":
-          return handleStatus(
+          result = handleStatus(
             upstream,
             cache,
             maxConcurrency,
@@ -705,21 +892,93 @@ export class CallmuxListener {
             upstream.getInstanceIdentity(),
             args,
             this.getRuntimeDiagnostics(),
-            config.recipes
+            config.recipes,
+            this.responseStore
           );
+          break;
+        default: {
+          const cacheScope = upstream.cacheScopeForCall(name, undefined, toolContext);
+          const cached = cache.get(name, args, undefined, cacheScope);
+          target = this.responseShieldTarget(upstream, name, args);
+          if (cached) {
+            cacheHit = true;
+            result = this.shieldResult(target, cached);
+          } else {
+            const upstreamResult = await upstream.callTool(name, args, undefined, toolContext);
+            cache.set(name, args, upstreamResult, undefined, cacheScope);
+            result = this.shieldResult(target, upstreamResult);
+          }
+          break;
+        }
       }
 
-      // Proxied tool — check cache first
-      const cacheScope = upstream.cacheScopeForCall(name, undefined, toolContext);
-      const cached = cache.get(name, args, undefined, cacheScope);
-      if (cached) return cached;
-
-      const result = await upstream.callTool(name, args, undefined, toolContext);
-      cache.set(name, args, result, undefined, cacheScope);
+      this.recordToolCallEvent(name, target, result, startedAt, cacheHit);
       return result;
     });
 
     return server;
+  }
+
+  private responseShieldTarget(
+    upstream: UpstreamManager,
+    tool: string,
+    args?: Record<string, unknown>
+  ): ResponseShieldTarget {
+    if (tool === "callmux_call" && args && typeof args.tool === "string") {
+      const server = typeof args.server === "string" ? args.server : undefined;
+      const resolved = upstream.resolveServer(args.tool, server);
+      if (resolved && !("error" in resolved)) {
+        return { tool: resolved.actualName, server: resolved.server };
+      }
+      return { tool: args.tool, ...(server ? { server } : {}) };
+    }
+
+    const separatorIndex = tool.indexOf("__");
+    if (separatorIndex > 0) {
+      return {
+        tool: tool.slice(separatorIndex + 2),
+        server: tool.slice(0, separatorIndex),
+      };
+    }
+
+    const resolved = upstream.resolveServer(tool);
+    if (resolved && !("error" in resolved)) {
+      return { tool: resolved.actualName, server: resolved.server };
+    }
+
+    return { tool };
+  }
+
+  private shieldResult(
+    target: ResponseShieldTarget,
+    result: CallToolResult
+  ): CallToolResult {
+    return shieldToolResult(
+      this.responseStore,
+      target,
+      result,
+      resolveResponseShieldOptions(this.options.config, target)
+    );
+  }
+
+  private recordToolCallEvent(
+    tool: string,
+    target: ResponseShieldTarget | undefined,
+    result: CallToolResult,
+    startedAt: number,
+    cacheHit?: boolean
+  ): void {
+    this.runtimeEvents.append({
+      type: "tool_call",
+      timestamp: new Date().toISOString(),
+      tool,
+      ...(target?.server ? { server: target.server } : {}),
+      ...(target?.tool ? { targetTool: target.tool } : {}),
+      durationMs: Date.now() - startedAt,
+      success: result.isError !== true,
+      ...(cacheHit ? { cacheHit } : {}),
+      ...(result.isError ? { error: extractToolError(result) } : {}),
+    });
   }
 
   private validateSecurityPosture(
@@ -807,6 +1066,16 @@ export class CallmuxListener {
         ...(context.principal ? { principal: context.principal } : {}),
         ...(context.payload !== undefined ? { payload: context.payload } : {}),
       });
+      this.runtimeEvents.append({
+        type: "http_request",
+        timestamp: new Date().toISOString(),
+        requestId: context.requestId,
+        method: context.method,
+        path: context.path,
+        status: res.statusCode,
+        durationMs,
+        ...(context.principal ? { principal: `${context.principal.kind}:${context.principal.id}` } : {}),
+      });
     };
 
     res.once("finish", finalize);
@@ -873,8 +1142,16 @@ export class CallmuxListener {
       return `${resolved.server}__${resolved.actualName}`;
     };
 
-    if (name === "callmux_status" || name === "callmux_cache_clear") {
+    if (
+      name === "callmux_status" ||
+      name === "callmux_search_tools" ||
+      name === "callmux_cache_clear"
+    ) {
       return [];
+    }
+
+    if (name === "callmux_get_result") {
+      return ["callmux_get_result"];
     }
 
     if (name === "callmux_recipe_run" || name === "callmux_recipe_dry_run") {
@@ -1021,7 +1298,7 @@ export class CallmuxListener {
     res: ServerResponse,
     status: number,
     _context: RequestContext,
-    payload: Record<string, unknown>
+    payload: unknown
   ): void {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(payload));
@@ -1196,6 +1473,15 @@ export class CallmuxListener {
       if (!resolved || "error" in resolved) return;
       targets.add(resolved.server);
     };
+
+    if (
+      name === "callmux_status" ||
+      name === "callmux_search_tools" ||
+      name === "callmux_get_result" ||
+      name === "callmux_cache_clear"
+    ) {
+      return [];
+    }
 
     if (name === "callmux_call" && isRecord(args)) {
       addResolvedToolTarget(args.tool, args.server);

@@ -6,13 +6,13 @@
 
 Every tool definition in the system prompt costs tokens on every API turn. With multiple servers, 50-100+ tool definitions can dominate the prompt — and they're re-processed by the model on every single message, even when the agent only uses a few tools.
 
-**Meta-only mode** hides all proxied tools and exposes only the 9 callmux meta-tools. The agent discovers available tools via `callmux_status` and invokes them through `callmux_call`, recipes, or the batch/parallel meta-tools.
+**Meta-only mode** hides all proxied tools and exposes only the 11 callmux meta-tools. The agent discovers available tools via `callmux_search_tools` or `callmux_status` and invokes them through `callmux_call`, recipes, or the batch/parallel meta-tools.
 
 | | Standard Mode | Meta-Only Mode |
 |:---|:---|:---|
-| Tools in listing | All downstream + 9 meta-tools | 9 meta-tools only |
+| Tools in listing | All downstream + 11 meta-tools | 11 meta-tools only |
 | Single tool call | Direct by name | `callmux_call` |
-| Tool discovery | Automatic (in listing) | `callmux_status` with `descriptions: true` |
+| Tool discovery | Automatic (in listing) | `callmux_search_tools` or `callmux_status` with `descriptions: true` |
 | System prompt size | Grows with server count | Fixed at 9 tools |
 
 ---
@@ -52,7 +52,17 @@ In meta-only mode, the agent follows this workflow:
 → Returns: server names, tool counts, cache state, mode
 ```
 
-### 2. Discover tools
+### 2. Search tools
+
+```json
+// callmux_search_tools
+{ "query": "github issue", "limit": 5 }
+→ Returns matching callable tool names, servers, descriptions, scores, and input field hints
+```
+
+Use `server` to narrow results when you already know the target downstream server.
+
+### 3. List tools
 
 ```json
 // callmux_status with descriptions
@@ -60,9 +70,9 @@ In meta-only mode, the agent follows this workflow:
 → Returns: tool names + truncated descriptions per server
 ```
 
-The agent calls this once at session start, then knows what's available. Use `descriptionMaxLength` to control description verbosity.
+This is useful for browsing the whole exposed surface. Use `descriptionMaxLength` to control description verbosity.
 
-### 3. Call tools
+### 4. Call tools
 
 Single tool call:
 ```json
@@ -79,6 +89,13 @@ Parallel calls:
     { "tool": "get_issue", "server": "github", "arguments": { "number": 2 } }
   ]
 }
+```
+
+If a downstream response is too large, callmux returns a `_callmux.ref` with a compact preview. Page through the full stored result with:
+
+```json
+// callmux_get_result
+{ "ref": "r_...", "offset": 0, "limit": 50, "fields": ["id", "name"] }
 ```
 
 Batch, pipeline, and recipe calls work identically to standard mode.

@@ -33,6 +33,32 @@ callmux --listen 4860 --host 0.0.0.0
 
 When binding to a non-loopback host, callmux requires auth configuration unless `--allow-insecure-remote-listener` is explicitly set. See [Enterprise Deployment](enterprise.md#authentication) for auth setup.
 
+### Background Daemon
+
+For a persistent shared listener, install callmux as a daemon:
+
+```bash
+callmux daemon install --config ~/.config/callmux/config.json --start --enable
+```
+
+callmux chooses the safest supported backend for the host:
+
+- Linux: user-scoped `systemd` unit by default (`~/.config/systemd/user/callmux.service`)
+- Linux with `--system`: system `systemd` unit (`/etc/systemd/system/callmux.service`)
+- macOS: user LaunchAgent (`~/Library/LaunchAgents/dev.callmux.callmux.plist`)
+
+Useful commands:
+
+```bash
+callmux daemon status
+callmux daemon logs
+callmux daemon restart
+callmux daemon stop
+callmux daemon uninstall
+```
+
+Use `--dry-run` with `install` or `uninstall` to preview generated files and commands. callmux marks generated daemon files and refuses to overwrite or remove unmanaged files unless `--force` is provided.
+
 ---
 
 ## Client Config
@@ -133,23 +159,53 @@ If a stdio server should always run from the configured/process cwd regardless o
 | `/sse` | Server-Sent Events | Legacy transport for older clients |
 | `/health` | HTTP GET | Server status and active session count |
 | `/metrics` | HTTP GET | Prometheus metrics (when [enabled](enterprise.md#prometheus-metrics)) |
+| `/dashboard` | HTTP GET | Read-only dashboard (when enabled) |
 
 ---
 
-## SIGHUP Hot-Reload
+## Read-Only Dashboard
 
-In shared listener mode launched from a config file, you can hot-reload runtime settings with `SIGHUP`:
+The dashboard is disabled by default. Enable it in config:
+
+```json
+{
+  "dashboard": {
+    "enabled": true,
+    "path": "/dashboard",
+    "maxEvents": 500
+  }
+}
+```
+
+When enabled, callmux serves:
+
+- `/dashboard` — browser UI
+- `/dashboard/data` — JSON snapshot for the UI
+- `/dashboard/events` — SSE stream for live refreshes
+
+The dashboard shows server health, active sessions, cache and response-store stats, recent HTTP requests, tool calls, cache hits, config reloads, and recent errors. It is read-only in this version; server editing will come later.
+
+If listener auth is configured, dashboard requests require the same auth as `/mcp`.
+
+---
+
+## Config Hot-Reload
+
+In shared listener mode launched from a config file, callmux watches the config file and hot-reloads changes automatically. You can also trigger the same reload path with `SIGHUP`:
 
 ```bash
 kill -HUP <callmux-pid>
 ```
 
+callmux validates and connects the new upstream set before swapping it into the live listener. If parsing, validation, or upstream startup fails, the old runtime stays active and `callmux_status` reports the latest reload error under `listener.configReload`.
+
 **Reloads** (no restart needed):
+- `servers`, tool wiring, cache settings, recipes, `metaOnly`, `maxConcurrency`
 - `auth`, `authorization`, `abuseControls`, `auditLog`, `metrics`
 - `requestBodyMaxBytes`, `allowRequestBodyMaxOverride`, `allowInsecureRemoteListener`
+- `responseShield`, `dashboard`
 
-**Requires restart** (structural changes):
-- `servers`, `recipes`, tool wiring, `metaOnly`, `maxConcurrency`
+In-flight requests continue on the runtime they started with. New requests use the reloaded runtime after the swap, and stored `callmux_get_result` refs remain available across successful reloads until evicted.
 
 ---
 
