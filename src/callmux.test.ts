@@ -6087,6 +6087,63 @@ test("RuntimeEventStore tracks total events separately from retained history", (
   assert.deepEqual(store.list().map((event) => event.type === "http_request" ? event.path : ""), ["/request-1", "/request-2"]);
 });
 
+test("RuntimeEventStore tracks callmux and real tool call totals", () => {
+  const store = new RuntimeEventStore(10);
+  store.append({
+    type: "tool_call",
+    timestamp: new Date(0).toISOString(),
+    tool: "callmux_parallel",
+    toolKind: "callmux_meta",
+    operation: "parallel",
+    callmuxToolCalls: 1,
+    realToolCalls: 3,
+    downstreamTargets: [{ server: "github", tool: "get_issue", count: 3 }],
+    durationMs: 1,
+    success: true,
+  });
+
+  assert.equal(store.stats().callmuxToolCalls, 1);
+  assert.equal(store.stats().realToolCalls, 3);
+});
+
+test("listener dashboard summarizes meta-tool fanout without arguments", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+    { server: "github", tool: mockTool("list_issues") },
+  ]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const summary = (listener as any).summarizeDashboardToolCall(
+    "callmux_parallel",
+    {
+      calls: [
+        { tool: "get_issue", server: "github", arguments: { token: "secret" } },
+        { tool: "list_issues", server: "github", arguments: { token: "secret" } },
+        { tool: "get_issue", server: "github", arguments: { token: "secret" } },
+      ],
+    },
+    textResult("ok")
+  );
+
+  assert.equal(summary.toolKind, "callmux_meta");
+  assert.equal(summary.operation, "parallel");
+  assert.equal(summary.callmuxToolCalls, 1);
+  assert.equal(summary.realToolCalls, 3);
+  assert.deepEqual(summary.downstreamTargets, [
+    { server: "github", tool: "get_issue", count: 2 },
+    { server: "github", tool: "list_issues", count: 1 },
+  ]);
+  assert.equal(JSON.stringify(summary).includes("secret"), false);
+});
+
 test("listener dashboard uses listener authentication", async () => {
   const listener = new CallmuxListener({
     port: 0,

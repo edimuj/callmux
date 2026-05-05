@@ -82,6 +82,20 @@ interface RequestContext {
 
 type JsonRpcId = string | number | null;
 
+interface DashboardDownstreamTarget {
+  server?: string;
+  tool: string;
+  count: number;
+}
+
+interface DashboardToolCallSummary {
+  toolKind: "callmux_meta" | "downstream";
+  operation: string;
+  callmuxToolCalls: number;
+  realToolCalls: number;
+  downstreamTargets: DashboardDownstreamTarget[];
+}
+
 export interface ListenerOptions {
   port: number;
   host?: string;
@@ -808,7 +822,7 @@ export class CallmuxListener {
           ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
           ...(authz.tool ? { tool: authz.tool } : {}),
         });
-        this.recordToolCallEvent(name, target, denied, startedAt);
+        this.recordToolCallEvent(name, target, denied, startedAt, false, args);
         return denied;
       }
       const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
@@ -912,7 +926,7 @@ export class CallmuxListener {
         }
       }
 
-      this.recordToolCallEvent(name, target, result, startedAt, cacheHit);
+      this.recordToolCallEvent(name, target, result, startedAt, cacheHit, args);
       return result;
     });
 
@@ -966,19 +980,182 @@ export class CallmuxListener {
     target: ResponseShieldTarget | undefined,
     result: CallToolResult,
     startedAt: number,
-    cacheHit?: boolean
+    cacheHit?: boolean,
+    args?: unknown
   ): void {
+    const summary = this.summarizeDashboardToolCall(tool, args, result, target);
     this.runtimeEvents.append({
       type: "tool_call",
       timestamp: new Date().toISOString(),
       tool,
       ...(target?.server ? { server: target.server } : {}),
       ...(target?.tool ? { targetTool: target.tool } : {}),
+      ...summary,
       durationMs: Date.now() - startedAt,
       success: result.isError !== true,
       ...(cacheHit ? { cacheHit } : {}),
       ...(result.isError ? { error: extractToolError(result) } : {}),
     });
+  }
+
+  private summarizeHttpRequestPayload(payload: unknown): Partial<{
+    jsonRpcMethod: string;
+    jsonRpcTool: string;
+    jsonRpcRequestCount: number;
+    callmuxToolCalls: number;
+    realToolCalls: number;
+    downstreamTargets: DashboardDownstreamTarget[];
+  }> {
+    const requests = (Array.isArray(payload) ? payload : [payload]).filter(isRecord);
+    if (requests.length === 0) return {};
+
+    const methods = [...new Set(
+      requests
+        .map((request) => typeof request.method === "string" ? request.method : undefined)
+        .filter((method): method is string => method !== undefined)
+    )];
+    let callmuxToolCalls = 0;
+    let realToolCalls = 0;
+    const targets: DashboardDownstreamTarget[] = [];
+    const tools: string[] = [];
+
+    for (const request of requests) {
+      if (request.method !== "tools/call" || !isRecord(request.params)) continue;
+      const name = typeof request.params.name === "string" ? request.params.name : undefined;
+      if (!name) continue;
+      tools.push(name);
+      const summary = this.summarizeDashboardToolCall(
+        name,
+        request.params.arguments,
+        undefined,
+        undefined
+      );
+      callmuxToolCalls += summary.callmuxToolCalls;
+      realToolCalls += summary.realToolCalls;
+      targets.push(...summary.downstreamTargets);
+    }
+
+    return {
+      ...(methods.length > 0 ? { jsonRpcMethod: methods.join(", ") } : {}),
+      ...(tools.length > 0 ? { jsonRpcTool: [...new Set(tools)].join(", ") } : {}),
+      jsonRpcRequestCount: requests.length,
+      ...(callmuxToolCalls > 0 ? { callmuxToolCalls } : {}),
+      ...(realToolCalls > 0 ? { realToolCalls } : {}),
+      ...(targets.length > 0 ? { downstreamTargets: this.aggregateDashboardTargets(targets) } : {}),
+    };
+  }
+
+  private summarizeDashboardToolCall(
+    name: string,
+    args: unknown,
+    result?: CallToolResult,
+    target?: ResponseShieldTarget
+  ): DashboardToolCallSummary {
+    const isMeta = name.startsWith("callmux_");
+    const downstreamTargets = this.dashboardTargetsForToolCall(name, args, result, target);
+    return {
+      toolKind: isMeta ? "callmux_meta" : "downstream",
+      operation: isMeta ? name.slice("callmux_".length) : "direct",
+      callmuxToolCalls: isMeta ? 1 : 0,
+      realToolCalls: downstreamTargets.reduce((sum, item) => sum + item.count, 0),
+      downstreamTargets,
+    };
+  }
+
+  private dashboardTargetsForToolCall(
+    name: string,
+    args: unknown,
+    result?: CallToolResult,
+    target?: ResponseShieldTarget
+  ): DashboardDownstreamTarget[] {
+    const upstream = this.options.upstream;
+    const resolvedTarget = (
+      toolName: unknown,
+      serverHint: unknown,
+      count = 1
+    ): DashboardDownstreamTarget[] => {
+      if (typeof toolName !== "string" || toolName.length === 0 || count <= 0) {
+        return [];
+      }
+      const server = typeof serverHint === "string" && serverHint.length > 0
+        ? serverHint
+        : undefined;
+      const resolved = upstream.resolveServer(toolName, server);
+      if (resolved && !("error" in resolved)) {
+        return [{ server: resolved.server, tool: resolved.actualName, count }];
+      }
+      if (target?.tool || target?.server) {
+        return [{ ...(target.server ? { server: target.server } : {}), tool: target.tool ?? toolName, count }];
+      }
+      return server ? [{ server, tool: toolName, count }] : [];
+    };
+
+    if (name === "callmux_call") {
+      if (!isRecord(args)) return [];
+      return resolvedTarget(args.tool, args.server);
+    }
+
+    if (name === "callmux_batch") {
+      if (!isRecord(args) || !Array.isArray(args.items)) return [];
+      return resolvedTarget(args.tool, args.server, args.items.length);
+    }
+
+    if (name === "callmux_parallel") {
+      if (!isRecord(args) || !Array.isArray(args.calls)) return [];
+      const targets: DashboardDownstreamTarget[] = [];
+      for (const call of args.calls) {
+        if (!isRecord(call)) continue;
+        targets.push(...resolvedTarget(call.tool, call.server));
+      }
+      return this.aggregateDashboardTargets(targets);
+    }
+
+    if (name === "callmux_pipeline") {
+      if (!isRecord(args) || !Array.isArray(args.steps)) return [];
+      const structured = isRecord(result?.structuredContent) ? result.structuredContent : undefined;
+      const actualStepCount = Array.isArray(structured?.steps)
+        ? structured.steps.length
+        : args.steps.length;
+      const targets: DashboardDownstreamTarget[] = [];
+      for (const step of args.steps.slice(0, actualStepCount)) {
+        if (!isRecord(step)) continue;
+        targets.push(...resolvedTarget(step.tool, step.server));
+      }
+      return this.aggregateDashboardTargets(targets);
+    }
+
+    if (name === "callmux_recipe_run" && isRecord(args)) {
+      const expanded = expandRecipeInvocation(this.options.config.recipes, args);
+      if (!isRecord(expanded) || !isRecord(expanded.args) || typeof expanded.args.mode !== "string") {
+        return [];
+      }
+      const expandedTool = expanded.args.mode === "call"
+        ? "callmux_call"
+        : `callmux_${expanded.args.mode}`;
+      return this.dashboardTargetsForToolCall(expandedTool, expanded.args, result);
+    }
+
+    if (name.startsWith("callmux_")) return [];
+
+    return resolvedTarget(name, undefined);
+  }
+
+  private aggregateDashboardTargets(
+    targets: DashboardDownstreamTarget[]
+  ): DashboardDownstreamTarget[] {
+    const byKey = new Map<string, DashboardDownstreamTarget>();
+    for (const target of targets) {
+      const key = `${target.server ?? ""}\0${target.tool}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.count += target.count;
+      } else {
+        byKey.set(key, { ...target });
+      }
+    }
+    return [...byKey.values()].sort((left, right) =>
+      `${left.server ?? ""}__${left.tool}`.localeCompare(`${right.server ?? ""}__${right.tool}`)
+    );
   }
 
   private validateSecurityPosture(
@@ -1075,6 +1252,7 @@ export class CallmuxListener {
         path: context.path,
         status: res.statusCode,
         durationMs,
+        ...this.summarizeHttpRequestPayload(context.payload),
         ...(context.principal ? { principal: `${context.principal.kind}:${context.principal.id}` } : {}),
       });
     };

@@ -13,6 +13,12 @@ type RuntimeEvent =
       status: number;
       durationMs: number;
       principal?: string;
+      jsonRpcMethod?: string;
+      jsonRpcTool?: string;
+      jsonRpcRequestCount?: number;
+      callmuxToolCalls?: number;
+      realToolCalls?: number;
+      downstreamTargets?: DashboardDownstreamTarget[];
     }
   | {
       type: "tool_call";
@@ -20,6 +26,11 @@ type RuntimeEvent =
       tool: string;
       server?: string;
       targetTool?: string;
+      toolKind?: "callmux_meta" | "downstream";
+      operation?: string;
+      callmuxToolCalls?: number;
+      realToolCalls?: number;
+      downstreamTargets?: DashboardDownstreamTarget[];
       durationMs: number;
       success: boolean;
       cacheHit?: boolean;
@@ -38,9 +49,17 @@ export interface DashboardConfig {
   maxEvents?: number;
 }
 
+interface DashboardDownstreamTarget {
+  server?: string;
+  tool: string;
+  count: number;
+}
+
 interface DashboardRuntimeSummary {
   eventCount: number;
   totalEvents: number;
+  callmuxToolCalls: number;
+  realToolCalls: number;
   maxEvents: number;
   recentErrors: number;
 }
@@ -87,6 +106,8 @@ export function extractToolError(result: CallToolResult): string | undefined {
 export class RuntimeEventStore {
   private events: RuntimeEvent[] = [];
   private totalEvents = 0;
+  private callmuxToolCalls = 0;
+  private realToolCalls = 0;
   private subscribers = new Set<(event: RuntimeEvent) => void>();
 
   constructor(private maxEvents = DEFAULT_MAX_EVENTS) {}
@@ -98,6 +119,10 @@ export class RuntimeEventStore {
 
   append(event: RuntimeEvent): void {
     this.totalEvents += 1;
+    if (event.type === "tool_call") {
+      this.callmuxToolCalls += event.callmuxToolCalls ?? 0;
+      this.realToolCalls += event.realToolCalls ?? 0;
+    }
     this.events.push(event);
     this.evictOldest();
     for (const subscriber of this.subscribers) {
@@ -113,6 +138,8 @@ export class RuntimeEventStore {
     return {
       eventCount: this.events.length,
       totalEvents: this.totalEvents,
+      callmuxToolCalls: this.callmuxToolCalls,
+      realToolCalls: this.realToolCalls,
       maxEvents: this.maxEvents,
       recentErrors: this.events.filter((event) =>
         event.type === "http_request"
@@ -160,14 +187,24 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e4e7ec; vertical-align: top; }
     th { color: #536070; font-weight: 600; }
+    tr.event-row { cursor: pointer; }
+    tr.event-row:hover { background: #f0f4f8; }
+    tr.selected { background: #e8f2ff; }
     .ok { color: #167447; font-weight: 600; }
     .bad { color: #b42318; font-weight: 600; }
     .muted { color: #667085; }
+    .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; }
+    .detail-item { border: 1px solid #e4e7ec; border-radius: 6px; padding: 8px; }
+    .detail-label { color: #667085; font-size: 12px; margin-bottom: 4px; }
+    .detail-value { font-size: 13px; overflow-wrap: anywhere; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
       header { background: #07111d; }
       .panel { background: #161c23; border-color: #303946; }
       th, td { border-bottom-color: #303946; }
+      tr.event-row:hover { background: #1e2936; }
+      tr.selected { background: #17304a; }
+      .detail-item { border-color: #303946; }
       th, .muted { color: #a7b0be; }
     }
   </style>
@@ -186,12 +223,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     <section class="panel" style="margin-top:18px">
       <h2>Recent Events</h2>
       <table><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
+      <div id="event-detail" class="muted" style="margin-top:12px">Select an event for details.</div>
     </section>
   </main>
   <script>
     const dataUrl = ${JSON.stringify(`${basePath}/data`)};
     const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
     let snapshot = null;
+    let selectedEventKey = null;
 
     function cell(value, className = "") {
       return "<td" + (className ? " class=\\"" + className + "\\"" : "") + ">" + String(value ?? "") + "</td>";
@@ -203,6 +242,49 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const count = Number(value ?? 0);
       if (!Number.isFinite(count) || count < 1000) return String(value ?? 0);
       return Math.floor(count / 1000) + "K+";
+    }
+    function eventKey(event) {
+      return [event.timestamp, event.type, event.requestId || event.tool || event.path || ""].join("|");
+    }
+    function targetText(event) {
+      if (event.type === "tool_call") return (event.server ? event.server + "__" : "") + (event.targetTool || event.tool);
+      return event.jsonRpcTool || event.path || "config";
+    }
+    function detailText(event) {
+      if (event.error) return event.error;
+      const calls = event.realToolCalls !== undefined ? "real " + event.realToolCalls + " / callmux " + (event.callmuxToolCalls ?? 0) : "";
+      if (event.type === "http_request") return [event.method + " " + event.durationMs + "ms", event.jsonRpcMethod, calls].filter(Boolean).join(" · ");
+      return [event.operation, event.durationMs ? event.durationMs + "ms" : "", calls].filter(Boolean).join(" · ");
+    }
+    function detailItem(label, value) {
+      return "<div class=\\"detail-item\\"><div class=\\"detail-label\\">" + esc(label) + "</div><div class=\\"detail-value\\">" + esc(value ?? "") + "</div></div>";
+    }
+    function targetList(targets) {
+      if (!Array.isArray(targets) || targets.length === 0) return "None";
+      return targets.map(target => (target.server ? target.server + "__" : "") + target.tool + " x" + target.count).join(", ");
+    }
+    function renderEventDetail(event) {
+      const detail = document.getElementById("event-detail");
+      if (!event) {
+        detail.className = "muted";
+        detail.innerHTML = "Select an event for details.";
+        return;
+      }
+      detail.className = "";
+      detail.innerHTML = "<h3 style=\\"margin:0 0 8px\\">Event details</h3><div class=\\"detail-grid\\">" + [
+        detailItem("Type", event.type),
+        detailItem("Status", event.status ?? (event.success === false ? "error" : "ok")),
+        detailItem("Request id", event.requestId),
+        detailItem("HTTP", event.method ? event.method + " " + (event.path || "") : ""),
+        detailItem("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / ")),
+        detailItem("Tool kind", event.toolKind),
+        detailItem("Operation", event.operation),
+        detailItem("Callmux tool calls", event.callmuxToolCalls),
+        detailItem("Real tool calls", event.realToolCalls),
+        detailItem("Downstream targets", targetList(event.downstreamTargets)),
+        detailItem("Duration", event.durationMs !== undefined ? event.durationMs + "ms" : ""),
+        detailItem("Error", event.error),
+      ].join("") + "</div>";
     }
     function render(data) {
       snapshot = data;
@@ -219,6 +301,8 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         ["Cache entries", cache.entries ?? 0],
         ["Stored refs", responseStore.entries ?? 0],
         ["Events", compactCount(data.summary.totalEvents ?? data.summary.eventCount)],
+        ["Callmux calls", compactCount(data.summary.callmuxToolCalls)],
+        ["Real tool calls", compactCount(data.summary.realToolCalls)],
         ["Recent errors", data.summary.recentErrors],
       ].map(([label, value]) => "<div class=\\"panel\\"><div class=\\"muted\\">" + esc(label) + "</div><div class=\\"metric\\">" + esc(value) + "</div></div>").join("");
       document.getElementById("servers").innerHTML = servers.map((server) => {
@@ -228,12 +312,22 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
         return "<tr>" + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
       }).join("");
-      document.getElementById("events").innerHTML = data.events.slice(-80).reverse().map(event => {
+      const displayedEvents = data.events.slice(-80).reverse();
+      document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
+        const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.success !== false;
-        const target = event.type === "tool_call" ? (event.server ? event.server + "__" : "") + (event.targetTool || event.tool) : event.path || "config";
-        const detail = event.error || (event.type === "http_request" ? event.method + " " + event.durationMs + "ms" : event.durationMs ? event.durationMs + "ms" : "");
-        return "<tr>" + cell(esc(new Date(event.timestamp).toLocaleTimeString())) + cell(esc(event.type)) + cell(esc(target)) + cell(esc(event.status ?? (ok ? "ok" : "error")), ok ? "ok" : "bad") + cell(esc(detail), "muted") + "</tr>";
+        const selected = key === selectedEventKey ? " selected" : "";
+        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString())) + cell(esc(event.type)) + cell(esc(targetText(event))) + cell(esc(event.status ?? (ok ? "ok" : "error")), ok ? "ok" : "bad") + cell(esc(detailText(event)), "muted") + "</tr>";
       }).join("");
+      document.querySelectorAll("tr.event-row").forEach(row => {
+        row.addEventListener("click", () => {
+          const event = displayedEvents[Number(row.dataset.eventIndex)];
+          selectedEventKey = eventKey(event);
+          renderEventDetail(event);
+          render(data);
+        });
+      });
+      renderEventDetail(displayedEvents.find(event => eventKey(event) === selectedEventKey));
     }
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
