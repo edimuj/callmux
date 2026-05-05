@@ -186,7 +186,13 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e4e7ec; vertical-align: top; }
+    td { overflow-wrap: anywhere; }
     th { color: #536070; font-weight: 600; }
+    .events-table { table-layout: fixed; }
+    .events-table th:nth-child(1) { width: 82px; }
+    .events-table th:nth-child(2) { width: 110px; }
+    .events-table th:nth-child(3) { width: 28%; }
+    .events-table th:nth-child(4) { width: 72px; }
     tr.event-row { cursor: pointer; }
     tr.event-row:hover { background: #f0f4f8; }
     tr.selected { background: #e8f2ff; }
@@ -207,6 +213,25 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .detail-item { border-color: #303946; }
       th, .muted { color: #a7b0be; }
     }
+    @media (max-width: 720px) {
+      header { align-items: flex-start; flex-direction: column; padding: 14px 16px; }
+      main { padding: 14px 12px 24px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .panel { padding: 12px; }
+      .metric { font-size: 22px; }
+      .events-table, .events-table thead, .events-table tbody, .events-table tr, .events-table td { display: block; width: 100%; }
+      .events-table thead { display: none; }
+      .events-table tr.event-row { border: 1px solid #e4e7ec; border-radius: 8px; margin-bottom: 10px; padding: 8px 10px; }
+      .events-table td { border-bottom: 0; box-sizing: border-box; display: grid; gap: 6px; grid-template-columns: 68px minmax(0, 1fr); padding: 4px 0; }
+      .events-table td::before { content: attr(data-label); color: #667085; font-size: 12px; font-weight: 600; }
+      .events-table td[data-label="Detail"] { display: block; padding-top: 7px; }
+      .events-table td[data-label="Detail"]::before { display: block; margin-bottom: 3px; }
+      .detail-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) and (prefers-color-scheme: dark) {
+      .events-table tr.event-row { border-color: #303946; }
+      .events-table td::before { color: #a7b0be; }
+    }
   </style>
 </head>
 <body>
@@ -222,7 +247,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     </section>
     <section class="panel" style="margin-top:18px">
       <h2>Recent Events</h2>
-      <table><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
+      <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
       <div id="event-detail" class="muted" style="margin-top:12px">Select an event for details.</div>
     </section>
   </main>
@@ -232,8 +257,8 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let snapshot = null;
     let selectedEventKey = null;
 
-    function cell(value, className = "") {
-      return "<td" + (className ? " class=\\"" + className + "\\"" : "") + ">" + String(value ?? "") + "</td>";
+    function cell(value, className = "", label = "") {
+      return "<td" + (className ? " class=\\"" + className + "\\"" : "") + (label ? " data-label=\\"" + esc(label) + "\\"" : "") + ">" + String(value ?? "") + "</td>";
     }
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\\"": "&quot;", "'": "&#39;" }[c]));
@@ -317,7 +342,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.success !== false;
         const selected = key === selectedEventKey ? " selected" : "";
-        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString())) + cell(esc(event.type)) + cell(esc(targetText(event))) + cell(esc(event.status ?? (ok ? "ok" : "error")), ok ? "ok" : "bad") + cell(esc(detailText(event)), "muted") + "</tr>";
+        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(event.status ?? (ok ? "ok" : "error")), ok ? "ok" : "bad", "Status") + cell(esc(detailText(event)), "muted", "Detail") + "</tr>";
       }).join("");
       document.querySelectorAll("tr.event-row").forEach(row => {
         row.addEventListener("click", () => {
