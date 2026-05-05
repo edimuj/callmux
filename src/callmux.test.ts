@@ -6142,6 +6142,14 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
     { server: "github", tool: "list_issues", count: 1 },
   ]);
   assert.equal(JSON.stringify(summary).includes("secret"), false);
+
+  const invalid = (listener as any).summarizeDashboardToolCall(
+    "callmux_call",
+    { tool: "callmux_status", server: "callmux" },
+    errorResult("tool_resolution_failed", "server not found")
+  );
+  assert.equal(invalid.realToolCalls, 0);
+  assert.deepEqual(invalid.downstreamTargets, []);
 });
 
 test("listener dashboard uses listener authentication", async () => {

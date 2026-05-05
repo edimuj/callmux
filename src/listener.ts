@@ -1084,10 +1084,7 @@ export class CallmuxListener {
       if (resolved && !("error" in resolved)) {
         return [{ server: resolved.server, tool: resolved.actualName, count }];
       }
-      if (target?.tool || target?.server) {
-        return [{ ...(target.server ? { server: target.server } : {}), tool: target.tool ?? toolName, count }];
-      }
-      return server ? [{ server, tool: toolName, count }] : [];
+      return [];
     };
 
     if (name === "callmux_call") {
