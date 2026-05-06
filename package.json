@@ -1,6 +1,6 @@
 {
   "name": "callmux",
-  "version": "0.10.7",
+  "version": "0.10.8",
   "description": "Multiplexer for MCP tool calls — parallel execution, batching, caching, and pipelining for any MCP server",
   "type": "module",
   "engines": {
