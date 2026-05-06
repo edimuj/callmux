@@ -1421,13 +1421,17 @@ export class UpstreamManager {
       if (!client) {
         return this.toolNotFound(toolName);
       }
-      const result = await client.callTool(
-        {
-          name: prepared.actualName,
-          arguments: prepared.resolvedArguments,
-        },
-        undefined,
-        this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+      const result = await withTimeout(
+        client.callTool(
+          {
+            name: prepared.actualName,
+            arguments: prepared.resolvedArguments,
+          },
+          undefined,
+          this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+        ),
+        this.callTimeoutMs,
+        `"${prepared.server}" tool "${prepared.actualName}" call`
       );
       return result as unknown as CallToolResult;
     } catch (error) {

@@ -2219,11 +2219,52 @@ test("UpstreamManager call timeout returns a structured tool error", async () =>
     error: { code: string; message: string; details?: Record<string, unknown> };
   };
   assert.equal(structured.error.code, "tool_call_failed");
-  assert.equal(structured.error.message, "timed out after 5ms");
+  assert.match(structured.error.message, /timed out after 5ms/);
   assert.equal(structured.error.details?.tool, "get_issue");
   assert.equal(structured.error.details?.category, "timeout");
   assert.equal(structured.error.details?.retryable, true);
   assert.match(String(structured.error.details?.rootCause ?? ""), /timed out after 5ms/i);
+});
+
+test("UpstreamManager enforces hard call timeout when client ignores SDK timeout", async () => {
+  const upstream = new UpstreamManager(5) as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+  let observedTimeout: number | undefined;
+
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(_params: unknown, _schema?: unknown, options?: { timeout?: number }) {
+          observedTimeout = options?.timeout;
+          await new Promise(() => {});
+          return textResult("late");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    ["add_issue_comment", { server: "github", tool: { name: "add_issue_comment" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["add_issue_comment"])]]);
+
+  const result = await upstream.callTool("add_issue_comment", { body: "markdown" }, "github");
+
+  assert.equal(observedTimeout, 5);
+  assert.equal(result.isError, true);
+  const structured = result.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(structured.error.code, "tool_call_failed");
+  assert.match(structured.error.message, /github.+add_issue_comment.+timed out after 5ms/i);
+  assert.equal(structured.error.details?.tool, "add_issue_comment");
+  assert.equal(structured.error.details?.server, "github");
+  assert.equal(structured.error.details?.category, "timeout");
+  assert.equal(structured.error.details?.retryable, true);
 });
 
 test("UpstreamManager normalizes noisy transport/protocol tool-call failures", async () => {
