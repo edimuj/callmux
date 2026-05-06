@@ -6350,6 +6350,8 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /function truncateText/);
   assert.match(html, /maxLength = 180/);
   assert.match(html, /truncateText\(detailText\(event\)\)/);
+  assert.match(html, /function updateUpdatedClock/);
+  assert.match(html, /setInterval\(updateUpdatedClock, 1000\)/);
   assert.match(html, /Passthrough calls/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);

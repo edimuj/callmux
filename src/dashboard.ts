@@ -411,6 +411,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (event.status === "downstream_error") return "warn";
       return ok ? "ok" : "bad";
     }
+    function updateUpdatedClock() {
+      const updated = document.getElementById("updated");
+      updated.textContent = snapshot ? "Updated " + new Date().toLocaleTimeString() : "Connecting...";
+    }
     function isTransportHttpEvent(event) {
       return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
     }
@@ -448,7 +452,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function render(data) {
       snapshot = data;
-      document.getElementById("updated").textContent = "Updated " + new Date(data.generatedAt).toLocaleTimeString();
+      updateUpdatedClock();
       const status = data.status || {};
       const cache = status.cache || {};
       const responseStore = status.responseStore || {};
@@ -499,6 +503,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (res.ok) render(await res.json());
     }
     refresh();
+    setInterval(updateUpdatedClock, 1000);
     const stream = new EventSource(eventsUrl);
     stream.onmessage = () => refresh();
     stream.onerror = () => setTimeout(refresh, 1500);
