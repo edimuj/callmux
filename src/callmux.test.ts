@@ -2267,6 +2267,66 @@ test("UpstreamManager enforces hard call timeout when client ignores SDK timeout
   assert.equal(structured.error.details?.retryable, true);
 });
 
+test("UpstreamManager retires and reconnects a client after hard call timeout", async () => {
+  const upstream = new UpstreamManager(5);
+  let connectCount = 0;
+  let firstClosed = false;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    const tool = mockTool("add_issue_comment");
+    const currentConnect = connectCount;
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          if (currentConnect === 1) {
+            await new Promise(() => {});
+          }
+          return textResult(`client-${currentConnect}`);
+        },
+        async close() {
+          if (currentConnect === 1) firstClosed = true;
+        },
+      },
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+
+  const timedOut = await upstream.callTool(
+    "add_issue_comment",
+    { body: "markdown" },
+    "github"
+  );
+
+  assert.equal(timedOut.isError, true);
+  assert.equal(firstClosed, true);
+  assert.equal(upstream.getServerInfo("github")?.state, "reconnecting");
+
+  const recovered = await upstream.callTool(
+    "add_issue_comment",
+    { body: "markdown" },
+    "github"
+  );
+
+  assert.equal(connectCount, 2);
+  assert.equal(recovered.isError, undefined);
+  assert.deepEqual(recovered.content, [{ type: "text", text: "client-2" }]);
+  assert.equal(upstream.getServerInfo("github")?.state, "connected");
+
+  await upstream.close();
+});
+
 test("UpstreamManager normalizes noisy transport/protocol tool-call failures", async () => {
   const upstream = new UpstreamManager() as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;

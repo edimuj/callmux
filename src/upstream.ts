@@ -22,6 +22,7 @@ import type {
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS = 600;
 const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
 const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
@@ -360,15 +361,25 @@ export class UpstreamManager {
   }
 
   private async closeQuietly(client?: Client, transport?: Transport): Promise<void> {
-    if (client) {
+    const closeClient = (client as { close?: () => Promise<void> | void } | undefined)?.close;
+    if (closeClient) {
       try {
-        await client.close();
+        await withTimeout(
+          Promise.resolve(closeClient.call(client)),
+          DEFAULT_CLOSE_TIMEOUT_MS,
+          "downstream client close"
+        );
         return;
       } catch {}
     }
-    if (transport) {
+    const closeTransport = (transport as { close?: () => Promise<void> | void } | undefined)?.close;
+    if (closeTransport) {
       try {
-        await transport.close();
+        await withTimeout(
+          Promise.resolve(closeTransport.call(transport)),
+          DEFAULT_CLOSE_TIMEOUT_MS,
+          "downstream transport close"
+        );
       } catch {}
     }
   }
@@ -647,6 +658,52 @@ export class UpstreamManager {
     }, delayMs);
     timer.unref?.();
     this.reconnectTimers.set(name, timer);
+  }
+
+  private retireFailedCallClient(
+    server: string,
+    client: Client | undefined,
+    category: ToolCallFailureCategory,
+    message: string,
+    scopedKey?: string
+  ): void {
+    if (!client) return;
+    if (!["timeout", "transport", "session", "protocol"].includes(category)) return;
+
+    if (scopedKey) {
+      const scoped = this.sessionClients.get(scopedKey);
+      if (!scoped || scoped.client !== client) return;
+      if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
+      this.sessionClients.delete(scopedKey);
+      void this.closeQuietly(scoped.client, scoped.transport);
+      return;
+    }
+
+    if (this.clients.get(server) !== client) return;
+    const transport = this.transports.get(server);
+    this.connectionGenerations.set(
+      server,
+      (this.connectionGenerations.get(server) ?? 0) + 1
+    );
+
+    const config = this.serverConfigs.get(server);
+    const info = this.serverInfoMap.get(server);
+    if (info || config) {
+      this.serverInfoMap.set(server, {
+        transport: info?.transport ?? (config ? this.resolvedTransportFor(config) : "stdio"),
+        state: "disconnected",
+        connectDurationMs: info?.connectDurationMs ?? 0,
+        totalTools: info?.totalTools ?? 0,
+        exposedTools: info?.exposedTools ?? 0,
+        ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
+        ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
+        error: message,
+        ...(info?.reconnectAttempts ? { reconnectAttempts: info.reconnectAttempts } : {}),
+      });
+    }
+
+    void this.closeQuietly(client, transport);
+    this.scheduleReconnect(server);
   }
 
   private async reconnectServer(
@@ -1414,6 +1471,7 @@ export class UpstreamManager {
     const scopedKey = this.shouldUseSessionCwd(prepared.server, context)
       ? this.sessionClientKey(prepared.server, context.cwd)
       : undefined;
+    let callClient: Client | undefined;
 
     try {
       const client = await this.clientForCall(prepared.server, prepared.actualName, context);
@@ -1421,6 +1479,7 @@ export class UpstreamManager {
       if (!client) {
         return this.toolNotFound(toolName);
       }
+      callClient = client;
       const result = await withTimeout(
         client.callTool(
           {
@@ -1436,16 +1495,14 @@ export class UpstreamManager {
       return result as unknown as CallToolResult;
     } catch (error) {
       const normalized = normalizeToolCallFailure(error);
-      if (normalized.retryable && ["transport", "session", "timeout"].includes(normalized.category)) {
-        const info = this.serverInfoMap.get(prepared.server);
-        if (info?.state === "connected") {
-          this.serverInfoMap.set(prepared.server, {
-            ...info,
-            state: "disconnected",
-            error: normalized.message,
-          });
-          this.scheduleReconnect(prepared.server);
-        }
+      if (normalized.retryable) {
+        this.retireFailedCallClient(
+          prepared.server,
+          callClient,
+          normalized.category,
+          normalized.message,
+          scopedKey
+        );
       }
       return errorResult("tool_call_failed", normalized.message, {
         tool: toolName,
