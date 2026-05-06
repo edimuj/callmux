@@ -154,11 +154,20 @@ export class CallCache {
     return Array.from(candidates);
   }
 
+  private effectiveServer(tool: string, server?: string): string | undefined {
+    if (server) return server;
+    const separator = tool.lastIndexOf("__");
+    if (separator <= 0) return undefined;
+    const inferred = tool.slice(0, separator);
+    return this.serverPolicies.has(inferred) ? inferred : undefined;
+  }
+
   private shouldCache(tool: string, server?: string): boolean {
-    const candidates = this.cacheCandidates(tool, server);
+    const effectiveServer = this.effectiveServer(tool, server);
+    const candidates = this.cacheCandidates(tool, effectiveServer);
     const policies = [
       this.globalPolicy,
-      server ? this.serverPolicies.get(server) : undefined,
+      effectiveServer ? this.serverPolicies.get(effectiveServer) : undefined,
     ].filter((policy): policy is CachePolicyConfig => policy !== undefined);
 
     const denyPatterns = policies.flatMap((policy) => policy.denyTools ?? []);
@@ -217,11 +226,12 @@ export class CallCache {
     scope?: string
   ): CallToolResult | null {
     if (this.ttlMs <= 0) return null;
-    if (!this.shouldCache(tool, server)) return null;
+    const effectiveServer = this.effectiveServer(tool, server);
+    if (!this.shouldCache(tool, effectiveServer)) return null;
     const now = Date.now();
     this.maybePruneExpired(now);
 
-    const key = this.key(tool, args, server, scope);
+    const key = this.key(tool, args, effectiveServer, scope);
     const entry = this.entries.get(key);
     if (!entry) return null;
     if (now > entry.expiresAt) {
@@ -242,14 +252,15 @@ export class CallCache {
     scope?: string
   ): void {
     if (this.ttlMs <= 0) return;
-    if (!this.shouldCache(tool, server)) return;
+    const effectiveServer = this.effectiveServer(tool, server);
+    if (!this.shouldCache(tool, effectiveServer)) return;
     if (result.isError) return;
     const now = Date.now();
     this.maybePruneExpired(now);
 
-    this.entries.set(this.key(tool, args, server, scope), {
+    this.entries.set(this.key(tool, args, effectiveServer, scope), {
       tool,
-      server,
+      server: effectiveServer,
       result,
       expiresAt: now + this.ttlMs,
     });

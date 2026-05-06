@@ -5649,6 +5649,22 @@ test("per-server cache policy allows tools that would be skipped by default", ()
   );
 });
 
+test("per-server cache policy applies to qualified passthrough tools", () => {
+  const cache = new CallCache(
+    60,
+    undefined,
+    { github: { allowTools: ["issue_read"] } }
+  );
+
+  cache.set("github__issue_read", { issue_number: 12 }, textResult("issue"));
+
+  assert.deepEqual(
+    cache.get("github__issue_read", { issue_number: 12 }),
+    textResult("issue")
+  );
+  assert.equal(cache.size, 1);
+});
+
 test("cache skips mutating tools by default without policy", () => {
   const cache = new CallCache(60);
 
