@@ -6329,6 +6329,8 @@ test("dashboard hides successful transport HTTP events by default", () => {
   const html = renderDashboardHtml({ enabled: true, path: "/dashboard", maxEvents: 500 });
   assert.match(html, /id="hide-transport" type="checkbox" checked/);
   assert.match(html, /function isTransportHttpEvent/);
+  assert.match(html, /function cacheEntriesText/);
+  assert.match(html, /return "disabled"/);
   assert.match(html, /Passthrough calls/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);

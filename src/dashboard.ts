@@ -373,6 +373,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function fanoutCount(metaCalls, downstreamCalls) {
       return compactCount(metaCalls) + " / " + compactCount(downstreamCalls);
     }
+    function cacheEntriesText(cache) {
+      if (cache && cache.enabled === false) return "disabled";
+      return compactCount(cache?.entries ?? 0);
+    }
     function eventKey(event) {
       return [event.timestamp, event.type, event.requestId || event.tool || event.path || ""].join("|");
     }
@@ -450,7 +454,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       document.getElementById("summary").innerHTML = [
         ["Servers", servers.length],
         ["Sessions", status.listener?.activeSessions ?? 0],
-        ["Cache entries", cache.entries ?? 0],
+        ["Cache entries", cacheEntriesText(cache)],
         ["Stored refs", responseStore.entries ?? 0],
         ["Events", compactCount(data.summary.totalEvents ?? data.summary.eventCount)],
         ["Passthrough calls", compactCount(data.summary.passthroughToolCalls ?? 0)],
