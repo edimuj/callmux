@@ -32,6 +32,7 @@ type RuntimeEvent =
       realToolCalls?: number;
       downstreamTargets?: DashboardDownstreamTarget[];
       durationMs: number;
+      status?: DashboardToolStatus;
       success: boolean;
       cacheHit?: boolean;
       error?: string;
@@ -62,6 +63,43 @@ interface DashboardRuntimeSummary {
   realToolCalls: number;
   maxEvents: number;
   recentErrors: number;
+}
+
+type DashboardToolStatus = "ok" | "downstream_error" | "error";
+
+const CALLMUX_ERROR_CODES = new Set([
+  "argument_resolution_failed",
+  "authorization_denied",
+  "bridge_tool_call_failed",
+  "invalid_arguments",
+  "recipe_not_found",
+  "result_not_found",
+  "result_path_not_found",
+  "server_not_found",
+  "tool_call_failed",
+  "tool_not_found",
+  "tool_resolution_failed",
+]);
+
+const CALLMUX_ERROR_CODES_WITH_DOWNSTREAM_TARGET = new Set([
+  "argument_resolution_failed",
+  "authorization_denied",
+  "bridge_tool_call_failed",
+  "tool_call_failed",
+  "tool_not_found",
+  "tool_resolution_failed",
+]);
+
+const CALLMUX_FAILURE_CATEGORIES = new Set([
+  "protocol",
+  "session",
+  "timeout",
+  "transport",
+]);
+
+interface DashboardToolStatusContext {
+  callmuxToolCalls?: number;
+  realToolCalls?: number;
 }
 
 export interface DashboardSnapshot {
@@ -103,6 +141,43 @@ export function extractToolError(result: CallToolResult): string | undefined {
   return text || (typeof structured?.error?.code === "string" ? structured.error.code : "tool error");
 }
 
+export function classifyDashboardToolStatus(
+  result: CallToolResult,
+  context: DashboardToolStatusContext = {}
+): DashboardToolStatus {
+  if (!result.isError) return "ok";
+
+  const structured = result.structuredContent as
+    | { error?: { code?: unknown; details?: { category?: unknown } } }
+    | undefined;
+  const code = structured?.error?.code;
+  if (typeof code === "string" && CALLMUX_ERROR_CODES.has(code)) {
+    if (
+      (context.realToolCalls ?? 0) > 0 &&
+      !CALLMUX_ERROR_CODES_WITH_DOWNSTREAM_TARGET.has(code)
+    ) {
+      return "downstream_error";
+    }
+    return "error";
+  }
+
+  const category = structured?.error?.details?.category;
+  if (typeof category === "string" && CALLMUX_FAILURE_CATEGORIES.has(category)) {
+    return "error";
+  }
+
+  return "downstream_error";
+}
+
+function isDashboardRuntimeError(event: RuntimeEvent): boolean {
+  if (event.type === "http_request") return event.status >= 400;
+  if (event.type === "tool_call") {
+    return event.status === "error" || (event.status === undefined && !event.success);
+  }
+  if (event.type === "config_reload") return !event.success;
+  return false;
+}
+
 export class RuntimeEventStore {
   private events: RuntimeEvent[] = [];
   private totalEvents = 0;
@@ -141,15 +216,7 @@ export class RuntimeEventStore {
       callmuxToolCalls: this.callmuxToolCalls,
       realToolCalls: this.realToolCalls,
       maxEvents: this.maxEvents,
-      recentErrors: this.events.filter((event) =>
-        event.type === "http_request"
-          ? event.status >= 400
-          : event.type === "tool_call"
-            ? !event.success
-            : event.type === "config_reload"
-              ? !event.success
-              : false
-      ).length,
+      recentErrors: this.events.filter(isDashboardRuntimeError).length,
     };
   }
 
@@ -197,6 +264,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     tr.event-row:hover { background: #f0f4f8; }
     tr.selected { background: #e8f2ff; }
     .ok { color: #167447; font-weight: 600; }
+    .warn { color: #b54708; font-weight: 600; }
     .bad { color: #b42318; font-weight: 600; }
     .muted { color: #667085; }
     .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; margin-bottom: 10px; }
@@ -289,6 +357,13 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (event.type === "http_request") return [event.method + " " + event.durationMs + "ms", event.jsonRpcMethod, calls].filter(Boolean).join(" · ");
       return [event.operation, event.durationMs ? event.durationMs + "ms" : "", calls].filter(Boolean).join(" · ");
     }
+    function statusText(event, ok) {
+      return String(event.status ?? (ok ? "ok" : "error")).replace(/_/g, " ");
+    }
+    function statusClass(event, ok) {
+      if (event.status === "downstream_error") return "warn";
+      return ok ? "ok" : "bad";
+    }
     function isTransportHttpEvent(event) {
       return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
     }
@@ -309,7 +384,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       detail.className = "";
       detail.innerHTML = "<h3 style=\\"margin:0 0 8px\\">Event details</h3><div class=\\"detail-grid\\">" + [
         detailItem("Type", event.type),
-        detailItem("Status", event.status ?? (event.success === false ? "error" : "ok")),
+        detailItem("Status", statusText(event, event.success !== false)),
         detailItem("Request id", event.requestId),
         detailItem("HTTP", event.method ? event.method + " " + (event.path || "") : ""),
         detailItem("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / ")),
@@ -351,9 +426,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const displayedEvents = data.events.filter(event => !hideTransportHttp || !isTransportHttpEvent(event)).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
         const key = eventKey(event);
-        const ok = event.type === "http_request" ? event.status < 400 : event.success !== false;
+        const ok = event.type === "http_request" ? event.status < 400 : event.status !== "error" && event.success !== false;
         const selected = key === selectedEventKey ? " selected" : "";
-        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(event.status ?? (ok ? "ok" : "error")), ok ? "ok" : "bad", "Status") + cell(esc(detailText(event)), "muted", "Detail") + "</tr>";
+        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(statusText(event, ok)), statusClass(event, ok), "Status") + cell(esc(detailText(event)), "muted", "Detail") + "</tr>";
       }).join("");
       document.querySelectorAll("tr.event-row").forEach(row => {
         row.addEventListener("click", () => {

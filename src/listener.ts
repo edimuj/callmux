@@ -50,6 +50,7 @@ import {
   type ResponseShieldTarget,
 } from "./response-store.js";
 import {
+  classifyDashboardToolStatus,
   extractToolError,
   normalizeDashboardConfig,
   renderDashboardHtml,
@@ -984,6 +985,10 @@ export class CallmuxListener {
     args?: unknown
   ): void {
     const summary = this.summarizeDashboardToolCall(tool, args, result, target);
+    const status = classifyDashboardToolStatus(result, {
+      callmuxToolCalls: summary.callmuxToolCalls,
+      realToolCalls: summary.realToolCalls,
+    });
     this.runtimeEvents.append({
       type: "tool_call",
       timestamp: new Date().toISOString(),
@@ -992,7 +997,8 @@ export class CallmuxListener {
       ...(target?.tool ? { targetTool: target.tool } : {}),
       ...summary,
       durationMs: Date.now() - startedAt,
-      success: result.isError !== true,
+      status,
+      success: status !== "error",
       ...(cacheHit ? { cacheHit } : {}),
       ...(result.isError ? { error: extractToolError(result) } : {}),
     });

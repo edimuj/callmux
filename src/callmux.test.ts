@@ -60,7 +60,7 @@ import { evaluateToolAuthorization } from "./authorization.js";
 import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
 import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
-import { renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
+import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -6205,6 +6205,96 @@ test("RuntimeEventStore tracks callmux and real tool call totals", () => {
 
   assert.equal(store.stats().callmuxToolCalls, 1);
   assert.equal(store.stats().realToolCalls, 3);
+});
+
+test("dashboard classifies downstream tool errors separately from callmux errors", () => {
+  const downstreamFailure: CallToolResult = {
+    content: [{ type: "text", text: "npm test failed" }],
+    isError: true,
+  };
+  assert.equal(classifyDashboardToolStatus(downstreamFailure), "downstream_error");
+  assert.equal(
+    classifyDashboardToolStatus(
+      errorResult("invalid_arguments", "command must be a string"),
+      { realToolCalls: 1 }
+    ),
+    "downstream_error"
+  );
+
+  assert.equal(
+    classifyDashboardToolStatus(
+      errorResult("tool_call_failed", "github add_issue_comment timed out", {
+        category: "timeout",
+      })
+    ),
+    "error"
+  );
+});
+
+test("RuntimeEventStore recent errors ignores downstream tool result failures", () => {
+  const store = new RuntimeEventStore(10);
+  store.append({
+    type: "tool_call",
+    timestamp: new Date(0).toISOString(),
+    tool: "tokenlean__tl_run",
+    toolKind: "downstream",
+    operation: "direct",
+    callmuxToolCalls: 0,
+    realToolCalls: 1,
+    downstreamTargets: [{ server: "tokenlean", tool: "tl_run", count: 1 }],
+    durationMs: 1,
+    status: "downstream_error",
+    success: true,
+    error: "npm test failed",
+  });
+  store.append({
+    type: "tool_call",
+    timestamp: new Date(1).toISOString(),
+    tool: "github__add_issue_comment",
+    toolKind: "downstream",
+    operation: "direct",
+    callmuxToolCalls: 0,
+    realToolCalls: 1,
+    downstreamTargets: [{ server: "github", tool: "add_issue_comment", count: 1 }],
+    durationMs: 1,
+    status: "error",
+    success: false,
+    error: "timed out",
+  });
+
+  assert.equal(store.stats().recentErrors, 1);
+});
+
+test("listener dashboard records downstream tool failures without callmux error status", () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  (listener as any).recordToolCallEvent(
+    "tokenlean__tl_run",
+    { server: "tokenlean", tool: "tl_run" },
+    {
+      content: [{ type: "text" as const, text: "npm test failed" }],
+      isError: true,
+    },
+    Date.now() - 5
+  );
+
+  const events = (listener as any).runtimeEvents.list() as Array<{
+    status?: string;
+    success?: boolean;
+    error?: string;
+  }>;
+  assert.equal(events[0].status, "downstream_error");
+  assert.equal(events[0].success, true);
+  assert.equal(events[0].error, "npm test failed");
+  assert.equal((listener as any).runtimeEvents.stats().recentErrors, 0);
 });
 
 test("dashboard hides successful transport HTTP events by default", () => {
