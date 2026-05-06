@@ -356,6 +356,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     const dataUrl = ${JSON.stringify(`${basePath}/data`)};
     const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
     let snapshot = null;
+    let pendingSnapshot = null;
     let selectedEventKey = null;
     let hideTransportHttp = true;
 
@@ -410,6 +411,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function statusClass(event, ok) {
       if (event.status === "downstream_error") return "warn";
       return ok ? "ok" : "bad";
+    }
+    function hasActiveTextSelection() {
+      const selection = window.getSelection ? window.getSelection() : null;
+      return Boolean(selection && !selection.isCollapsed && selection.toString());
     }
     function updateUpdatedClock() {
       const updated = document.getElementById("updated");
@@ -494,13 +499,28 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       });
       renderEventDetail(displayedEvents.find(event => eventKey(event) === selectedEventKey));
     }
+    function renderWhenSelectionAllows(data) {
+      if (hasActiveTextSelection()) {
+        pendingSnapshot = data;
+        return;
+      }
+      pendingSnapshot = null;
+      render(data);
+    }
+    document.addEventListener("selectionchange", () => {
+      if (!hasActiveTextSelection() && pendingSnapshot) {
+        const data = pendingSnapshot;
+        pendingSnapshot = null;
+        render(data);
+      }
+    });
     document.getElementById("hide-transport").addEventListener("change", event => {
       hideTransportHttp = event.target.checked;
       if (snapshot) render(snapshot);
     });
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
-      if (res.ok) render(await res.json());
+      if (res.ok) renderWhenSelectionAllows(await res.json());
     }
     refresh();
     setInterval(updateUpdatedClock, 1000);
