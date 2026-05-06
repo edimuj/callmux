@@ -92,6 +92,10 @@ interface DashboardDownstreamTarget {
 interface DashboardToolCallSummary {
   toolKind: "callmux_meta" | "downstream";
   operation: string;
+  passthroughToolCalls: number;
+  callmuxMetaToolCalls: number;
+  callmuxDownstreamToolCalls: number;
+  totalDownstreamToolCalls: number;
   callmuxToolCalls: number;
   realToolCalls: number;
   downstreamTargets: DashboardDownstreamTarget[];
@@ -987,7 +991,7 @@ export class CallmuxListener {
     const summary = this.summarizeDashboardToolCall(tool, args, result, target);
     const status = classifyDashboardToolStatus(result, {
       callmuxToolCalls: summary.callmuxToolCalls,
-      realToolCalls: summary.realToolCalls,
+      realToolCalls: summary.totalDownstreamToolCalls,
     });
     this.runtimeEvents.append({
       type: "tool_call",
@@ -1008,6 +1012,10 @@ export class CallmuxListener {
     jsonRpcMethod: string;
     jsonRpcTool: string;
     jsonRpcRequestCount: number;
+    passthroughToolCalls: number;
+    callmuxMetaToolCalls: number;
+    callmuxDownstreamToolCalls: number;
+    totalDownstreamToolCalls: number;
     callmuxToolCalls: number;
     realToolCalls: number;
     downstreamTargets: DashboardDownstreamTarget[];
@@ -1020,6 +1028,10 @@ export class CallmuxListener {
         .map((request) => typeof request.method === "string" ? request.method : undefined)
         .filter((method): method is string => method !== undefined)
     )];
+    let passthroughToolCalls = 0;
+    let callmuxMetaToolCalls = 0;
+    let callmuxDownstreamToolCalls = 0;
+    let totalDownstreamToolCalls = 0;
     let callmuxToolCalls = 0;
     let realToolCalls = 0;
     const targets: DashboardDownstreamTarget[] = [];
@@ -1036,6 +1048,10 @@ export class CallmuxListener {
         undefined,
         undefined
       );
+      passthroughToolCalls += summary.passthroughToolCalls;
+      callmuxMetaToolCalls += summary.callmuxMetaToolCalls;
+      callmuxDownstreamToolCalls += summary.callmuxDownstreamToolCalls;
+      totalDownstreamToolCalls += summary.totalDownstreamToolCalls;
       callmuxToolCalls += summary.callmuxToolCalls;
       realToolCalls += summary.realToolCalls;
       targets.push(...summary.downstreamTargets);
@@ -1045,6 +1061,10 @@ export class CallmuxListener {
       ...(methods.length > 0 ? { jsonRpcMethod: methods.join(", ") } : {}),
       ...(tools.length > 0 ? { jsonRpcTool: [...new Set(tools)].join(", ") } : {}),
       jsonRpcRequestCount: requests.length,
+      ...(passthroughToolCalls > 0 ? { passthroughToolCalls } : {}),
+      ...(callmuxMetaToolCalls > 0 ? { callmuxMetaToolCalls } : {}),
+      ...(callmuxDownstreamToolCalls > 0 ? { callmuxDownstreamToolCalls } : {}),
+      ...(totalDownstreamToolCalls > 0 ? { totalDownstreamToolCalls } : {}),
       ...(callmuxToolCalls > 0 ? { callmuxToolCalls } : {}),
       ...(realToolCalls > 0 ? { realToolCalls } : {}),
       ...(targets.length > 0 ? { downstreamTargets: this.aggregateDashboardTargets(targets) } : {}),
@@ -1059,11 +1079,16 @@ export class CallmuxListener {
   ): DashboardToolCallSummary {
     const isMeta = name.startsWith("callmux_");
     const downstreamTargets = this.dashboardTargetsForToolCall(name, args, result, target);
+    const downstreamCalls = downstreamTargets.reduce((sum, item) => sum + item.count, 0);
     return {
       toolKind: isMeta ? "callmux_meta" : "downstream",
       operation: isMeta ? name.slice("callmux_".length) : "direct",
+      passthroughToolCalls: isMeta ? 0 : downstreamCalls,
+      callmuxMetaToolCalls: isMeta ? 1 : 0,
+      callmuxDownstreamToolCalls: isMeta ? downstreamCalls : 0,
+      totalDownstreamToolCalls: downstreamCalls,
       callmuxToolCalls: isMeta ? 1 : 0,
-      realToolCalls: downstreamTargets.reduce((sum, item) => sum + item.count, 0),
+      realToolCalls: downstreamCalls,
       downstreamTargets,
     };
   }
@@ -1143,6 +1168,10 @@ export class CallmuxListener {
     }
 
     if (name.startsWith("callmux_")) return [];
+
+    if (target?.tool) {
+      return [{ server: target.server, tool: target.tool, count: 1 }];
+    }
 
     return resolvedTarget(name, undefined);
   }

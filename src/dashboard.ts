@@ -16,6 +16,10 @@ type RuntimeEvent =
       jsonRpcMethod?: string;
       jsonRpcTool?: string;
       jsonRpcRequestCount?: number;
+      passthroughToolCalls?: number;
+      callmuxMetaToolCalls?: number;
+      callmuxDownstreamToolCalls?: number;
+      totalDownstreamToolCalls?: number;
       callmuxToolCalls?: number;
       realToolCalls?: number;
       downstreamTargets?: DashboardDownstreamTarget[];
@@ -28,6 +32,10 @@ type RuntimeEvent =
       targetTool?: string;
       toolKind?: "callmux_meta" | "downstream";
       operation?: string;
+      passthroughToolCalls?: number;
+      callmuxMetaToolCalls?: number;
+      callmuxDownstreamToolCalls?: number;
+      totalDownstreamToolCalls?: number;
       callmuxToolCalls?: number;
       realToolCalls?: number;
       downstreamTargets?: DashboardDownstreamTarget[];
@@ -59,6 +67,10 @@ interface DashboardDownstreamTarget {
 interface DashboardRuntimeSummary {
   eventCount: number;
   totalEvents: number;
+  passthroughToolCalls: number;
+  callmuxMetaToolCalls: number;
+  callmuxDownstreamToolCalls: number;
+  totalDownstreamToolCalls: number;
   callmuxToolCalls: number;
   realToolCalls: number;
   maxEvents: number;
@@ -181,6 +193,10 @@ function isDashboardRuntimeError(event: RuntimeEvent): boolean {
 export class RuntimeEventStore {
   private events: RuntimeEvent[] = [];
   private totalEvents = 0;
+  private passthroughToolCalls = 0;
+  private callmuxMetaToolCalls = 0;
+  private callmuxDownstreamToolCalls = 0;
+  private totalDownstreamToolCalls = 0;
   private callmuxToolCalls = 0;
   private realToolCalls = 0;
   private subscribers = new Set<(event: RuntimeEvent) => void>();
@@ -195,6 +211,12 @@ export class RuntimeEventStore {
   append(event: RuntimeEvent): void {
     this.totalEvents += 1;
     if (event.type === "tool_call") {
+      this.passthroughToolCalls += event.passthroughToolCalls ?? 0;
+      this.callmuxMetaToolCalls += event.callmuxMetaToolCalls ?? event.callmuxToolCalls ?? 0;
+      this.callmuxDownstreamToolCalls += event.callmuxDownstreamToolCalls ?? (
+        event.toolKind === "callmux_meta" ? event.realToolCalls ?? 0 : 0
+      );
+      this.totalDownstreamToolCalls += event.totalDownstreamToolCalls ?? event.realToolCalls ?? 0;
       this.callmuxToolCalls += event.callmuxToolCalls ?? 0;
       this.realToolCalls += event.realToolCalls ?? 0;
     }
@@ -213,6 +235,10 @@ export class RuntimeEventStore {
     return {
       eventCount: this.events.length,
       totalEvents: this.totalEvents,
+      passthroughToolCalls: this.passthroughToolCalls,
+      callmuxMetaToolCalls: this.callmuxMetaToolCalls,
+      callmuxDownstreamToolCalls: this.callmuxDownstreamToolCalls,
+      totalDownstreamToolCalls: this.totalDownstreamToolCalls,
       callmuxToolCalls: this.callmuxToolCalls,
       realToolCalls: this.realToolCalls,
       maxEvents: this.maxEvents,
@@ -344,6 +370,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (!Number.isFinite(count) || count < 1000) return String(value ?? 0);
       return Math.floor(count / 1000) + "K+";
     }
+    function fanoutCount(metaCalls, downstreamCalls) {
+      return compactCount(metaCalls) + " / " + compactCount(downstreamCalls);
+    }
     function eventKey(event) {
       return [event.timestamp, event.type, event.requestId || event.tool || event.path || ""].join("|");
     }
@@ -353,7 +382,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function detailText(event) {
       if (event.error) return event.error;
-      const calls = event.realToolCalls !== undefined ? "real " + event.realToolCalls + " / callmux " + (event.callmuxToolCalls ?? 0) : "";
+      const totalDownstream = event.totalDownstreamToolCalls ?? event.realToolCalls;
+      const passthrough = event.passthroughToolCalls ?? (
+        event.toolKind === "downstream" ? event.realToolCalls : undefined
+      );
+      const meta = event.callmuxMetaToolCalls ?? event.callmuxToolCalls;
+      const metaDownstream = event.callmuxDownstreamToolCalls ?? (
+        event.toolKind === "callmux_meta" ? event.realToolCalls : undefined
+      );
+      const calls = totalDownstream !== undefined
+        ? ["downstream " + totalDownstream, passthrough ? "pass " + passthrough : "", meta ? "meta " + meta + "/" + (metaDownstream ?? 0) : ""].filter(Boolean).join(" · ")
+        : "";
       if (event.type === "http_request") return [event.method + " " + event.durationMs + "ms", event.jsonRpcMethod, calls].filter(Boolean).join(" · ");
       return [event.operation, event.durationMs ? event.durationMs + "ms" : "", calls].filter(Boolean).join(" · ");
     }
@@ -390,8 +429,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / ")),
         detailItem("Tool kind", event.toolKind),
         detailItem("Operation", event.operation),
-        detailItem("Callmux tool calls", event.callmuxToolCalls),
-        detailItem("Real tool calls", event.realToolCalls),
+        detailItem("Passthrough tool calls", event.passthroughToolCalls),
+        detailItem("Callmux meta tool calls", event.callmuxMetaToolCalls ?? event.callmuxToolCalls),
+        detailItem("Callmux downstream calls", event.callmuxDownstreamToolCalls),
+        detailItem("Total downstream calls", event.totalDownstreamToolCalls ?? event.realToolCalls),
         detailItem("Downstream targets", targetList(event.downstreamTargets)),
         detailItem("Duration", event.durationMs !== undefined ? event.durationMs + "ms" : ""),
         detailItem("Error", event.error),
@@ -412,8 +453,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         ["Cache entries", cache.entries ?? 0],
         ["Stored refs", responseStore.entries ?? 0],
         ["Events", compactCount(data.summary.totalEvents ?? data.summary.eventCount)],
-        ["Callmux calls", compactCount(data.summary.callmuxToolCalls)],
-        ["Real tool calls", compactCount(data.summary.realToolCalls)],
+        ["Passthrough calls", compactCount(data.summary.passthroughToolCalls ?? 0)],
+        ["Meta calls / downstream", fanoutCount(data.summary.callmuxMetaToolCalls ?? data.summary.callmuxToolCalls, data.summary.callmuxDownstreamToolCalls ?? 0)],
+        ["Total downstream", compactCount(data.summary.totalDownstreamToolCalls ?? data.summary.realToolCalls)],
         ["Recent errors", data.summary.recentErrors],
       ].map(([label, value]) => "<div class=\\"panel\\"><div class=\\"muted\\">" + esc(label) + "</div><div class=\\"metric\\">" + esc(value) + "</div></div>").join("");
       document.getElementById("servers").innerHTML = servers.map((server) => {

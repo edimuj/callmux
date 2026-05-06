@@ -6188,7 +6188,7 @@ test("RuntimeEventStore tracks total events separately from retained history", (
   assert.deepEqual(store.list().map((event) => event.type === "http_request" ? event.path : ""), ["/request-1", "/request-2"]);
 });
 
-test("RuntimeEventStore tracks callmux and real tool call totals", () => {
+test("RuntimeEventStore tracks distinct dashboard tool call totals", () => {
   const store = new RuntimeEventStore(10);
   store.append({
     type: "tool_call",
@@ -6196,15 +6196,39 @@ test("RuntimeEventStore tracks callmux and real tool call totals", () => {
     tool: "callmux_parallel",
     toolKind: "callmux_meta",
     operation: "parallel",
+    passthroughToolCalls: 0,
+    callmuxMetaToolCalls: 1,
+    callmuxDownstreamToolCalls: 3,
+    totalDownstreamToolCalls: 3,
     callmuxToolCalls: 1,
     realToolCalls: 3,
     downstreamTargets: [{ server: "github", tool: "get_issue", count: 3 }],
     durationMs: 1,
     success: true,
   });
+  store.append({
+    type: "tool_call",
+    timestamp: new Date(1).toISOString(),
+    tool: "github__get_issue",
+    toolKind: "downstream",
+    operation: "direct",
+    passthroughToolCalls: 1,
+    callmuxMetaToolCalls: 0,
+    callmuxDownstreamToolCalls: 0,
+    totalDownstreamToolCalls: 1,
+    callmuxToolCalls: 0,
+    realToolCalls: 1,
+    downstreamTargets: [{ server: "github", tool: "get_issue", count: 1 }],
+    durationMs: 1,
+    success: true,
+  });
 
+  assert.equal(store.stats().passthroughToolCalls, 1);
+  assert.equal(store.stats().callmuxMetaToolCalls, 1);
+  assert.equal(store.stats().callmuxDownstreamToolCalls, 3);
+  assert.equal(store.stats().totalDownstreamToolCalls, 4);
   assert.equal(store.stats().callmuxToolCalls, 1);
-  assert.equal(store.stats().realToolCalls, 3);
+  assert.equal(store.stats().realToolCalls, 4);
 });
 
 test("dashboard classifies downstream tool errors separately from callmux errors", () => {
@@ -6294,6 +6318,10 @@ test("listener dashboard records downstream tool failures without callmux error 
   assert.equal(events[0].status, "downstream_error");
   assert.equal(events[0].success, true);
   assert.equal(events[0].error, "npm test failed");
+  assert.equal((events[0] as any).passthroughToolCalls, 1);
+  assert.equal((events[0] as any).callmuxMetaToolCalls, 0);
+  assert.equal((events[0] as any).callmuxDownstreamToolCalls, 0);
+  assert.equal((events[0] as any).totalDownstreamToolCalls, 1);
   assert.equal((listener as any).runtimeEvents.stats().recentErrors, 0);
 });
 
@@ -6301,6 +6329,9 @@ test("dashboard hides successful transport HTTP events by default", () => {
   const html = renderDashboardHtml({ enabled: true, path: "/dashboard", maxEvents: 500 });
   assert.match(html, /id="hide-transport" type="checkbox" checked/);
   assert.match(html, /function isTransportHttpEvent/);
+  assert.match(html, /Passthrough calls/);
+  assert.match(html, /Meta calls \/ downstream/);
+  assert.match(html, /Total downstream/);
   assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
   assert.ok(html.includes("Number(event.status ?? 0) < 400"));
 });
@@ -6334,6 +6365,10 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
 
   assert.equal(summary.toolKind, "callmux_meta");
   assert.equal(summary.operation, "parallel");
+  assert.equal(summary.passthroughToolCalls, 0);
+  assert.equal(summary.callmuxMetaToolCalls, 1);
+  assert.equal(summary.callmuxDownstreamToolCalls, 3);
+  assert.equal(summary.totalDownstreamToolCalls, 3);
   assert.equal(summary.callmuxToolCalls, 1);
   assert.equal(summary.realToolCalls, 3);
   assert.deepEqual(summary.downstreamTargets, [
@@ -6347,6 +6382,10 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
     { tool: "callmux_status", server: "callmux" },
     errorResult("tool_resolution_failed", "server not found")
   );
+  assert.equal(invalid.passthroughToolCalls, 0);
+  assert.equal(invalid.callmuxMetaToolCalls, 1);
+  assert.equal(invalid.callmuxDownstreamToolCalls, 0);
+  assert.equal(invalid.totalDownstreamToolCalls, 0);
   assert.equal(invalid.realToolCalls, 0);
   assert.deepEqual(invalid.downstreamTargets, []);
 
@@ -6359,6 +6398,10 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
     },
     errorResult("invalid_arguments", '"items" must be an array')
   );
+  assert.equal(invalidBatch.passthroughToolCalls, 0);
+  assert.equal(invalidBatch.callmuxMetaToolCalls, 1);
+  assert.equal(invalidBatch.callmuxDownstreamToolCalls, 0);
+  assert.equal(invalidBatch.totalDownstreamToolCalls, 0);
   assert.equal(invalidBatch.realToolCalls, 0);
   assert.deepEqual(invalidBatch.downstreamTargets, [
     { server: "github", tool: "get_issue", count: 0 },
