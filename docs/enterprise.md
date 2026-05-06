@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # Enterprise Deployment
 
@@ -60,15 +60,15 @@ Recommended for enterprise identity federation. Agents authenticate with JWTs fr
 
 | Field | Type | Required | Default | Description |
 |:------|:-----|:---------|:--------|:------------|
-| `mode` | string | yes | — | Must be `"oidc_jwt"` |
-| `issuer` | string | yes | — | Required `iss` claim value |
-| `audience` | string \| string[] | yes | — | Allowed `aud` claim value(s) |
-| `jwksUri` | string | yes | — | JWKS endpoint for signature verification |
-| `algorithms` | string[] | — | `["RS256"]` | Allowed algorithms (`RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`) |
-| `clockSkewSeconds` | integer | — | `30` | `exp`/`nbf` clock-skew tolerance |
-| `jwksCacheTtlSeconds` | integer | — | `300` | JWKS cache TTL |
-| `jwksFetchTimeoutMs` | integer | — | `5000` | JWKS fetch timeout |
-| `allowUnauthenticatedHealth` | boolean | — | `false` | Allow `/health` without auth |
+| `mode` | string | yes | - | Must be `"oidc_jwt"` |
+| `issuer` | string | yes | - | Required `iss` claim value |
+| `audience` | string \| string[] | yes | - | Allowed `aud` claim value(s) |
+| `jwksUri` | string | yes | - | JWKS endpoint for signature verification |
+| `algorithms` | string[] | - | `["RS256"]` | Allowed algorithms (`RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`) |
+| `clockSkewSeconds` | integer | - | `30` | `exp`/`nbf` clock-skew tolerance |
+| `jwksCacheTtlSeconds` | integer | - | `300` | JWKS cache TTL |
+| `jwksFetchTimeoutMs` | integer | - | `5000` | JWKS fetch timeout |
+| `allowUnauthenticatedHealth` | boolean | - | `false` | Allow `/health` without auth |
 
 ### Security Guardrail
 
@@ -104,27 +104,27 @@ Control which principals can call which tools. Authorization requires authentica
 }
 ```
 
-**`defaultEffect`** — `"allow"` (default) or `"deny"` when no rule matches. Set to `"deny"` for least-privilege.
+**`defaultEffect`**: `"allow"` (default) or `"deny"` when no rule matches. Set to `"deny"` for least-privilege.
 
 **Rule fields:**
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
-| `id` | string | — | Stable rule identifier (included in denied responses) |
+| `id` | string | - | Stable rule identifier (included in denied responses) |
 | `effect` | string | yes | `"allow"` or `"deny"` |
-| `principals` | string[] | — | Principal patterns to match |
-| `tools` | string[] | — | Tool patterns to match |
+| `principals` | string[] | - | Principal patterns to match |
+| `tools` | string[] | - | Tool patterns to match |
 
 **Principal patterns:**
-- `bearer:ops` — specific bearer token ID
-- `oidc:alice` — specific OIDC subject
-- `scope:mcp.read` — OIDC scope claim
-- `group:admins` — OIDC group claim
-- `*` — any authenticated principal
+- `bearer:ops` - specific bearer token ID
+- `oidc:alice` - specific OIDC subject
+- `scope:mcp.read` - OIDC scope claim
+- `group:admins` - OIDC group claim
+- `*` - any authenticated principal
 
 **Tool patterns:**
-- `github__get_*` — wildcards supported
-- `*` — all tools
+- `github__get_*` - wildcards supported
+- `*` - all tools
 - `server__tool` patterns work with namespaced tools
 
 Rules are evaluated in order. First match wins.
@@ -176,8 +176,8 @@ Structured JSON audit events for every request, designed for compliance and inci
 |:------|:-----|:--------|:------------|
 | `enabled` | boolean | `false` | Enable structured JSON audit events |
 | `includeRequestBody` | boolean | `false` | Include redacted payload details |
-| `maxPayloadChars` | integer | — | Max serialized payload chars in logs (`0` disables) |
-| `redactKeys` | string[] | — | Additional key names to redact (case-insensitive) |
+| `maxPayloadChars` | integer | - | Max serialized payload chars in logs (`0` disables) |
+| `redactKeys` | string[] | - | Additional key names to redact (case-insensitive) |
 
 Audit records include correlation `requestId`, principal metadata, status code, and duration. HTTP responses include `x-request-id` for correlation.
 
@@ -230,9 +230,9 @@ See [Shared Server Mode](shared-server.md#config-hot-reload) for reload behavior
 
 For production deployment guidance, see the release profiles documentation:
 
-- **Dev** — minimal config, no auth, localhost only
-- **Staging** — auth enabled, rate limits, audit logging
-- **Production** — full hardening with RBAC, CIDR allowlist, hashed tokens
+- **Dev** - minimal config, no auth, localhost only
+- **Staging** - auth enabled, rate limits, audit logging
+- **Production** - full hardening with RBAC, CIDR allowlist, hashed tokens
 
 Detailed checklists: [`docs/security/2026-04-30-release-profiles.md`](security/2026-04-30-release-profiles.md)
 
@@ -242,5 +242,5 @@ Full threat model: [`docs/security/2026-04-30-enterprise-threat-model.md`](secur
 
 ## See Also
 
-- [Shared Server Mode](shared-server.md) — listener setup and client config
-- [Config Reference](config-reference.md) — full config schema
+- [Shared Server Mode](shared-server.md) - listener setup and client config
+- [Config Reference](config-reference.md) - full config schema

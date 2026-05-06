@@ -1,10 +1,10 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # Meta-Only Mode
 
 ## The Problem: Tool-Listing Bloat
 
-Every tool definition in the system prompt costs tokens on every API turn. With multiple servers, 50-100+ tool definitions can dominate the prompt — and they're re-processed by the model on every single message, even when the agent only uses a few tools.
+Every tool definition in the system prompt costs tokens on every API turn. With multiple servers, 50-100+ tool definitions can dominate the prompt, and they're re-processed by the model on every single message, even when the agent only uses a few tools.
 
 **Meta-only mode** hides all proxied tools and exposes only the 11 callmux meta-tools. The agent discovers available tools via `callmux_search_tools` or `callmux_status` and invokes them through `callmux_call`, recipes, or the batch/parallel meta-tools.
 
@@ -49,7 +49,7 @@ In meta-only mode, the agent follows this workflow:
 
 ```json
 // callmux_status (no args)
-→ Returns: server names, tool counts, cache state, mode
+-> Returns: server names, tool counts, cache state, mode
 ```
 
 ### 2. Search tools
@@ -57,7 +57,7 @@ In meta-only mode, the agent follows this workflow:
 ```json
 // callmux_search_tools
 { "query": "github issue", "limit": 5 }
-→ Returns matching callable tool names, servers, descriptions, scores, and input field hints
+-> Returns matching callable tool names, servers, descriptions, scores, and input field hints
 ```
 
 Use `server` to narrow results when you already know the target downstream server.
@@ -67,7 +67,7 @@ Use `server` to narrow results when you already know the target downstream serve
 ```json
 // callmux_status with descriptions
 { "descriptions": true, "descriptionMaxLength": 80 }
-→ Returns: tool names + truncated descriptions per server
+-> Returns: tool names + truncated descriptions per server
 ```
 
 This is useful for browsing the whole exposed surface. Use `descriptionMaxLength` to control description verbosity.
@@ -116,21 +116,21 @@ Per-server `tools: [...]` whitelists still apply. They filter what `callmux_call
 
 ## When to Use Meta-Only
 
-- **Many servers (5+)** — system prompt savings become significant
-- **Token-sensitive deployments** — every token in the system prompt compounds across the session
-- **Consistent interface** — system prompt size never changes regardless of how many servers you add
-- **Agents that struggle with large tool listings** — some models perform worse with 50+ tool definitions
+- **Many servers (5+)** - system prompt savings become significant
+- **Token-sensitive deployments** - every token in the system prompt compounds across the session
+- **Consistent interface** - system prompt size never changes regardless of how many servers you add
+- **Agents that struggle with large tool listings** - some models perform worse with 50+ tool definitions
 
 ---
 
 ## When to Skip It
 
-- **Single server with few tools** — the overhead of `callmux_status` + `callmux_call` exceeds the savings
-- **Agents that benefit from seeing all tools upfront** — some workflows are faster when the agent can call tools directly by name
+- **Single server with few tools** - the overhead of `callmux_status` + `callmux_call` exceeds the savings
+- **Agents that benefit from seeing all tools upfront** - some workflows are faster when the agent can call tools directly by name
 
 ---
 
 ## See Also
 
-- [Config Reference](config-reference.md) — `metaOnly`, `descriptionMaxLength` fields
-- [Recipes](recipes.md) — recipes work seamlessly in meta-only mode
+- [Config Reference](config-reference.md) - `metaOnly`, `descriptionMaxLength` fields
+- [Recipes](recipes.md) - recipes work in meta-only mode without changes

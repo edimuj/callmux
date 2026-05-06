@@ -1,7 +1,7 @@
 <div align="center">
   <h1>callmux</h1>
   <p>
-    <strong>MCP multiplexer — parallel execution, batching, caching, pipelining, and shared infrastructure for any AI agent.</strong>
+    <strong>MCP multiplexer: parallel execution, batching, caching, pipelining, and shared infrastructure for any AI agent.</strong>
   </p>
   <p>
     <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/npm/v/callmux?color=blue&label=npm" alt="npm version"></a>
@@ -34,7 +34,7 @@ AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 se
 
 ## Why Tool Call Reduction Matters
 
-Every tool call adds structural overhead (~75 tokens) and intermediate reasoning (~150 tokens of "Now I'll fetch the next one...") to your context window. Batch 7 calls into 1 and you eliminate **~1,350 tokens of pure waste** — a 19:1 reduction in context pollution. Since context is cumulative (every turn re-processes everything before it), this compounds across a session.
+Every tool call adds structural overhead (~75 tokens) and intermediate reasoning (~150 tokens of "Now I'll fetch the next one...") to your context window. Batch 7 calls into 1 and you eliminate **~1,350 tokens of pure waste**, a 19:1 reduction in context pollution. Since context is cumulative (every turn re-processes everything before it), this compounds across a session.
 
 <p align="center">
   <img src="docs/diagram-token-savings.png" alt="Context window pollution: 1,350 tokens wasted vs 75 tokens overhead" width="720">
@@ -42,7 +42,7 @@ Every tool call adds structural overhead (~75 tokens) and intermediate reasoning
 
 In practice, callmux reduces tool calls to **~15% of the original count**. Sessions run longer before compaction, cost less in API tokens, and produce better output because the model isn't re-reading filler from 40 turns ago.
 
-[Deep dive on the context math with diagrams](https://longgamedev.substack.com/p/your-ai-agent-is-re-reading-its-own)
+[Full breakdown of the context math with diagrams](https://longgamedev.substack.com/p/your-ai-agent-is-re-reading-its-own)
 
 ---
 
@@ -79,13 +79,13 @@ Add to `~/.claude.json` or project `.mcp.json` (Claude Code):
 
 Done. Claude now sees all GitHub tools plus the `callmux_*` meta-tools.
 
-Works with **any MCP client** — [Codex](docs/shared-server.md#codex-streamable-http), [Claude Desktop](docs/shared-server.md#claude-desktop), Cursor, Windsurf, and anything that speaks MCP stdio or HTTP. The [interactive setup wizard](#interactive-setup) handles configuration for you.
+Works with **any MCP client**: [Codex](docs/shared-server.md#codex-streamable-http), [Claude Desktop](docs/shared-server.md#claude-desktop), Cursor, Windsurf, and anything that speaks MCP stdio or HTTP. The [interactive setup wizard](#interactive-setup) handles configuration for you.
 
 ---
 
 ## Key Features
 
-### Shared Server — 60 Processes Down to 6
+### Shared Server: 60 Processes Down to 6
 
 Run callmux once, connect all sessions. One set of downstream servers, shared cache, no orphaned processes. On a machine with 6 agent sessions and 5 MCP servers, that's ~60 processes and 4+ GB RAM collapsed to ~6 processes and ~500 MB.
 
@@ -98,11 +98,11 @@ callmux --listen 4860
 callmux daemon install --start --enable
 ```
 
-[Full guide →](docs/shared-server.md)
+[Full guide ->](docs/shared-server.md)
 
-### Resilient Bridge — Sessions That Survive Restarts
+### Resilient Bridge: Sessions That Survive Restarts
 
-Codex users know the pain: when an MCP server restarts or loses its transport, the entire Codex session needs to restart to reconnect. callmux's stdio bridge sits between Codex and the shared listener — if the listener hiccups, the bridge reconnects and retries on the next tool call. The agent session never notices.
+Codex users know the pain: when an MCP server restarts or loses its transport, the entire Codex session needs to restart to reconnect. callmux's stdio bridge sits between Codex and the shared listener. If the listener hiccups, the bridge reconnects and retries on the next tool call. The agent session never notices.
 
 <p align="center">
   <img src="docs/diagram-bridge.png" alt="Bridge resilience: auto-reconnect, zero downtime" width="720">
@@ -114,33 +114,33 @@ command = "callmux"
 args = ["bridge", "--url", "http://localhost:4860/mcp"]
 ```
 
-[Full guide →](docs/shared-server.md#codex-with-stdio-bridge-recommended)
+[Full guide ->](docs/shared-server.md#codex-with-stdio-bridge-recommended)
 
-### Meta-Only Mode — Fixed System Prompt Size
+### Meta-Only Mode: Fixed System Prompt Size
 
 50+ tool definitions bloat the system prompt on every API turn, costing tokens that compound across the session. Meta-only mode hides all downstream tools and exposes only 11 meta-tools. The agent discovers tools via `callmux_search_tools` or `callmux_status` and calls them through `callmux_call`. System prompt size stays fixed regardless of how many servers you add.
 
-[Full guide →](docs/meta-only-mode.md)
+[Full guide ->](docs/meta-only-mode.md)
 
-### Enterprise-Ready Out of the Box
+### Enterprise Security Built In
 
 Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access control, rate limiting, CIDR allowlists, structured audit logging, and Prometheus metrics. Shared listeners hot-reload config-file changes and still support SIGHUP reloads. Hardened defaults: non-loopback listeners refuse to start without auth.
 
-[Full guide →](docs/enterprise.md)
+[Full guide ->](docs/enterprise.md)
 
-### Read-Only Dashboard — Live Runtime Visibility
+### Read-Only Dashboard: Live Runtime Visibility
 
 Optional dashboard for shared listeners. Disabled by default, then enabled with `dashboard.enabled`. It shows server health, active sessions, cache and response-store stats, recent tool calls, config reloads, and errors.
 
-[Full guide →](docs/shared-server.md#read-only-dashboard)
+[Full guide ->](docs/shared-server.md#read-only-dashboard)
 
-### Recipes — Team Workflows as Callable Names
+### Recipes: Team Workflows as Callable Names
 
 Define multi-step operations once in config, call them by name from any agent session. Encode team conventions (bug issues always get the `bug` label), triage workflows (fetch two issues in parallel for comparison), or analysis pipelines (search then analyze). One name, consistent execution, works across all clients.
 
-[Full guide →](docs/recipes.md)
+[Full guide ->](docs/recipes.md)
 
-### Tool Scoping — Per-Server Filtering for Any Client
+### Tool Scoping: Per-Server Filtering for Any Client
 
 Whitelist which tools each server exposes. This gives any MCP client per-server tool filtering, even clients that don't support it natively (Codex, Cursor, Windsurf).
 
@@ -157,7 +157,7 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 | Tool | Purpose |
 |:-----|:--------|
 | `callmux_parallel` | Fire independent calls concurrently, get all results in one turn |
-| `callmux_batch` | Same tool, many items — the bulk operation pattern |
+| `callmux_batch` | Same tool, many items. The bulk operation pattern |
 | `callmux_pipeline` | Chain tools where each step feeds into the next |
 | `callmux_search_tools` | Search downstream tools by task, keyword, server, description, and input fields |
 | `callmux_get_result` | Page through a full stored result when callmux returns a truncated response ref |
@@ -201,7 +201,7 @@ The wizard detects existing MCP servers, lets you pick from a curated list or ad
 
 ## Related
 
-- **[tokenlean](https://github.com/edimuj/tokenlean)** — CLI tools for AI agents, token-efficient code understanding. Same philosophy: make agents less wasteful.
+- **[tokenlean](https://github.com/edimuj/tokenlean)** - CLI tools for AI agents, token-efficient code understanding. Same philosophy: make agents less wasteful.
 
 ## License
 

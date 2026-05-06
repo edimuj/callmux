@@ -1,6 +1,6 @@
-[← Back to Enterprise Deployment](../enterprise.md)
+[< Back to Enterprise Deployment](../enterprise.md)
 
-# Threat Model — callmux Shared Listener
+# Threat Model: callmux Shared Listener
 
 *Last updated: 2026-04-30*
 
@@ -56,8 +56,8 @@ For general callmux documentation, see the [README](../../README.md). For deploy
 **Threat:** Direct calls to `/mcp`, `/sse`, or `/messages` without credentials.
 
 **Controls:**
-- `auth` config — bearer tokens (scrypt-hashed) or OIDC JWT validation
-- Remote startup guardrail — callmux refuses to start on non-loopback without auth unless explicitly overridden
+- `auth` config - bearer tokens (scrypt-hashed) or OIDC JWT validation
+- Remote startup guardrail - callmux refuses to start on non-loopback without auth unless explicitly overridden
 - Optional `/health` and `/metrics` auth gates
 
 ### 2. Privilege Escalation Through Tool Routing
@@ -131,5 +131,5 @@ For general callmux documentation, see the [README](../../README.md). For deploy
 
 ## See Also
 
-- [Enterprise Deployment](../enterprise.md) — configuration guide for all security features
-- [Release Profiles](2026-04-30-release-profiles.md) — dev/staging/prod hardening presets
+- [Enterprise Deployment](../enterprise.md) - configuration guide for all security features
+- [Release Profiles](2026-04-30-release-profiles.md) - dev/staging/prod hardening presets

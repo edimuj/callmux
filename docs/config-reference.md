@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # Config Reference
 
@@ -19,7 +19,7 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
 }
 ```
 
-callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) for zero-friction adoption.
+callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you can adopt it without changing config structure.
 
 ---
 
@@ -27,10 +27,10 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) for zer
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
-| `servers` | object | *(required)* | Map of server name → server config |
-| `recipes` | object | — | Named reusable callmux workflows ([details](recipes.md)) |
+| `servers` | object | *(required)* | Map of server name -> server config |
+| `recipes` | object | - | Named reusable callmux workflows ([details](recipes.md)) |
 | `cacheTtlSeconds` | integer | `0` | Cache TTL in seconds (0 = disabled) |
-| `cachePolicy` | object | — | Global cache allow/deny rules (see [Caching](#caching)) |
+| `cachePolicy` | object | - | Global cache allow/deny rules (see [Caching](#caching)) |
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
 | `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
 | `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
@@ -38,16 +38,16 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) for zer
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
 | `allowInsecureRemoteListener` | boolean | `false` | Permit non-loopback listener startup without auth (unsafe) |
-| `auth` | object | — | Listener authentication config ([details](enterprise.md#authentication)) |
-| `authorization` | object | — | Listener authorization policy ([details](enterprise.md#authorization-rbac)) |
-| `abuseControls` | object | — | Rate limits, in-flight caps, CIDR allowlist ([details](enterprise.md#rate-limiting-and-abuse-controls)) |
-| `auditLog` | object | — | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
-| `metrics` | object | — | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
+| `auth` | object | - | Listener authentication config ([details](enterprise.md#authentication)) |
+| `authorization` | object | - | Listener authorization policy ([details](enterprise.md#authorization-rbac)) |
+| `abuseControls` | object | - | Rate limits, in-flight caps, CIDR allowlist ([details](enterprise.md#rate-limiting-and-abuse-controls)) |
+| `auditLog` | object | - | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
+| `metrics` | object | - | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
 | `dashboard` | object | disabled | Read-only listener dashboard ([details](shared-server.md#read-only-dashboard)) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |
-| `descriptionMaxLength` | integer | — | Default max chars for tool descriptions in `callmux_status` |
+| `descriptionMaxLength` | integer | - | Default max chars for tool descriptions in `callmux_status` |
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
 
 ---
@@ -59,15 +59,15 @@ Local process servers use `command` to launch:
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `command` | string | yes | Command to launch the MCP server |
-| `args` | string[] | — | Arguments passed to the command |
-| `env` | object | — | Environment variables for the process |
-| `cwd` | string | — | Working directory |
-| `cwdMode` | `"global"` or `"session"` | — | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
-| `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
-| `maxConcurrency` | integer | — | Max concurrent calls to this server |
-| `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
-| `cachePolicy` | object | — | Per-server cache allow/deny rules |
-| `responseShield` | object | — | Per-server response shielding overrides |
+| `args` | string[] | - | Arguments passed to the command |
+| `env` | object | - | Environment variables for the process |
+| `cwd` | string | - | Working directory |
+| `cwdMode` | `"global"` or `"session"` | - | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
+| `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
+| `maxConcurrency` | integer | - | Max concurrent calls to this server |
+| `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
+| `cachePolicy` | object | - | Per-server cache allow/deny rules |
+| `responseShield` | object | - | Per-server response shielding overrides |
 
 ---
 
@@ -78,13 +78,13 @@ Remote servers use `url` instead of `command`:
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
 | `url` | string | yes | URL of the remote MCP server |
-| `transport` | string | — | `"streamable-http"` or `"sse"` (auto-detected if omitted) |
-| `headers` | object | — | HTTP headers (e.g. authorization) |
-| `tools` | string[] | — | Whitelist of tool names to expose (omit = all) |
-| `maxConcurrency` | integer | — | Max concurrent calls to this server |
-| `requestBodyMaxBytes` | integer | — | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
-| `cachePolicy` | object | — | Per-server cache allow/deny rules |
-| `responseShield` | object | — | Per-server response shielding overrides |
+| `transport` | string | - | `"streamable-http"` or `"sse"` (auto-detected if omitted) |
+| `headers` | object | - | HTTP headers (e.g. authorization) |
+| `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
+| `maxConcurrency` | integer | - | Max concurrent calls to this server |
+| `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
+| `cachePolicy` | object | - | Per-server cache allow/deny rules |
+| `responseShield` | object | - | Per-server response shielding overrides |
 
 Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
 
@@ -129,8 +129,8 @@ Defaults:
 | `maxStringChars` | `8192` | Truncate individual string fields longer than this |
 | `maxArrayItems` | `50` | Truncate arrays longer than this |
 | `maxStoredResults` | `100` | Global stored-result capacity before oldest refs are evicted |
-| `allowTools` | — | Only shield matching tools when set |
-| `denyTools` | — | Never shield matching tools; takes precedence |
+| `allowTools` | - | Only shield matching tools when set |
+| `denyTools` | - | Never shield matching tools; takes precedence |
 
 Global example:
 
@@ -206,7 +206,7 @@ When auth is configured, dashboard requests use the same listener authentication
 
 Any argument object can use file references. callmux reads the file and replaces the reference with file content before forwarding to the downstream MCP tool.
 
-### `$file` — Raw file content
+### `$file` - Raw file content
 
 ```json
 {
@@ -225,7 +225,7 @@ Optional `maxBytes` override per reference:
 - `maxBytes` defaults to `1000000` (1 MB) when omitted
 - Hard cap for `maxBytes` is `10000000` (10 MB)
 
-### `$jsonFile` / `$yamlFile` — Parsed file content
+### `$jsonFile` / `$yamlFile` - Parsed file content
 
 ```json
 {
@@ -236,7 +236,7 @@ Optional `maxBytes` override per reference:
 
 Both support optional `maxBytes` like `$file`.
 
-### `$text` — Inline text composition
+### `$text` - Inline text composition
 
 Skip writing a temp file for long multi-line text:
 
@@ -372,7 +372,7 @@ The `server` field in meta-tool calls lets you target specific servers:
 
 ## See Also
 
-- [CLI Reference](cli-reference.md) — command-line flags and management commands
-- [Enterprise Deployment](enterprise.md) — auth, RBAC, rate limiting, audit details
-- [Recipes](recipes.md) — workflow template guide
-- [Shared Server Mode](shared-server.md) — listener setup and client config
+- [CLI Reference](cli-reference.md) - command-line flags and management commands
+- [Enterprise Deployment](enterprise.md) - auth, RBAC, rate limiting, audit details
+- [Recipes](recipes.md) - workflow template guide
+- [Shared Server Mode](shared-server.md) - listener setup and client config

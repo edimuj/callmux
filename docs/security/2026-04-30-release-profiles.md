@@ -1,4 +1,4 @@
-[← Back to Enterprise Deployment](../enterprise.md)
+[< Back to Enterprise Deployment](../enterprise.md)
 
 # Release Profiles
 
@@ -48,7 +48,7 @@ For full configuration details, see [Enterprise Deployment](../enterprise.md). F
 | Control | Setting |
 |:--------|:--------|
 | Listener bind | Non-loopback allowed (with auth) |
-| Auth | Required — OIDC JWT preferred |
+| Auth | Required, OIDC JWT preferred |
 | Authorization | Enabled, default deny |
 | Abuse controls | Enabled |
 | Audit | Enabled with request body redaction |
@@ -95,7 +95,7 @@ For full configuration details, see [Enterprise Deployment](../enterprise.md). F
 | Control | Setting |
 |:--------|:--------|
 | Listener bind | Explicit host with TLS termination |
-| Auth | Required — OIDC JWT strongly preferred |
+| Auth | Required, OIDC JWT strongly preferred |
 | Authorization | Required, deny-by-default |
 | Abuse controls | Required |
 | Audit | Required, redaction tuned for compliance |
@@ -136,6 +136,6 @@ callmux builds and connects the new runtime before swapping it into the live lis
 
 ## See Also
 
-- [Enterprise Deployment](../enterprise.md) — full configuration guide
-- [Threat Model](2026-04-30-enterprise-threat-model.md) — threat analysis and controls
-- [Config Reference](../config-reference.md) — all configuration fields
+- [Enterprise Deployment](../enterprise.md) - full configuration guide
+- [Threat Model](2026-04-30-enterprise-threat-model.md) - threat analysis and controls
+- [Config Reference](../config-reference.md) - all configuration fields

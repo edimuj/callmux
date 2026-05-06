@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # CLI Reference
 
@@ -140,5 +140,5 @@ callmux daemon restart
 
 ## See Also
 
-- [Config Reference](config-reference.md) — full config schema and options
-- [Shared Server Mode](shared-server.md) — listener setup, bridge command, client config
+- [Config Reference](config-reference.md) - full config schema and options
+- [Shared Server Mode](shared-server.md) - listener setup, bridge command, client config

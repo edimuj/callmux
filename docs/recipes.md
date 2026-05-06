@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # Recipes
 
@@ -10,7 +10,7 @@ Think of them as team-wide shortcuts: encoding conventions ("bugs always get the
 
 ## Defining Recipes
 
-Recipes live in the `recipes` section of your config file. Each recipe wraps one of the existing meta-tools — `call`, `parallel`, `batch`, or `pipeline` — and can substitute runtime arguments using `{ "$param": "name" }` placeholders.
+Recipes live in the `recipes` section of your config file. Each recipe wraps one of the existing meta-tools (`call`, `parallel`, `batch`, or `pipeline`) and can substitute runtime arguments using `{ "$param": "name" }` placeholders.
 
 ### Call Recipe (Single Tool)
 
@@ -159,7 +159,7 @@ Returns the expanded calls, cache-hit candidates, and any validation errors. Use
 Use `{ "$param": "name" }` as an **entire JSON value** to mark it for runtime substitution. The placeholder is replaced with the corresponding value from the `arguments` object passed to `callmux_recipe_run`.
 
 Rules:
-- `$param` must be the only key in the object — `{ "$param": "x", "extra": true }` is invalid
+- `$param` must be the only key in the object. `{ "$param": "x", "extra": true }` is invalid
 - Missing params at runtime produce a clear error
 - Params can substitute any JSON type: strings, numbers, booleans, arrays, objects
 
@@ -167,7 +167,7 @@ Rules:
 
 ## Designing Good Recipes
 
-**Encode team conventions.** If every bug issue gets the same labels, repo, and assignee — that's a recipe. The agent only supplies the title and body.
+**Encode team conventions.** If every bug issue gets the same labels, repo, and assignee, that's a recipe. The agent only supplies the title and body.
 
 **Name for discoverability.** Agents see recipe names in `callmux_status`. Use clear, action-oriented names: `open_bug`, `triage_pair`, `search_and_analyze`.
 
@@ -181,5 +181,5 @@ Rules:
 
 ## See Also
 
-- [Config Reference](config-reference.md) — full config schema including recipes field
-- [Meta-Only Mode](meta-only-mode.md) — recipes work seamlessly in meta-only mode
+- [Config Reference](config-reference.md) - full config schema including recipes field
+- [Meta-Only Mode](meta-only-mode.md) - recipes work in meta-only mode without changes

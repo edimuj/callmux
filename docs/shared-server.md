@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[< Back to README](../README.md)
 
 # Shared Server Mode
 
@@ -11,8 +11,8 @@ Shared server mode runs callmux once as a persistent HTTP listener. All sessions
 </p>
 
 **What you get:**
-- ~60 processes → ~6 (one callmux + one of each downstream)
-- ~4 GB → ~500 MB RAM for MCP infrastructure
+- ~60 processes -> ~6 (one callmux + one of each downstream)
+- ~4 GB -> ~500 MB RAM for MCP infrastructure
 - No orphaned servers when sessions die
 - Cache shared across sessions when safe, scoped by project cwd for cwd-sensitive calls
 - Downstream startup cost paid once
@@ -94,9 +94,9 @@ args = ["bridge", "--url", "http://localhost:4860/mcp"]
 
 The bridge is a lightweight local process that Codex talks to over stdio. It connects to the shared listener over HTTP and adds two critical capabilities:
 
-1. **Project cwd injection** — The bridge sends `x-callmux-cwd` from its process working directory, so wrapped path-sensitive stdio servers still see the project cwd even through an HTTP listener.
+1. **Project cwd injection** - The bridge sends `x-callmux-cwd` from its process working directory, so wrapped path-sensitive stdio servers still see the project cwd even through an HTTP listener.
 
-2. **Resilient reconnection** — Because Codex stays attached to the local stdio bridge, temporary shared-listener restarts, MCP session/transport failures, or downstream server hiccups can recover on the next tool call. The bridge reconnects and retries the request once. Without the bridge, Codex would need a full session restart to re-establish MCP connectivity — something Codex users frequently complain about.
+2. **Resilient reconnection** - Because Codex stays attached to the local stdio bridge, temporary shared-listener restarts, MCP session/transport failures, or downstream server hiccups can recover on the next tool call. The bridge reconnects and retries the request once. Without the bridge, Codex would need a full session restart to re-establish MCP connectivity, something Codex users frequently complain about.
 
 ### Claude Desktop
 
@@ -179,9 +179,9 @@ The dashboard is disabled by default. Enable it in config:
 
 When enabled, callmux serves:
 
-- `/dashboard` — browser UI
-- `/dashboard/data` — JSON snapshot for the UI
-- `/dashboard/events` — SSE stream for live refreshes
+- `/dashboard` - browser UI
+- `/dashboard/data` - JSON snapshot for the UI
+- `/dashboard/events` - SSE stream for live refreshes
 
 The dashboard shows server health, active sessions, cache and response-store stats, recent HTTP requests, tool calls, cache hits, config reloads, and recent errors. Event rows are clickable and show routing details such as JSON-RPC method, callmux meta-tool vs downstream tool classification, fan-out counts for batch/parallel/pipeline calls, and aggregated downstream targets. Tool arguments are intentionally not stored in dashboard history. It is read-only in this version; server editing will come later.
 
@@ -238,6 +238,6 @@ npx -y callmux --url https://mcp.example.com/mcp --header "Authorization:Bearer 
 
 ## See Also
 
-- [Enterprise Deployment](enterprise.md) — auth, RBAC, rate limiting for shared listeners
-- [Config Reference](config-reference.md) — full config schema
-- [CLI Reference](cli-reference.md) — bridge command details
+- [Enterprise Deployment](enterprise.md) - auth, RBAC, rate limiting for shared listeners
+- [Config Reference](config-reference.md) - full config schema
+- [CLI Reference](cli-reference.md) - bridge command details
