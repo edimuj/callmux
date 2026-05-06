@@ -6343,6 +6343,8 @@ test("listener dashboard records downstream tool failures without callmux error 
 
 test("dashboard hides successful transport HTTP events by default", () => {
   const html = renderDashboardHtml({ enabled: true, path: "/dashboard", maxEvents: 500 });
+  assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
+  assert.match(html, /%2338bdf8/);
   assert.match(html, /id="hide-transport" type="checkbox" checked/);
   assert.match(html, /function isTransportHttpEvent/);
   assert.match(html, /function cacheEntriesText/);

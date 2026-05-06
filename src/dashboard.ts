@@ -2,6 +2,13 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const DEFAULT_DASHBOARD_PATH = "/dashboard";
 const DEFAULT_MAX_EVENTS = 500;
+const DASHBOARD_FAVICON_HREF = `data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#05070a"/>
+  <path d="M43 18a18 18 0 1 0 0 28" fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round"/>
+  <path d="M43 18H32m11 0v11" fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`
+)}`;
 
 type RuntimeEvent =
   | {
@@ -267,6 +274,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href=${JSON.stringify(DASHBOARD_FAVICON_HREF)}>
   <title>callmux dashboard</title>
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
