@@ -101,6 +101,14 @@ interface DashboardToolCallSummary {
   downstreamTargets: DashboardDownstreamTarget[];
 }
 
+const DOWNSTREAM_CAPABLE_META_TOOLS = new Set([
+  "callmux_call",
+  "callmux_batch",
+  "callmux_parallel",
+  "callmux_pipeline",
+  "callmux_recipe_run",
+]);
+
 export interface ListenerOptions {
   port: number;
   host?: string;
@@ -1078,16 +1086,17 @@ export class CallmuxListener {
     target?: ResponseShieldTarget
   ): DashboardToolCallSummary {
     const isMeta = name.startsWith("callmux_");
+    const countMetaCall = DOWNSTREAM_CAPABLE_META_TOOLS.has(name);
     const downstreamTargets = this.dashboardTargetsForToolCall(name, args, result, target);
     const downstreamCalls = downstreamTargets.reduce((sum, item) => sum + item.count, 0);
     return {
       toolKind: isMeta ? "callmux_meta" : "downstream",
       operation: isMeta ? name.slice("callmux_".length) : "direct",
       passthroughToolCalls: isMeta ? 0 : downstreamCalls,
-      callmuxMetaToolCalls: isMeta ? 1 : 0,
+      callmuxMetaToolCalls: countMetaCall ? 1 : 0,
       callmuxDownstreamToolCalls: isMeta ? downstreamCalls : 0,
       totalDownstreamToolCalls: downstreamCalls,
-      callmuxToolCalls: isMeta ? 1 : 0,
+      callmuxToolCalls: countMetaCall ? 1 : 0,
       realToolCalls: downstreamCalls,
       downstreamTargets,
     };

@@ -6347,6 +6347,9 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /function isTransportHttpEvent/);
   assert.match(html, /function cacheEntriesText/);
   assert.match(html, /return "disabled"/);
+  assert.match(html, /function truncateText/);
+  assert.match(html, /maxLength = 180/);
+  assert.match(html, /truncateText\(detailText\(event\)\)/);
   assert.match(html, /Passthrough calls/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);
@@ -6424,6 +6427,18 @@ test("listener dashboard summarizes meta-tool fanout without arguments", () => {
   assert.deepEqual(invalidBatch.downstreamTargets, [
     { server: "github", tool: "get_issue", count: 0 },
   ]);
+
+  const status = (listener as any).summarizeDashboardToolCall(
+    "callmux_status",
+    {},
+    textResult("ok")
+  );
+  assert.equal(status.toolKind, "callmux_meta");
+  assert.equal(status.callmuxMetaToolCalls, 0);
+  assert.equal(status.callmuxDownstreamToolCalls, 0);
+  assert.equal(status.totalDownstreamToolCalls, 0);
+  assert.equal(status.callmuxToolCalls, 0);
+  assert.equal(status.realToolCalls, 0);
 });
 
 test("listener dashboard uses listener authentication", async () => {

@@ -377,6 +377,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (cache && cache.enabled === false) return "disabled";
       return compactCount(cache?.entries ?? 0);
     }
+    function truncateText(value, maxLength = 180) {
+      const text = String(value ?? "");
+      return text.length > maxLength ? text.slice(0, maxLength - 3) + "..." : text;
+    }
     function eventKey(event) {
       return [event.timestamp, event.type, event.requestId || event.tool || event.path || ""].join("|");
     }
@@ -474,7 +478,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.status !== "error" && event.success !== false;
         const selected = key === selectedEventKey ? " selected" : "";
-        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(statusText(event, ok)), statusClass(event, ok), "Status") + cell(esc(detailText(event)), "muted", "Detail") + "</tr>";
+        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(statusText(event, ok)), statusClass(event, ok), "Status") + cell(esc(truncateText(detailText(event))), "muted", "Detail") + "</tr>";
       }).join("");
       document.querySelectorAll("tr.event-row").forEach(row => {
         row.addEventListener("click", () => {
