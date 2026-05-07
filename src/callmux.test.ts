@@ -7,6 +7,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createSign, generateKeyPairSync } from "node:crypto";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallCache } from "./cache.js";
@@ -2664,6 +2665,63 @@ test("UpstreamManager close falls back to transport close when client close hang
   const durationMs = Date.now() - startedAt;
 
   assert.equal(transportClosed, true);
+  assert.ok(durationMs < 1800, `close took ${durationMs}ms`);
+});
+
+test("UpstreamManager close force-kills stdio child when SDK close stalls", async () => {
+  const upstream = new UpstreamManager();
+  const signals: string[] = [];
+  const child = new EventEmitter() as EventEmitter & {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    stdin: { end: () => void };
+    kill: (signal: NodeJS.Signals) => boolean;
+  };
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdin = { end() {} };
+  child.kill = (signal: NodeJS.Signals) => {
+    signals.push(signal);
+    if (signal === "SIGKILL") {
+      child.signalCode = signal;
+      child.emit("close", null, signal);
+    }
+    return true;
+  };
+
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {
+          await new Promise(() => {});
+        },
+      },
+      transport: {
+        _process: child,
+        async close() {},
+      },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  const startedAt = Date.now();
+  await upstream.close();
+  const durationMs = Date.now() - startedAt;
+
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
   assert.ok(durationMs < 1800, `close took ${durationMs}ms`);
 });
 
@@ -6414,6 +6472,59 @@ test("listener applyRuntimeConfig rejects insecure remote runtime config", async
       }),
     /Refusing insecure remote listener/
   );
+});
+
+test("listener close is bounded for stuck sessions and active HTTP connections", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  let forcedConnectionsClosed = false;
+  const internals = listener as unknown as {
+    sessions: Map<string, {
+      transport: { close?: () => Promise<void> };
+      server: { close: () => Promise<void> };
+    }>;
+    httpServer: {
+      close: (callback: () => void) => void;
+      closeIdleConnections: () => void;
+      closeAllConnections: () => void;
+    };
+  };
+  internals.sessions.set("stuck", {
+    transport: {
+      async close() {
+        await new Promise(() => {});
+      },
+    },
+    server: {
+      async close() {
+        await new Promise(() => {});
+      },
+    },
+  });
+  internals.httpServer = {
+    close() {},
+    closeIdleConnections() {},
+    closeAllConnections() {
+      forcedConnectionsClosed = true;
+    },
+  };
+
+  const startedAt = Date.now();
+  await listener.close();
+  const durationMs = Date.now() - startedAt;
+
+  assert.equal(forcedConnectionsClosed, true);
+  assert.equal(internals.sessions.size, 0);
+  assert.ok(durationMs < 1800, `close took ${durationMs}ms`);
 });
 
 test("listener /health returns ok with session count", async () => {

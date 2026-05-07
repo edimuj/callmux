@@ -60,9 +60,30 @@ import {
 } from "./dashboard.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
+const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
 const REQUEST_ID_HEADER = "x-request-id";
 const CWD_HEADER = "x-callmux-cwd";
+
+async function settleWithin<T>(
+  promise: Promise<T> | T | undefined,
+  timeoutMs: number
+): Promise<void> {
+  if (promise === undefined) return;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve(promise).then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 interface SessionEntry {
   transport: Transport;
@@ -299,18 +320,45 @@ export class CallmuxListener {
   async close(): Promise<void> {
     this.unsubscribeToolSuiteChanges?.();
     this.unsubscribeToolSuiteChanges = undefined;
-    for (const [id, session] of this.sessions) {
-      await session.transport.close?.();
-      await session.server.close();
-      this.sessions.delete(id);
+    const sessions = Array.from(this.sessions.entries());
+    this.sessions.clear();
+
+    const closeSessions = Promise.allSettled(
+      sessions.map(([, session]) =>
+        Promise.allSettled([
+          settleWithin(session.transport.close?.(), DEFAULT_LISTENER_CLOSE_TIMEOUT_MS),
+          settleWithin(session.server.close(), DEFAULT_LISTENER_CLOSE_TIMEOUT_MS),
+        ])
+      )
+    );
+
+    const server = this.httpServer;
+    this.httpServer = undefined;
+    if (!server) {
+      await closeSessions;
+      return;
     }
-    await new Promise<void>((resolve) => {
-      if (this.httpServer) {
-        this.httpServer.close(() => resolve());
-      } else {
+
+    const closeServer = new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
         resolve();
-      }
+      };
+
+      server.close(() => finish());
+      timer = setTimeout(() => {
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+        finish();
+      }, DEFAULT_LISTENER_CLOSE_TIMEOUT_MS);
+      timer.unref?.();
     });
+
+    await Promise.allSettled([closeSessions, closeServer]);
   }
 
   private handleReady(res: ServerResponse, context: RequestContext): void {

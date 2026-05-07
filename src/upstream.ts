@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { ChildProcess } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -430,6 +431,7 @@ export class UpstreamManager {
   }
 
   private async closeQuietly(client?: Client, transport?: Transport): Promise<void> {
+    const stdioChild = this.stdioChildProcess(transport);
     const closeClient = (client as { close?: () => Promise<void> | void } | undefined)?.close;
     if (closeClient) {
       try {
@@ -438,8 +440,10 @@ export class UpstreamManager {
           DEFAULT_CLOSE_TIMEOUT_MS,
           "downstream client close"
         );
-        return;
-      } catch {}
+        if (!this.isChildProcessAlive(stdioChild)) return;
+      } catch {
+        await this.forceCloseStdioChild(stdioChild);
+      }
     }
     const closeTransport = (transport as { close?: () => Promise<void> | void } | undefined)?.close;
     if (closeTransport) {
@@ -449,8 +453,55 @@ export class UpstreamManager {
           DEFAULT_CLOSE_TIMEOUT_MS,
           "downstream transport close"
         );
-      } catch {}
+      } catch {
+        await this.forceCloseStdioChild(stdioChild);
+      }
     }
+    await this.forceCloseStdioChild(stdioChild);
+  }
+
+  private stdioChildProcess(transport?: Transport): ChildProcess | undefined {
+    const candidate = (transport as { _process?: ChildProcess } | undefined)?._process;
+    return candidate && typeof candidate.kill === "function" ? candidate : undefined;
+  }
+
+  private isChildProcessAlive(child?: ChildProcess): boolean {
+    return Boolean(child && child.exitCode === null && child.signalCode === null);
+  }
+
+  private async forceCloseStdioChild(child?: ChildProcess): Promise<void> {
+    if (!this.isChildProcessAlive(child)) return;
+    try {
+      child?.stdin?.end();
+    } catch {}
+
+    try {
+      child?.kill("SIGTERM");
+    } catch {}
+    await this.waitForChildClose(child, 250);
+
+    if (!this.isChildProcessAlive(child)) return;
+    try {
+      child?.kill("SIGKILL");
+    } catch {}
+    await this.waitForChildClose(child, 250);
+  }
+
+  private async waitForChildClose(child: ChildProcess | undefined, timeoutMs: number): Promise<void> {
+    if (!this.isChildProcessAlive(child)) return;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        child?.once("close", () => resolve());
+        child?.once("exit", () => resolve());
+      }),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
   }
 
   private createStdioTransport(config: StdioServerConfig, cwd?: string): Transport {

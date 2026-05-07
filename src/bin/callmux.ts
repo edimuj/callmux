@@ -1211,13 +1211,18 @@ async function main(): Promise<void> {
       process.stderr.write(`[callmux] Unhandled rejection: ${msg}\n`);
     });
 
+    let shuttingDown = false;
     const shutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       process.stderr.write(`[callmux] ${signal} received, shutting down\n`);
       clearInterval(keepalive);
       if (reloadTimer) clearTimeout(reloadTimer);
       configWatcher?.close();
-      try { await listener.close(); } catch {}
-      try { await proxy.close(); } catch {}
+      await Promise.allSettled([
+        listener.close(),
+        proxy.close(),
+      ]);
       process.exit(0);
     };
 
