@@ -301,6 +301,12 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .nav-button.active { background: #38bdf8; color: #06101d; font-weight: 700; }
     .nav-icon { font-size: 16px; line-height: 1; width: 18px; }
     .sidebar-footer { border-top: 1px solid rgba(255,255,255,0.12); color: #a7b7ca; font-size: 12px; margin-top: auto; padding: 14px 18px; }
+    .health-strip { display: grid; gap: 7px; margin-top: 12px; }
+    .health-row { align-items: center; display: flex; justify-content: space-between; gap: 10px; }
+    .health-pill { border-radius: 999px; font-size: 11px; font-weight: 700; padding: 2px 7px; text-transform: uppercase; }
+    .health-pill.ok { background: rgba(22,116,71,0.18); color: #8ff0b9; }
+    .health-pill.warn { background: rgba(181,71,8,0.20); color: #ffd19a; }
+    .health-pill.bad { background: rgba(180,35,24,0.20); color: #ffb4ab; }
     .mobile-nav { background: #102033; border-bottom: 1px solid rgba(255,255,255,0.12); display: none; gap: 6px; overflow-x: auto; padding: 8px; position: sticky; top: 0; z-index: 5; }
     .content { flex: 1; min-width: 0; }
     header { background: white; border-bottom: 1px solid #d9dee7; padding: 16px 24px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
@@ -311,6 +317,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
     .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 14px; }
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
+    .diagram { display: grid; gap: 12px; }
+    .flow { align-items: stretch; display: grid; gap: 10px; grid-template-columns: 1fr 34px 1fr 34px 1fr; }
+    .flow-node { background: #f8fbff; border: 1px solid #d9dee7; border-radius: 8px; display: grid; gap: 5px; min-height: 92px; padding: 12px; }
+    .flow-node strong { font-size: 14px; }
+    .flow-arrow { align-items: center; color: #667085; display: flex; font-weight: 800; justify-content: center; }
+    .bar-list { display: grid; gap: 9px; }
+    .bar-row { display: grid; gap: 6px; }
+    .bar-meta { align-items: center; display: flex; font-size: 12px; justify-content: space-between; }
+    .bar-track { background: #e8edf5; border-radius: 999px; height: 9px; overflow: hidden; }
+    .bar-fill { background: #38bdf8; border-radius: inherit; height: 100%; min-width: 2px; }
+    .diagram-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e4e7ec; vertical-align: top; }
     td { overflow-wrap: anywhere; }
@@ -335,6 +352,18 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .detail-item { border: 1px solid #e4e7ec; border-radius: 6px; padding: 8px; }
     .detail-label { color: #667085; font-size: 12px; margin-bottom: 4px; }
     .detail-value { font-size: 13px; overflow-wrap: anywhere; }
+    .split { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) 340px; }
+    .server-row { cursor: pointer; }
+    .server-row:hover { background: #f0f4f8; }
+    .server-row.selected { background: #e8f2ff; }
+    .filters { align-items: end; display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(130px, 1fr)); margin-bottom: 12px; }
+    .filter-field { display: grid; gap: 4px; }
+    .filter-field label { color: #667085; font-size: 12px; font-weight: 600; }
+    .filter-field input, .filter-field select { background: white; border: 1px solid #d9dee7; border-radius: 6px; color: inherit; font: inherit; padding: 7px 8px; }
+    .tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .tool-chip { background: #eef5ff; border: 1px solid #c8def9; border-radius: 999px; color: #194b7d; font-size: 12px; padding: 3px 8px; }
+    .suite-card { display: grid; gap: 10px; }
+    .suite-card + .suite-card { margin-top: 12px; }
     .runtime-json { background: #0f1720; border-radius: 8px; color: #dbeafe; font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
@@ -345,6 +374,12 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       tr.event-row:hover { background: #1e2936; }
       tr.selected { background: #17304a; }
       .detail-item { border-color: #303946; }
+      .server-row:hover { background: #1e2936; }
+      .server-row.selected { background: #17304a; }
+      .filter-field input, .filter-field select { background: #101820; border-color: #303946; }
+      .tool-chip { background: #13283f; border-color: #26547d; color: #b9dcff; }
+      .flow-node { background: #101820; border-color: #303946; }
+      .bar-track { background: #263241; }
       th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
@@ -365,6 +400,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .events-table td[data-label="Detail"] { display: block; padding-top: 7px; }
       .events-table td[data-label="Detail"]::before { display: block; margin-bottom: 3px; }
       .detail-grid { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; }
+      .filters { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-arrow { min-height: 10px; }
+      .diagram-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 720px) and (prefers-color-scheme: dark) {
       .events-table tr.event-row { border-color: #303946; }
@@ -381,17 +421,22 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       <nav class="nav" aria-label="Dashboard sections">
         <button class="nav-button active" data-view-button="overview"><span class="nav-icon">O</span>Overview</button>
         <button class="nav-button" data-view-button="servers"><span class="nav-icon">S</span>Servers</button>
+        <button class="nav-button" data-view-button="tools"><span class="nav-icon">T</span>Tool Suites</button>
+        <button class="nav-button" data-view-button="diagrams"><span class="nav-icon">D</span>Diagrams</button>
         <button class="nav-button" data-view-button="events"><span class="nav-icon">E</span>Events</button>
         <button class="nav-button" data-view-button="runtime"><span class="nav-icon">{} </span>Runtime</button>
       </nav>
       <div class="sidebar-footer">
         <div id="sidebar-status">Connecting...</div>
+        <div id="health-strip" class="health-strip"></div>
       </div>
     </aside>
     <div class="content">
       <div class="mobile-nav" aria-label="Dashboard sections">
         <button class="nav-button active" data-view-button="overview">Overview</button>
         <button class="nav-button" data-view-button="servers">Servers</button>
+        <button class="nav-button" data-view-button="tools">Tools</button>
+        <button class="nav-button" data-view-button="diagrams">Diagrams</button>
         <button class="nav-button" data-view-button="events">Events</button>
         <button class="nav-button" data-view-button="runtime">Runtime</button>
       </div>
@@ -403,18 +448,41 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <section id="view-overview" class="view active">
           <div class="view-header"><h2>Overview</h2><span class="muted">Live proxy activity</span></div>
           <section class="grid" id="summary"></section>
+          <section class="panel">
+            <h2>Runtime Flow</h2>
+            <div id="overview-flow" class="diagram"></div>
+          </section>
         </section>
         <section id="view-servers" class="view">
           <div class="view-header"><h2>Servers</h2><span class="muted">Downstream health and tool exposure</span></div>
-          <section class="panel">
-            <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
-          </section>
+          <div class="split">
+            <section class="panel">
+              <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
+            </section>
+            <section class="panel">
+              <div id="server-detail" class="muted">Select a server for details.</div>
+            </section>
+          </div>
+        </section>
+        <section id="view-tools" class="view">
+          <div class="view-header"><h2>Tool Suites</h2><span class="muted">Current tool surfaces and recent changes</span></div>
+          <section id="tool-suites"></section>
+        </section>
+        <section id="view-diagrams" class="view">
+          <div class="view-header"><h2>Runtime Diagrams</h2><span class="muted">Real-time operational shape</span></div>
+          <section id="runtime-diagrams" class="diagram-grid"></section>
         </section>
         <section id="view-events" class="view">
           <div class="toolbar">
             <h2>Recent Events</h2>
             <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
           </div>
+          <section class="panel filters">
+            <div class="filter-field"><label for="event-filter-type">Type</label><select id="event-filter-type"><option value="">All</option><option value="tool_call">Tool call</option><option value="http_request">HTTP</option><option value="tool_suite_changed">Tool suite</option><option value="config_reload">Config reload</option></select></div>
+            <div class="filter-field"><label for="event-filter-status">Status</label><select id="event-filter-status"><option value="">All</option><option value="ok">OK</option><option value="downstream_error">Downstream error</option><option value="error">Error</option></select></div>
+            <div class="filter-field"><label for="event-filter-server">Server</label><select id="event-filter-server"><option value="">All</option></select></div>
+            <div class="filter-field"><label for="event-filter-search">Search</label><input id="event-filter-search" type="search" placeholder="Tool, path, error"></div>
+          </section>
           <section class="panel">
             <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
           </section>
@@ -434,11 +502,13 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
   <script>
     const dataUrl = ${JSON.stringify(`${basePath}/data`)};
     const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
-    const viewTitles = { overview: "Overview", servers: "Servers", events: "Recent Events", runtime: "Runtime" };
+    const viewTitles = { overview: "Overview", servers: "Servers", tools: "Tool Suites", diagrams: "Runtime Diagrams", events: "Recent Events", runtime: "Runtime" };
     let snapshot = null;
     let pendingSnapshot = null;
     let selectedEventKey = null;
+    let selectedServerName = null;
     let hideTransportHttp = true;
+    let eventFilters = { type: "", status: "", server: "", search: "" };
     let currentView = loadView();
 
     function loadView() {
@@ -517,6 +587,32 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (event.status === "downstream_error") return "warn";
       return ok ? "ok" : "bad";
     }
+    function eventStatus(event) {
+      const ok = event.type === "http_request" ? event.status < 400 : event.status !== "error" && event.success !== false;
+      return statusText(event, ok);
+    }
+    function eventMatchesFilters(event) {
+      if (hideTransportHttp && isTransportHttpEvent(event)) return false;
+      if (eventFilters.type && event.type !== eventFilters.type) return false;
+      if (eventFilters.status && eventStatus(event) !== eventFilters.status.replace(/_/g, " ")) return false;
+      if (eventFilters.server) {
+        const targets = Array.isArray(event.downstreamTargets) ? event.downstreamTargets : [];
+        const matchesServer =
+          event.server === eventFilters.server ||
+          targets.some(target => target.server === eventFilters.server) ||
+          (event.type === "tool_suite_changed" && event.server === eventFilters.server);
+        if (!matchesServer) return false;
+      }
+      if (eventFilters.search) {
+        const needle = eventFilters.search.toLowerCase();
+        const haystack = [event.type, targetText(event), detailText(event), event.error, event.jsonRpcMethod, event.jsonRpcTool]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(needle)) return false;
+      }
+      return true;
+    }
     function hasActiveTextSelection() {
       const selection = window.getSelection ? window.getSelection() : null;
       return Boolean(selection && !selection.isCollapsed && selection.toString());
@@ -525,6 +621,16 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const updated = document.getElementById("updated");
       updated.textContent = snapshot ? "Updated " + new Date().toLocaleTimeString() : "Connecting...";
       document.getElementById("sidebar-status").textContent = snapshot ? "Live - " + new Date().toLocaleTimeString() : "Connecting...";
+    }
+    function renderHealthStrip(status, servers) {
+      const statusValue = String(status.status || "unknown");
+      const stateClass = statusValue === "ok" ? "ok" : statusValue === "degraded" ? "warn" : "bad";
+      const downCount = servers.filter(server => server.state && server.state !== "connected").length + (status.failedServers?.length ?? 0);
+      document.getElementById("health-strip").innerHTML = [
+        '<div class="health-row"><span>Readiness</span><span class="health-pill ' + stateClass + '">' + esc(statusValue) + '</span></div>',
+        '<div class="health-row"><span>Downstream</span><span>' + esc(downCount) + ' issue' + (downCount === 1 ? '' : 's') + '</span></div>',
+        '<div class="health-row"><span>Tool suite</span><span>gen ' + esc(status.toolSuiteGeneration ?? 0) + '</span></div>',
+      ].join("");
     }
     function isTransportHttpEvent(event) {
       return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
@@ -564,6 +670,92 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Error", event.error),
       ].join("") + "</div>";
     }
+    function toolChips(tools) {
+      if (!Array.isArray(tools) || tools.length === 0) return '<span class="muted">No exposed tools</span>';
+      return '<div class="tools-list">' + tools.map(tool => '<span class="tool-chip">' + esc(typeof tool === "string" ? tool : tool.name) + '</span>').join("") + '</div>';
+    }
+    function renderServerDetail(server) {
+      const detail = document.getElementById("server-detail");
+      if (!server) {
+        detail.className = "muted";
+        detail.innerHTML = "Select a server for details.";
+        return;
+      }
+      detail.className = "";
+      detail.innerHTML = '<h3 style="margin:0 0 8px">' + esc(server.name) + '</h3><div class="detail-grid">' + [
+        detailItem("State", server.state),
+        detailItem("Transport", server.transport),
+        detailItem("Tools", (server.toolCount ?? server.exposedTools ?? 0) + "/" + (server.totalTools ?? server.toolCount ?? server.exposedTools ?? 0)),
+        detailItem("Latency", server.connectDurationMs !== undefined ? server.connectDurationMs + "ms" : ""),
+        detailItem("Last connected", server.lastConnectedAt),
+        detailItem("Last failure", server.lastFailureAt),
+        detailItem("Next retry", server.nextRetryAt),
+        detailItem("Last error", server.lastError ?? server.error),
+      ].join("") + '</div><h4 style="margin:14px 0 6px">Tools</h4>' + toolChips(server.tools);
+    }
+    function renderToolSuites(status, servers, events) {
+      const changes = events.filter(event => event.type === "tool_suite_changed").slice(-20).reverse();
+      document.getElementById("tool-suites").innerHTML = servers.map(server => {
+        const added = Array.isArray(server.addedTools) ? server.addedTools : [];
+        const removed = Array.isArray(server.removedTools) ? server.removedTools : [];
+        return '<section class="panel suite-card"><div><strong>' + esc(server.name) + '</strong><span class="muted"> - gen ' + esc(server.toolSuiteGeneration ?? status.toolSuiteGeneration ?? 0) + '</span></div>' +
+          '<div class="muted">Last change: ' + esc(server.lastToolSuiteChangeAt ?? status.lastToolSuiteChangeAt ?? "none") + '</div>' +
+          '<div>' + toolChips(server.tools) + '</div>' +
+          (added.length ? '<div><span class="ok">Added</span> ' + esc(added.join(", ")) + '</div>' : '') +
+          (removed.length ? '<div><span class="bad">Removed</span> ' + esc(removed.join(", ")) + '</div>' : '') +
+        '</section>';
+      }).join("") + '<section class="panel" style="margin-top:18px"><h3 style="margin:0 0 8px">Recent tool-suite changes</h3>' +
+        (changes.length ? changes.map(change => '<div class="detail-item"><strong>' + esc(change.server) + '</strong><div class="muted">' + esc(new Date(change.timestamp).toLocaleString()) + ' - gen ' + esc(change.generation) + '</div><div>' + esc(detailText(change)) + '</div></div>').join("") : '<div class="muted">No tool-suite changes recorded.</div>') +
+        '</section>';
+    }
+    function updateServerFilterOptions(servers) {
+      const select = document.getElementById("event-filter-server");
+      const current = select.value;
+      select.innerHTML = '<option value="">All</option>' + servers.map(server => '<option value="' + esc(server.name) + '">' + esc(server.name) + '</option>').join("");
+      select.value = servers.some(server => server.name === current) ? current : "";
+      eventFilters.server = select.value;
+    }
+    function barRow(label, value, max, className = "") {
+      const percent = max > 0 ? Math.max(2, Math.min(100, Math.round((Number(value || 0) / max) * 100))) : 0;
+      return '<div class="bar-row"><div class="bar-meta"><span>' + esc(label) + '</span><strong>' + esc(compactCount(value || 0)) + '</strong></div><div class="bar-track"><div class="bar-fill ' + esc(className) + '" style="width:' + percent + '%"></div></div></div>';
+    }
+    function renderFlowDiagram(status, servers, summary) {
+      const totalEvents = summary.totalEvents ?? summary.eventCount ?? 0;
+      const totalDownstream = summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0;
+      const metaCalls = summary.callmuxMetaToolCalls ?? summary.callmuxToolCalls ?? 0;
+      const healthy = servers.filter(server => server.state === "connected").length;
+      const unhealthy = servers.length - healthy + (status.failedServers?.length ?? 0);
+      return '<div class="flow">' +
+        '<div class="flow-node"><strong>Clients</strong><span class="muted">HTTP, SSE, stdio bridge</span><div class="metric">' + esc(compactCount(totalEvents)) + '</div><span class="muted">events retained/seen</span></div>' +
+        '<div class="flow-arrow">-&gt;</div>' +
+        '<div class="flow-node"><strong>callmux</strong><span class="muted">routing, cache, shield, fan-out</span><div class="metric">' + esc(compactCount(metaCalls)) + '</div><span class="muted">meta calls</span></div>' +
+        '<div class="flow-arrow">-&gt;</div>' +
+        '<div class="flow-node"><strong>Downstream MCP</strong><span class="muted">' + esc(healthy) + ' healthy / ' + esc(unhealthy) + ' degraded</span><div class="metric">' + esc(compactCount(totalDownstream)) + '</div><span class="muted">tool calls</span></div>' +
+      '</div>';
+    }
+    function renderRuntimeDiagrams(status, servers, summary) {
+      const maxCalls = Math.max(1, summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0, summary.passthroughToolCalls ?? 0, summary.callmuxDownstreamToolCalls ?? 0);
+      const connected = servers.filter(server => server.state === "connected").length;
+      const degraded = servers.length - connected + (status.failedServers?.length ?? 0);
+      const cacheEntries = status.cache?.entries ?? 0;
+      const storedRefs = status.responseStore?.entries ?? 0;
+      document.getElementById("runtime-diagrams").innerHTML = [
+        '<section class="panel"><h2>Traffic Path</h2>' + renderFlowDiagram(status, servers, summary) + '</section>',
+        '<section class="panel"><h2>Tool Call Mix</h2><div class="bar-list">' +
+          barRow("Passthrough", summary.passthroughToolCalls ?? 0, maxCalls) +
+          barRow("Meta fan-out", summary.callmuxDownstreamToolCalls ?? 0, maxCalls) +
+          barRow("Total downstream", summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0, maxCalls) +
+        '</div></section>',
+        '<section class="panel"><h2>Runtime Buffers</h2><div class="bar-list">' +
+          barRow("Cache entries", cacheEntries, Math.max(1, status.cache?.maxEntries ?? cacheEntries)) +
+          barRow("Stored refs", storedRefs, Math.max(1, status.responseStore?.maxEntries ?? storedRefs)) +
+        '</div></section>',
+        '<section class="panel"><h2>Downstream Health</h2><div class="bar-list">' +
+          barRow("Connected", connected, Math.max(1, servers.length + (status.failedServers?.length ?? 0)), "ok") +
+          barRow("Degraded/down", degraded, Math.max(1, servers.length + (status.failedServers?.length ?? 0)), "bad") +
+        '</div></section>',
+      ].join("");
+    }
     function render(data) {
       snapshot = data;
       updateUpdatedClock();
@@ -573,6 +765,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const servers = Array.isArray(status.servers)
         ? status.servers
         : Object.entries(status.servers || {}).map(([name, server]) => ({ name, ...server }));
+      const allEvents = Array.isArray(data.events) ? data.events : [];
+      if (!selectedServerName && servers.length > 0) selectedServerName = servers[0].name;
+      renderHealthStrip(status, servers);
+      updateServerFilterOptions(servers);
       document.getElementById("summary").innerHTML = [
         ["Servers", servers.length],
         ["Sessions", status.listener?.activeSessions ?? 0],
@@ -584,15 +780,26 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         ["Total downstream", compactCount(data.summary.totalDownstreamToolCalls ?? data.summary.realToolCalls)],
         ["Recent errors", data.summary.recentErrors],
       ].map(([label, value]) => "<div class=\\"panel\\"><div class=\\"muted\\">" + esc(label) + "</div><div class=\\"metric\\">" + esc(value) + "</div></div>").join("");
+      document.getElementById("overview-flow").innerHTML = renderFlowDiagram(status, servers, data.summary);
       document.getElementById("servers").innerHTML = servers.map((server) => {
         const stateClass = server.state === "connected" ? "ok" : "bad";
         const toolCount = server.toolCount ?? server.exposedTools ?? (Array.isArray(server.tools) ? server.tools.length : 0);
         const totalTools = server.totalTools ?? toolCount;
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
-        return "<tr>" + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
+        const selected = server.name === selectedServerName ? " selected" : "";
+        return '<tr class="server-row' + selected + '" data-server="' + esc(server.name) + '">' + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
       }).join("");
+      document.querySelectorAll("tr.server-row").forEach(row => {
+        row.addEventListener("click", () => {
+          selectedServerName = row.dataset.server;
+          render(data);
+        });
+      });
+      renderServerDetail(servers.find(server => server.name === selectedServerName));
+      renderToolSuites(status, servers, allEvents);
+      renderRuntimeDiagrams(status, servers, data.summary);
       document.getElementById("runtime-json").textContent = JSON.stringify(status, null, 2);
-      const displayedEvents = data.events.filter(event => !hideTransportHttp || !isTransportHttpEvent(event)).slice(-80).reverse();
+      const displayedEvents = allEvents.filter(eventMatchesFilters).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
         const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.status !== "error" && event.success !== false;
@@ -626,6 +833,22 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     });
     document.getElementById("hide-transport").addEventListener("change", event => {
       hideTransportHttp = event.target.checked;
+      if (snapshot) render(snapshot);
+    });
+    document.getElementById("event-filter-type").addEventListener("change", event => {
+      eventFilters.type = event.target.value;
+      if (snapshot) render(snapshot);
+    });
+    document.getElementById("event-filter-status").addEventListener("change", event => {
+      eventFilters.status = event.target.value;
+      if (snapshot) render(snapshot);
+    });
+    document.getElementById("event-filter-server").addEventListener("change", event => {
+      eventFilters.server = event.target.value;
+      if (snapshot) render(snapshot);
+    });
+    document.getElementById("event-filter-search").addEventListener("input", event => {
+      eventFilters.search = event.target.value;
       if (snapshot) render(snapshot);
     });
     document.querySelectorAll("[data-view-button]").forEach(button => {
