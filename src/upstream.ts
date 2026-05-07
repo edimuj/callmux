@@ -498,7 +498,6 @@ export class UpstreamManager {
       }),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
-        timer.unref?.();
       }),
     ]);
     if (timer) clearTimeout(timer);

@@ -77,7 +77,6 @@ async function settleWithin<T>(
       Promise.resolve(promise).then(() => undefined, () => undefined),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
-        timer.unref?.();
       }),
     ]);
   } finally {
@@ -355,7 +354,6 @@ export class CallmuxListener {
         server.closeAllConnections?.();
         finish();
       }, DEFAULT_LISTENER_CLOSE_TIMEOUT_MS);
-      timer.unref?.();
     });
 
     await Promise.allSettled([closeSessions, closeServer]);
