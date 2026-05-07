@@ -2285,6 +2285,84 @@ test("UpstreamManager keeps retrying beyond the old finite reconnect limit", asy
   await upstream.close();
 });
 
+test("UpstreamManager honors finite reconnect maxAttempts for background retries", async () => {
+  const upstream = new UpstreamManager();
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async () => {
+    connectCount++;
+    throw new Error(`offline-${connectCount}`);
+  };
+
+  await upstream.connect(
+    { github: { command: "github-mcp" } },
+    { reconnectPolicy: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0, maxAttempts: 2 } }
+  );
+
+  await waitFor(async () => upstream.getServerInfo("github")?.state === "failed", 1000, 10);
+
+  assert.equal(connectCount, 3);
+  const info = upstream.getServerInfo("github");
+  assert.equal(info?.state, "failed");
+  assert.equal(info?.reconnectAttempts, 2);
+  assert.equal(info?.lastError, "offline-3");
+
+  await upstream.close();
+});
+
+test("UpstreamManager can attempt reconnect during backoff when fast-fail is disabled", async () => {
+  const upstream = new UpstreamManager();
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    if (connectCount === 1) {
+      throw new Error("offline");
+    }
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("recovered");
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect(
+    { github: { command: "github-mcp" } },
+    {
+      reconnectPolicy: {
+        initialDelayMs: 60_000,
+        maxDelayMs: 60_000,
+        jitterRatio: 0,
+        fastFailDuringBackoff: false,
+      },
+    }
+  );
+
+  const result = await upstream.callTool("get_issue", { id: 1 }, "github");
+
+  assert.equal(connectCount, 2);
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.content, [{ type: "text", text: "recovered" }]);
+  assert.equal(upstream.getServerInfo("github")?.state, "connected");
+
+  await upstream.close();
+});
+
 test("UpstreamManager records tool suite changes and removed tools after reconnect", async () => {
   const upstream = new UpstreamManager();
   const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
@@ -2487,6 +2565,106 @@ test("UpstreamManager retires and reconnects a client after hard call timeout", 
   assert.equal(upstream.getServerInfo("github")?.state, "connected");
 
   await upstream.close();
+});
+
+test("handleCall retries safe tools once after reconnect but not mutating tools", async () => {
+  async function run(toolName: string): Promise<{ result: CallToolResult; connectCount: number }> {
+    const upstream = new UpstreamManager();
+    const cache = new CallCache(0);
+    let connectCount = 0;
+    const harness = upstream as unknown as {
+      connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+    };
+    harness.connectOne = async (name: string, config: ServerConfig) => {
+      connectCount++;
+      const currentConnect = connectCount;
+      const tool = mockTool(toolName);
+      return {
+        name,
+        config,
+        client: {
+          async callTool() {
+            if (currentConnect === 1) {
+              throw new Error("transport send error: broken pipe");
+            }
+            return textResult(`client-${currentConnect}`);
+          },
+          async close() {},
+        },
+        transport: { async close() {} },
+        resolvedTransport: "stdio",
+        allTools: [tool],
+        tools: [tool],
+        connectDurationMs: 1,
+      };
+    };
+
+    await upstream.connect({ github: { command: "github-mcp" } });
+    try {
+      const result = await handleCall(upstream, cache, {
+        server: "github",
+        tool: toolName,
+        arguments: {},
+      });
+      return { result, connectCount };
+    } finally {
+      await upstream.close();
+    }
+  }
+
+  const safe = await run("get_issue");
+  assert.equal(safe.connectCount, 2);
+  assert.equal(safe.result.isError, undefined);
+  assert.deepEqual(safe.result.content, [{ type: "text", text: "client-2" }]);
+
+  const mutating = await run("create_issue");
+  assert.equal(mutating.connectCount, 1);
+  assert.equal(mutating.result.isError, true);
+  assert.equal(
+    (mutating.result.structuredContent as { error: { code: string } }).error.code,
+    "tool_call_failed"
+  );
+});
+
+test("UpstreamManager close falls back to transport close when client close hangs", async () => {
+  const upstream = new UpstreamManager();
+  let transportClosed = false;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {
+          await new Promise(() => {});
+        },
+      },
+      transport: {
+        async close() {
+          transportClosed = true;
+        },
+      },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+
+  const startedAt = Date.now();
+  await upstream.close();
+  const durationMs = Date.now() - startedAt;
+
+  assert.equal(transportClosed, true);
+  assert.ok(durationMs < 1800, `close took ${durationMs}ms`);
 });
 
 test("UpstreamManager normalizes noisy transport/protocol tool-call failures", async () => {
@@ -6309,6 +6487,71 @@ test("listener /ready reports degraded/down separately from /health", async () =
   }
 });
 
+test("listener /ready reports degraded when some downstream servers are healthy", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    if (name === "bad") {
+      throw new Error("offline");
+    }
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult("ok");
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+  await upstream.connect(
+    { good: { command: "good-mcp" }, bad: { command: "bad-mcp" } },
+    { reconnectPolicy: { initialDelayMs: 60_000, maxDelayMs: 60_000, jitterRatio: 0 } }
+  );
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: { good: { command: "good-mcp" }, bad: { command: "bad-mcp" } } },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  const port = await getFreePort();
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+    assert.equal(ready.status, 503);
+    const body = await ready.json() as {
+      status: string;
+      downstream: {
+        status: string;
+        servers: Array<{ name: string }>;
+        failedServers: Array<{ name: string }>;
+      };
+    };
+    assert.equal(body.status, "degraded");
+    assert.equal(body.downstream.status, "degraded");
+    assert.deepEqual(body.downstream.servers.map((server) => server.name), ["good"]);
+    assert.deepEqual(body.downstream.failedServers.map((server) => server.name), ["bad"]);
+  } finally {
+    await listener.close();
+    await upstream.close();
+  }
+});
+
 test("listener listTools is dynamic and keeps meta tools present", async () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -6408,6 +6651,83 @@ test("listener dashboard serves read-only runtime data when enabled", async () =
     assert.ok(body.events.some((event) => event.type === "tool_call" && event.tool === "get_item" && event.cacheHit === true));
   } finally {
     await listener.close();
+  }
+});
+
+test("listener dashboard exposes tool suite change events", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    const toolNames = connectCount === 1 ? ["get_issue", "old_tool"] : ["get_issue", "new_tool"];
+    const tools = toolNames.map((tool) => mockTool(tool));
+    const client = {
+      onclose: undefined as undefined | (() => void),
+      async callTool() {
+        return textResult("ok");
+      },
+      async close() {},
+    };
+    clients.push(client);
+    return {
+      name,
+      config,
+      client,
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: tools,
+      tools,
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: { github: { command: "github-mcp" } },
+      dashboard: { enabled: true, maxEvents: 10 },
+    },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = await getFreePort();
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    clients[0].onclose?.();
+    await upstream.callTool("get_issue", {}, "github", { forceReconnect: true });
+
+    const data = await fetch(`http://127.0.0.1:${port}/dashboard/data`);
+    assert.equal(data.status, 200);
+    const body = await data.json() as {
+      events: Array<{
+        type: string;
+        server?: string;
+        generation?: number;
+        addedTools?: string[];
+        removedTools?: string[];
+      }>;
+    };
+    const event = body.events.find((item) => item.type === "tool_suite_changed");
+    assert.ok(event);
+    assert.equal(event.server, "github");
+    assert.equal(typeof event.generation, "number");
+    assert.deepEqual(event.addedTools, ["new_tool"]);
+    assert.deepEqual(event.removedTools, ["old_tool"]);
+  } finally {
+    await listener.close();
+    await upstream.close();
   }
 });
 
