@@ -57,6 +57,14 @@ type RuntimeEvent =
       timestamp: string;
       success: boolean;
       error?: string;
+    }
+  | {
+      type: "tool_suite_changed";
+      timestamp: string;
+      server: string;
+      generation: number;
+      addedTools: string[];
+      removedTools: string[];
     };
 
 export interface DashboardConfig {
@@ -395,10 +403,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function targetText(event) {
       if (event.type === "tool_call") return (event.server ? event.server + "__" : "") + (event.targetTool || event.tool);
+      if (event.type === "tool_suite_changed") return event.server;
       return event.jsonRpcTool || event.path || "config";
     }
     function detailText(event) {
       if (event.error) return event.error;
+      if (event.type === "tool_suite_changed") {
+        return ["gen " + event.generation, event.addedTools?.length ? "+" + event.addedTools.join(",") : "", event.removedTools?.length ? "-" + event.removedTools.join(",") : ""].filter(Boolean).join(" · ");
+      }
       const totalDownstream = event.totalDownstreamToolCalls ?? event.realToolCalls;
       const passthrough = event.passthroughToolCalls ?? (
         event.toolKind === "downstream" ? event.realToolCalls : undefined
@@ -459,6 +471,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Callmux downstream calls", event.callmuxDownstreamToolCalls),
         detailItem("Total downstream calls", event.totalDownstreamToolCalls ?? event.realToolCalls),
         detailItem("Downstream targets", targetList(event.downstreamTargets)),
+        detailItem("Added tools", Array.isArray(event.addedTools) ? event.addedTools.join(", ") : ""),
+        detailItem("Removed tools", Array.isArray(event.removedTools) ? event.removedTools.join(", ") : ""),
+        detailItem("Tool suite generation", event.generation),
         detailItem("Duration", event.durationMs !== undefined ? event.durationMs + "ms" : ""),
         detailItem("Error", event.error),
       ].join("") + "</div>";

@@ -130,7 +130,7 @@ Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access contro
 
 ### Read-Only Dashboard: Live Runtime Visibility
 
-Optional dashboard for shared listeners. Disabled by default, then enabled with `dashboard.enabled`. It shows server health, active sessions, cache and response-store stats, recent tool calls, config reloads, and errors.
+Optional dashboard for shared listeners. Disabled by default, then enabled with `dashboard.enabled`. It shows server health, active sessions, cache and response-store stats, recent tool calls, tool-suite changes, config reloads, and errors.
 
 [Full guide ->](docs/shared-server.md#read-only-dashboard)
 

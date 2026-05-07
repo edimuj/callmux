@@ -195,6 +195,11 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           description: "Arguments to pass to the tool",
         },
+        forceReconnect: {
+          type: "boolean",
+          description:
+            "Force an immediate reconnect attempt when the target server is in reconnect backoff.",
+        },
       },
       required: ["tool"],
       additionalProperties: false,

@@ -39,6 +39,7 @@ import {
   type AuthorizationPrincipal,
 } from "./authorization.js";
 import { errorResult } from "./results.js";
+import { META_TOOLS } from "./meta-tools.js";
 import { AbuseController } from "./abuse.js";
 import { AuditLogger } from "./audit.js";
 import { PrometheusMetrics } from "./metrics.js";
@@ -136,6 +137,7 @@ export class CallmuxListener {
   private responseStore: ResponseStore;
   private dashboardConfig: ReturnType<typeof normalizeDashboardConfig>;
   private runtimeEvents: RuntimeEventStore;
+  private unsubscribeToolSuiteChanges: (() => void) | undefined;
   private lastReloadAt: string | undefined;
   private lastReloadError: string | undefined;
 
@@ -157,6 +159,7 @@ export class CallmuxListener {
     this.metrics = new PrometheusMetrics(options.config.metrics);
     this.dashboardConfig = normalizeDashboardConfig(options.config.dashboard);
     this.runtimeEvents = new RuntimeEventStore(this.dashboardConfig.maxEvents);
+    this.subscribeToolSuiteChanges(options.upstream);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture(options.config, this.authConfig);
   }
@@ -205,6 +208,7 @@ export class CallmuxListener {
   }): void {
     this.applyRuntimeConfig(next.config);
     this.responseStore.setMaxEntries(next.config.responseShield?.maxStoredResults);
+    this.unsubscribeToolSuiteChanges?.();
     this.options = {
       ...this.options,
       config: next.config,
@@ -214,6 +218,20 @@ export class CallmuxListener {
       allTools: next.allTools,
       maxConcurrency: next.maxConcurrency,
     };
+    this.subscribeToolSuiteChanges(next.upstream);
+  }
+
+  private subscribeToolSuiteChanges(upstream: UpstreamManager): void {
+    this.unsubscribeToolSuiteChanges = upstream.subscribeToolSuiteChanges((event) => {
+      this.runtimeEvents.append({
+        type: "tool_suite_changed",
+        timestamp: event.changedAt,
+        server: event.server,
+        generation: event.generation,
+        addedTools: event.addedTools,
+        removedTools: event.removedTools,
+      });
+    });
   }
 
   recordConfigReload(result: { ok: boolean; error?: string }): void {
@@ -279,6 +297,8 @@ export class CallmuxListener {
   }
 
   async close(): Promise<void> {
+    this.unsubscribeToolSuiteChanges?.();
+    this.unsubscribeToolSuiteChanges = undefined;
     for (const [id, session] of this.sessions) {
       await session.transport.close?.();
       await session.server.close();
@@ -290,6 +310,33 @@ export class CallmuxListener {
       } else {
         resolve();
       }
+    });
+  }
+
+  private handleReady(res: ServerResponse, context: RequestContext): void {
+    const status = handleStatus(
+      this.options.upstream,
+      this.options.cache,
+      this.options.maxConcurrency,
+      this.options.config.metaOnly ?? false,
+      this.options.config.descriptionMaxLength,
+      this.options.upstream.getInstanceIdentity(),
+      { sessions: true, recommendations: false },
+      this.getRuntimeDiagnostics(),
+      this.options.config.recipes,
+      this.responseStore
+    ).structuredContent as Record<string, unknown>;
+    const wrappedServers = Array.isArray(status.wrappedServers) ? status.wrappedServers : [];
+    const servers = Array.isArray(status.servers) ? status.servers : [];
+    const state = status.status === "ok"
+      ? "ok"
+      : servers.length === 0 && wrappedServers.length > 0
+        ? "down"
+        : "degraded";
+    this.writeJson(res, state === "ok" ? 200 : 503, context, {
+      status: state,
+      sessions: this.sessions.size,
+      downstream: status,
     });
   }
 
@@ -371,6 +418,8 @@ export class CallmuxListener {
           await this.handleSseMessage(req, res, url, context);
         } else if (path === "/health" && req.method === "GET") {
           this.writeJson(res, 200, context, { status: "ok", sessions: this.sessions.size });
+        } else if (path === "/ready" && req.method === "GET") {
+          this.handleReady(res, context);
         } else {
           this.writeJson(res, 404, context, { error: "Not found" });
         }
@@ -816,7 +865,7 @@ export class CallmuxListener {
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.options.allTools,
+      tools: this.currentTools(),
     }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -931,7 +980,10 @@ export class CallmuxListener {
             cacheHit = true;
             result = this.shieldResult(target, cached);
           } else {
-            const upstreamResult = await upstream.callTool(name, args, undefined, toolContext);
+            const upstreamResult = await upstream.callTool(name, args, undefined, {
+              ...toolContext,
+              retryOnReconnect: cache.isSafeToRetry(name, undefined),
+            });
             cache.set(name, args, upstreamResult, undefined, cacheScope);
             result = this.shieldResult(target, upstreamResult);
           }
@@ -944,6 +996,15 @@ export class CallmuxListener {
     });
 
     return server;
+  }
+
+  private currentTools(): Tool[] {
+    if (this.options.config.metaOnly) return [...META_TOOLS];
+    const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    return [...proxiedTools, ...META_TOOLS];
   }
 
   private responseShieldTarget(

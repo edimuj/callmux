@@ -924,6 +924,16 @@ export async function handleCall(
 
   const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
   if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+  const forceReconnect = args.forceReconnect === undefined
+    ? false
+    : typeof args.forceReconnect === "boolean"
+      ? args.forceReconnect
+      : undefined;
+  if (forceReconnect === undefined) {
+    return errorResult("invalid_arguments", '"forceReconnect" must be a boolean', {
+      field: "forceReconnect",
+    });
+  }
 
   const resolved = upstream.resolveServer(tool, server);
   if (!resolved) {
@@ -941,7 +951,11 @@ export async function handleCall(
   const cached = cache.get(tool, parsedArgs, server, cacheScope);
   if (cached) return cached;
 
-  const result = await upstream.callTool(tool, parsedArgs, server, context);
+  const result = await upstream.callTool(tool, parsedArgs, server, {
+    ...context,
+    forceReconnect,
+    retryOnReconnect: cache.isSafeToRetry(tool, server),
+  });
   cache.set(tool, parsedArgs, result, server, cacheScope);
   return result;
 }
@@ -1258,6 +1272,12 @@ export function handleStatus(
 
   const serverNames = upstream.getServerNames();
   const failedServers = upstream.getFailedServers();
+  const maybeToolSuite = upstream as UpstreamManager & {
+    getToolSuiteStats?: () => { generation: number; lastChangeAt?: string };
+  };
+  const toolSuite = typeof maybeToolSuite.getToolSuiteStats === "function"
+    ? maybeToolSuite.getToolSuiteStats()
+    : { generation: 0 };
 
   const truncate = (desc: string | undefined): string | undefined => {
     if (!desc) return desc;
@@ -1279,8 +1299,16 @@ export function handleStatus(
         if (info.totalTools !== info.exposedTools) base.totalTools = info.totalTools;
         if (info.maxConcurrency) base.maxConcurrency = info.maxConcurrency;
         if (info.error) base.error = info.error;
+        if (info.lastError) base.lastError = info.lastError;
+        if (info.lastConnectedAt) base.lastConnectedAt = info.lastConnectedAt;
+        if (info.lastFailureAt) base.lastFailureAt = info.lastFailureAt;
+        if (info.consecutiveFailures !== undefined) base.consecutiveFailures = info.consecutiveFailures;
         if (info.reconnectAttempts !== undefined) base.reconnectAttempts = info.reconnectAttempts;
         if (info.nextRetryAt) base.nextRetryAt = info.nextRetryAt;
+        if (info.toolSuiteGeneration !== undefined) base.toolSuiteGeneration = info.toolSuiteGeneration;
+        if (info.lastToolSuiteChangeAt) base.lastToolSuiteChangeAt = info.lastToolSuiteChangeAt;
+        if (info.addedTools) base.addedTools = info.addedTools;
+        if (info.removedTools) base.removedTools = info.removedTools;
       }
 
       if (includeDescriptions) {
@@ -1310,7 +1338,16 @@ export function handleStatus(
         error: failure.error,
         ...(info ? {
           transport: info.transport,
+          state: info.state,
           connectDurationMs: info.connectDurationMs,
+          ...(info.lastError ? { lastError: info.lastError } : {}),
+          ...(info.lastConnectedAt ? { lastConnectedAt: info.lastConnectedAt } : {}),
+          ...(info.lastFailureAt ? { lastFailureAt: info.lastFailureAt } : {}),
+          ...(info.consecutiveFailures !== undefined ? { consecutiveFailures: info.consecutiveFailures } : {}),
+          ...(info.reconnectAttempts !== undefined ? { reconnectAttempts: info.reconnectAttempts } : {}),
+          ...(info.nextRetryAt ? { nextRetryAt: info.nextRetryAt } : {}),
+          ...(info.toolSuiteGeneration !== undefined ? { toolSuiteGeneration: info.toolSuiteGeneration } : {}),
+          ...(info.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: info.lastToolSuiteChangeAt } : {}),
         } : {}),
       };
     });
@@ -1409,6 +1446,8 @@ export function handleStatus(
     wrappedServers,
     servers,
     failedServers: failed,
+    toolSuiteGeneration: toolSuite.generation,
+    ...(toolSuite.lastChangeAt ? { lastToolSuiteChangeAt: toolSuite.lastChangeAt } : {}),
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
     ...(responseStore ? { responseStore: responseStore.stats() } : {}),

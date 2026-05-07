@@ -39,6 +39,19 @@ export interface HttpServerConfig {
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig;
 
+export interface ReconnectPolicyConfig {
+  /** Initial reconnect backoff in milliseconds */
+  initialDelayMs?: number;
+  /** Maximum reconnect backoff in milliseconds */
+  maxDelayMs?: number;
+  /** Random jitter ratio applied to reconnect delay (0 = disabled) */
+  jitterRatio?: number;
+  /** Maximum failed reconnect attempts before stopping; null/omitted retries forever */
+  maxAttempts?: number | null;
+  /** Return downstream_unavailable during scheduled backoff instead of blocking on connect */
+  fastFailDuringBackoff?: boolean;
+}
+
 export function isHttpServerConfig(config: ServerConfig): config is HttpServerConfig {
   return "url" in config;
 }
@@ -206,6 +219,8 @@ export interface CallmuxConfig {
   connectTimeoutMs?: number;
   /** Timeout in milliseconds for downstream tool calls */
   callTimeoutMs?: number;
+  /** Downstream reconnect retry/backoff policy */
+  reconnectPolicy?: ReconnectPolicyConfig;
   /** Idle TTL in seconds for listener-mode session cwd stdio clients (0 = close after each call) */
   sessionCwdIdleTtlSeconds?: number;
   /** When true, any downstream startup failure prevents callmux from starting */
@@ -255,6 +270,10 @@ export interface ToolCallContext {
   cwd?: string;
   /** Client session identifier when available */
   sessionId?: string;
+  /** Force reconnect immediately even when the server is in a scheduled backoff window */
+  forceReconnect?: boolean;
+  /** Retry once after reconnect when a safe/read-only call hits retryable transport failure */
+  retryOnReconnect?: boolean;
 }
 
 export interface ListenerRuntimeDiagnostics {
@@ -378,13 +397,21 @@ export interface UpstreamConnectionFailure {
 
 export interface ServerInfo {
   transport: "stdio" | "streamable-http" | "sse";
-  state: "connected" | "failed" | "disconnected" | "reconnecting";
+  state: "starting" | "connected" | "degraded" | "failed" | "disconnected" | "reconnecting" | "disabled";
   connectDurationMs: number;
   totalTools: number;
   exposedTools: number;
   toolFilter?: string[];
   maxConcurrency?: number;
   error?: string;
+  lastError?: string;
+  lastConnectedAt?: string;
+  lastFailureAt?: string;
+  consecutiveFailures?: number;
   reconnectAttempts?: number;
   nextRetryAt?: string;
+  toolSuiteGeneration?: number;
+  lastToolSuiteChangeAt?: string;
+  addedTools?: string[];
+  removedTools?: string[];
 }

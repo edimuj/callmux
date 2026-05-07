@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { errorResult } from "./results.js";
 
@@ -30,6 +30,10 @@ export class CallmuxBridge {
   private client: Client | undefined;
   private transport: Transport | undefined;
   private reconnectPromise: Promise<void> | undefined;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectAttempts = 0;
+  private cachedTools: Tool[] = [];
+  private lastConnectError: string | undefined;
   private closed = false;
 
   constructor(private options: BridgeOptions) {
@@ -39,7 +43,14 @@ export class CallmuxBridge {
     );
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return this.withReconnect((client) => client.listTools());
+      try {
+        const result = await this.withReconnect((client) => client.listTools());
+        this.cachedTools = result.tools;
+        return result;
+      } catch {
+        this.scheduleReconnect();
+        return { tools: this.cachedTools };
+      }
     });
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -54,21 +65,32 @@ export class CallmuxBridge {
         )) as unknown as CallToolResult;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return errorResult("bridge_tool_call_failed", message, {
+        const code = isReconnectableBridgeError(error)
+          ? "bridge_upstream_unavailable"
+          : "bridge_tool_call_failed";
+        return errorResult(code, message, {
           tool: request.params.name,
           url: this.options.url,
+          retryable: code === "bridge_upstream_unavailable",
+          ...(this.lastConnectError ? { lastConnectError: this.lastConnectError } : {}),
         });
       }
     });
   }
 
   async start(clientTransport: Transport): Promise<void> {
-    await this.connectUpstream();
+    try {
+      await this.connectUpstream();
+    } catch (error) {
+      this.lastConnectError = error instanceof Error ? error.message : String(error);
+      this.scheduleReconnect();
+    }
     await this.server.connect(clientTransport);
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     await this.server.close();
     await this.reconnectPromise?.catch(() => undefined);
     await this.closeUpstream();
@@ -102,12 +124,27 @@ export class CallmuxBridge {
       this.reconnectPromise = (async () => {
         await this.closeUpstream();
         await this.connectUpstream();
+        this.reconnectAttempts = 0;
       })().finally(() => {
         this.reconnectPromise = undefined;
       });
     }
 
     await this.reconnectPromise;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.client || this.reconnectPromise || this.reconnectTimer) return;
+    const delayMs = Math.min(10_000, 250 * (2 ** Math.max(0, this.reconnectAttempts)));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      this.reconnectAttempts++;
+      this.reconnectUpstream().catch((error) => {
+        this.lastConnectError = error instanceof Error ? error.message : String(error);
+        this.scheduleReconnect();
+      });
+    }, delayMs);
+    this.reconnectTimer.unref?.();
   }
 
   private async connectUpstream(): Promise<void> {
@@ -136,6 +173,7 @@ export class CallmuxBridge {
 
     this.client = client;
     this.transport = transport;
+    this.lastConnectError = undefined;
   }
 
   private async closeUpstream(): Promise<void> {

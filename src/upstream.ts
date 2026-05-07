@@ -14,6 +14,7 @@ import type {
   ServerInfo,
   StdioServerConfig,
   HttpServerConfig,
+  ReconnectPolicyConfig,
   ToolCallContext,
   UpstreamConnection,
   UpstreamConnectionFailure,
@@ -28,7 +29,15 @@ const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
 const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
 const RECONNECT_INITIAL_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 10_000;
-const RECONNECT_MAX_BACKGROUND_ATTEMPTS = 5;
+const RECONNECT_JITTER_RATIO = 0.2;
+
+interface EffectiveReconnectPolicy {
+  initialDelayMs: number;
+  maxDelayMs: number;
+  jitterRatio: number;
+  maxAttempts: number | null;
+  fastFailDuringBackoff: boolean;
+}
 
 export async function mapBounded<T, R>(
   items: T[],
@@ -70,6 +79,7 @@ interface ConnectedServer {
 interface UpstreamConnectOptions {
   maxConcurrency?: number;
   connectTimeoutMs?: number;
+  reconnectPolicy?: ReconnectPolicyConfig;
   sessionCwdIdleTtlSeconds?: number;
   strictStartup?: boolean;
 }
@@ -298,6 +308,7 @@ export class UpstreamManager {
   private reconnects = new Map<string, Promise<boolean>>();
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
+  private immediateReconnectServers = new Set<string>();
   private connectionGenerations = new Map<string, number>();
   private serverConfigs = new Map<string, ServerConfig>();
   private toolsByServer = new Map<string, Tool[]>();
@@ -307,13 +318,69 @@ export class UpstreamManager {
   private failedConnections: UpstreamConnectionFailure[] = [];
   private serverInfoMap = new Map<string, ServerInfo>();
   private serverConcurrency = new Map<string, number>();
+  private toolSuiteGeneration = 0;
+  private lastToolSuiteChangeAt: string | undefined;
+  private removedTools = new Map<string, { server: string; tool: string; lastSeenAt: string; removedAt: string; alternatives: string[] }>();
+  private toolSuiteSubscribers = new Set<(event: {
+    server: string;
+    generation: number;
+    changedAt: string;
+    addedTools: string[];
+    removedTools: string[];
+  }) => void>();
   private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
   private connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
+  private reconnectPolicy: EffectiveReconnectPolicy = {
+    initialDelayMs: RECONNECT_INITIAL_DELAY_MS,
+    maxDelayMs: RECONNECT_MAX_DELAY_MS,
+    jitterRatio: RECONNECT_JITTER_RATIO,
+    maxAttempts: null,
+    fastFailDuringBackoff: true,
+  };
   private sessionCwdIdleTtlMs = DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS * 1000;
   private closing = false;
   private lifecycleGeneration = 0;
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
+
+  private normalizeReconnectPolicy(
+    policy?: ReconnectPolicyConfig
+  ): EffectiveReconnectPolicy {
+    const initialDelayMs = policy?.initialDelayMs ?? RECONNECT_INITIAL_DELAY_MS;
+    const maxDelayMs = policy?.maxDelayMs ?? RECONNECT_MAX_DELAY_MS;
+    return {
+      initialDelayMs,
+      maxDelayMs: Math.max(initialDelayMs, maxDelayMs),
+      jitterRatio: policy?.jitterRatio ?? RECONNECT_JITTER_RATIO,
+      maxAttempts: policy?.maxAttempts === undefined ? null : policy.maxAttempts,
+      fastFailDuringBackoff: policy?.fastFailDuringBackoff ?? true,
+    };
+  }
+
+  subscribeToolSuiteChanges(callback: (event: {
+    server: string;
+    generation: number;
+    changedAt: string;
+    addedTools: string[];
+    removedTools: string[];
+  }) => void): () => void {
+    this.toolSuiteSubscribers.add(callback);
+    return () => {
+      this.toolSuiteSubscribers.delete(callback);
+    };
+  }
+
+  private emitToolSuiteChange(event: {
+    server: string;
+    generation: number;
+    changedAt: string;
+    addedTools: string[];
+    removedTools: string[];
+  }): void {
+    for (const subscriber of this.toolSuiteSubscribers) {
+      subscriber(event);
+    }
+  }
 
   setInstanceIdentity(identity: InstanceIdentity): void {
     this.instanceIdentity = identity;
@@ -349,12 +416,14 @@ export class UpstreamManager {
     this.sessionClientConnects.clear();
     this.reconnects.clear();
     this.reconnectAttempts.clear();
+    this.immediateReconnectServers.clear();
     this.connectionGenerations.clear();
     this.serverConfigs.clear();
     this.toolsByServer.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
+    this.removedTools.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();
     this.closing = false;
@@ -555,6 +624,28 @@ export class UpstreamManager {
     } = connected;
     const oldClient = this.clients.get(name);
     const oldTransport = this.transports.get(name);
+    const previousTools = new Set(this.toolsByServer.get(name)?.map((tool) => tool.name) ?? []);
+    const nextTools = new Set(tools.map((tool) => tool.name));
+    const addedTools = Array.from(nextTools).filter((tool) => !previousTools.has(tool)).sort();
+    const removedTools = Array.from(previousTools).filter((tool) => !nextTools.has(tool)).sort();
+    const suiteChanged = previousTools.size === 0 || addedTools.length > 0 || removedTools.length > 0;
+    const changedAt = suiteChanged ? new Date().toISOString() : undefined;
+    if (suiteChanged) {
+      this.toolSuiteGeneration += 1;
+      this.lastToolSuiteChangeAt = changedAt;
+      for (const tool of addedTools) {
+        this.removedTools.delete(`${name}__${tool}`);
+      }
+      for (const tool of removedTools) {
+        this.removedTools.set(`${name}__${tool}`, {
+          server: name,
+          tool,
+          lastSeenAt: this.serverInfoMap.get(name)?.lastConnectedAt ?? changedAt ?? new Date().toISOString(),
+          removedAt: changedAt ?? new Date().toISOString(),
+          alternatives: Array.from(nextTools).sort(),
+        });
+      }
+    }
     const generation = (this.connectionGenerations.get(name) ?? 0) + 1;
     this.connectionGenerations.set(name, generation);
 
@@ -567,8 +658,12 @@ export class UpstreamManager {
           ...info,
           state: "disconnected",
           error: "transport closed",
+          lastError: "transport closed",
+          lastFailureAt: new Date().toISOString(),
+          consecutiveFailures: (info.consecutiveFailures ?? 0) + 1,
         });
       }
+      this.immediateReconnectServers.add(name);
       this.scheduleReconnect(name);
     };
 
@@ -596,21 +691,40 @@ export class UpstreamManager {
       exposedTools: tools.length,
       ...(config.tools ? { toolFilter: config.tools } : {}),
       ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
+      lastConnectedAt: new Date().toISOString(),
+      consecutiveFailures: 0,
+      toolSuiteGeneration: this.toolSuiteGeneration,
+      ...(this.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: this.lastToolSuiteChangeAt } : {}),
+      ...(addedTools.length > 0 ? { addedTools } : {}),
+      ...(removedTools.length > 0 ? { removedTools } : {}),
     });
     this.clearFailedConnection(name);
     this.reconnectAttempts.delete(name);
+    this.immediateReconnectServers.delete(name);
     this.rebuildToolIndexes();
 
     if (oldClient && oldClient !== client) {
       void this.closeQuietly(oldClient, oldTransport);
     }
+    if (suiteChanged && changedAt && (addedTools.length > 0 || removedTools.length > 0)) {
+      this.emitToolSuiteChange({
+        server: name,
+        generation: this.toolSuiteGeneration,
+        changedAt,
+        addedTools,
+        removedTools,
+      });
+    }
   }
 
   private reconnectDelayMs(attempts: number): number {
-    return Math.min(
-      RECONNECT_MAX_DELAY_MS,
-      RECONNECT_INITIAL_DELAY_MS * (2 ** Math.max(0, attempts))
+    const base = Math.min(
+      this.reconnectPolicy.maxDelayMs,
+      this.reconnectPolicy.initialDelayMs * (2 ** Math.max(0, attempts))
     );
+    if (this.reconnectPolicy.jitterRatio <= 0) return base;
+    const jitter = base * this.reconnectPolicy.jitterRatio;
+    return Math.max(0, Math.round(base - jitter + Math.random() * jitter * 2));
   }
 
   private scheduleReconnect(name: string): void {
@@ -620,7 +734,10 @@ export class UpstreamManager {
     if (!config) return;
 
     const attempts = this.reconnectAttempts.get(name) ?? 0;
-    if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS) {
+    if (
+      this.reconnectPolicy.maxAttempts !== null &&
+      attempts >= this.reconnectPolicy.maxAttempts
+    ) {
       const info = this.serverInfoMap.get(name);
       this.serverInfoMap.set(name, {
         transport: info?.transport ?? this.resolvedTransportFor(config),
@@ -631,6 +748,10 @@ export class UpstreamManager {
         ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
         ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
         error: info?.error ?? "reconnect attempts exhausted",
+        lastError: info?.lastError ?? info?.error ?? "reconnect attempts exhausted",
+        ...(info?.lastConnectedAt ? { lastConnectedAt: info.lastConnectedAt } : {}),
+        lastFailureAt: info?.lastFailureAt ?? new Date().toISOString(),
+        consecutiveFailures: info?.consecutiveFailures ?? attempts,
         reconnectAttempts: attempts,
       });
       return;
@@ -648,6 +769,12 @@ export class UpstreamManager {
       ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
       ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
       ...(info?.error ? { error: info.error } : {}),
+      ...(info?.lastError ? { lastError: info.lastError } : {}),
+      ...(info?.lastConnectedAt ? { lastConnectedAt: info.lastConnectedAt } : {}),
+      ...(info?.lastFailureAt ? { lastFailureAt: info.lastFailureAt } : {}),
+      ...(info?.consecutiveFailures ? { consecutiveFailures: info.consecutiveFailures } : {}),
+      ...(info?.toolSuiteGeneration ? { toolSuiteGeneration: info.toolSuiteGeneration } : {}),
+      ...(info?.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: info.lastToolSuiteChangeAt } : {}),
       reconnectAttempts: attempts,
       nextRetryAt,
     });
@@ -689,6 +816,7 @@ export class UpstreamManager {
     const config = this.serverConfigs.get(server);
     const info = this.serverInfoMap.get(server);
     if (info || config) {
+      const failedAt = new Date().toISOString();
       this.serverInfoMap.set(server, {
         transport: info?.transport ?? (config ? this.resolvedTransportFor(config) : "stdio"),
         state: "disconnected",
@@ -698,11 +826,18 @@ export class UpstreamManager {
         ...(info?.toolFilter ? { toolFilter: info.toolFilter } : {}),
         ...(info?.maxConcurrency ? { maxConcurrency: info.maxConcurrency } : {}),
         error: message,
+        lastError: message,
+        ...(info?.lastConnectedAt ? { lastConnectedAt: info.lastConnectedAt } : {}),
+        lastFailureAt: failedAt,
+        consecutiveFailures: (info?.consecutiveFailures ?? 0) + 1,
         ...(info?.reconnectAttempts ? { reconnectAttempts: info.reconnectAttempts } : {}),
+        ...(info?.toolSuiteGeneration ? { toolSuiteGeneration: info.toolSuiteGeneration } : {}),
+        ...(info?.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: info.lastToolSuiteChangeAt } : {}),
       });
     }
 
     void this.closeQuietly(client, transport);
+    this.immediateReconnectServers.add(server);
     this.scheduleReconnect(server);
   }
 
@@ -725,10 +860,18 @@ export class UpstreamManager {
 
     const promise = (async () => {
       let attempts = this.reconnectAttempts.get(name) ?? 0;
-      if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS && trigger === "background") {
+      if (
+        this.reconnectPolicy.maxAttempts !== null &&
+        attempts >= this.reconnectPolicy.maxAttempts &&
+        trigger === "background"
+      ) {
         return false;
       }
-      if (attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS && trigger === "call") {
+      if (
+        this.reconnectPolicy.maxAttempts !== null &&
+        attempts >= this.reconnectPolicy.maxAttempts &&
+        trigger === "call"
+      ) {
         attempts = 0;
       }
 
@@ -744,6 +887,12 @@ export class UpstreamManager {
         ...(previous?.toolFilter ? { toolFilter: previous.toolFilter } : {}),
         ...(previous?.maxConcurrency ? { maxConcurrency: previous.maxConcurrency } : {}),
         ...(previous?.error ? { error: previous.error } : {}),
+        ...(previous?.lastError ? { lastError: previous.lastError } : {}),
+        ...(previous?.lastConnectedAt ? { lastConnectedAt: previous.lastConnectedAt } : {}),
+        ...(previous?.lastFailureAt ? { lastFailureAt: previous.lastFailureAt } : {}),
+        ...(previous?.consecutiveFailures ? { consecutiveFailures: previous.consecutiveFailures } : {}),
+        ...(previous?.toolSuiteGeneration ? { toolSuiteGeneration: previous.toolSuiteGeneration } : {}),
+        ...(previous?.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: previous.lastToolSuiteChangeAt } : {}),
         reconnectAttempts: attempts,
       });
 
@@ -765,8 +914,11 @@ export class UpstreamManager {
         if (this.closing || this.lifecycleGeneration !== lifecycleGeneration) {
           return false;
         }
-        const exhausted = attempts >= RECONNECT_MAX_BACKGROUND_ATTEMPTS;
+        const exhausted =
+          this.reconnectPolicy.maxAttempts !== null &&
+          attempts >= this.reconnectPolicy.maxAttempts;
         const previousInfo = this.serverInfoMap.get(name);
+        const failedAt = new Date().toISOString();
         this.serverInfoMap.set(name, {
           transport: previousInfo?.transport ?? this.resolvedTransportFor(config),
           state: exhausted ? "failed" : "disconnected",
@@ -776,6 +928,12 @@ export class UpstreamManager {
           ...(previousInfo?.toolFilter ? { toolFilter: previousInfo.toolFilter } : {}),
           ...(previousInfo?.maxConcurrency ? { maxConcurrency: previousInfo.maxConcurrency } : {}),
           error: message,
+          lastError: message,
+          ...(previousInfo?.lastConnectedAt ? { lastConnectedAt: previousInfo.lastConnectedAt } : {}),
+          lastFailureAt: failedAt,
+          consecutiveFailures: (previousInfo?.consecutiveFailures ?? 0) + 1,
+          ...(previousInfo?.toolSuiteGeneration ? { toolSuiteGeneration: previousInfo.toolSuiteGeneration } : {}),
+          ...(previousInfo?.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: previousInfo.lastToolSuiteChangeAt } : {}),
           reconnectAttempts: attempts,
         });
         this.upsertFailedConnection(name, config, message);
@@ -806,7 +964,12 @@ export class UpstreamManager {
         tool: toolName,
         retryable: true,
         ...(info?.state ? { state: info.state } : {}),
-        ...(info?.error ? { lastError: info.error } : {}),
+        ...(info?.lastError ?? info?.error ? { lastError: info.lastError ?? info.error } : {}),
+        ...(info?.lastFailureAt ? { lastFailureAt: info.lastFailureAt } : {}),
+        ...(info?.lastConnectedAt ? { lastConnectedAt: info.lastConnectedAt } : {}),
+        ...(info?.consecutiveFailures !== undefined
+          ? { consecutiveFailures: info.consecutiveFailures }
+          : {}),
         ...(info?.reconnectAttempts !== undefined
           ? { reconnectAttempts: info.reconnectAttempts }
           : {}),
@@ -998,7 +1161,18 @@ export class UpstreamManager {
     }
 
     const info = this.serverInfoMap.get(server);
+    const allowImmediateReconnect = this.immediateReconnectServers.delete(server);
     if (info && info.state !== "connected") {
+      if (
+        this.reconnectPolicy.fastFailDuringBackoff &&
+        !context?.forceReconnect &&
+        !allowImmediateReconnect &&
+        info.nextRetryAt &&
+        Date.parse(info.nextRetryAt) > Date.now() &&
+        info.error !== "transport closed"
+      ) {
+        return { error: this.downstreamUnavailable(server, toolName) };
+      }
       const reconnected = await this.reconnectServer(server, "call");
       if (!reconnected) {
         return { error: this.downstreamUnavailable(server, toolName) };
@@ -1019,12 +1193,25 @@ export class UpstreamManager {
     const maxConcurrency = options.maxConcurrency ?? 20;
     const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.connectTimeoutMs = connectTimeoutMs;
+    this.reconnectPolicy = this.normalizeReconnectPolicy(options.reconnectPolicy);
     this.sessionCwdIdleTtlMs =
       (options.sessionCwdIdleTtlSeconds ?? DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS) * 1000;
     const strictStartup = options.strictStartup ?? false;
     this.failedConnections = [];
 
     const startTimes = new Map<string, number>();
+    for (const [name, config] of entries) {
+      this.serverInfoMap.set(name, {
+        transport: this.resolvedTransportFor(config),
+        state: "starting",
+        connectDurationMs: 0,
+        totalTools: 0,
+        exposedTools: 0,
+        ...(config.tools ? { toolFilter: config.tools } : {}),
+        ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
+        toolSuiteGeneration: this.toolSuiteGeneration,
+      });
+    }
     const results = await mapBounded(entries, maxConcurrency, async ([name, config]) => {
       startTimes.set(name, performance.now());
       try {
@@ -1090,6 +1277,11 @@ export class UpstreamManager {
         exposedTools: 0,
         ...(failure.config.tools ? { toolFilter: failure.config.tools } : {}),
         error: failure.error,
+        lastError: failure.error,
+        lastFailureAt: new Date().toISOString(),
+        consecutiveFailures: 1,
+        reconnectAttempts: 0,
+        toolSuiteGeneration: this.toolSuiteGeneration,
       });
       process.stderr.write(
         `[callmux] Warning: failed to connect "${failure.name}": ${failure.error} (${failDuration}ms)\n`
@@ -1109,9 +1301,33 @@ export class UpstreamManager {
   }
 
   private toolNotFound(toolName: string): CallToolResult {
+    const removed = this.removedToolErrorFor(toolName);
+    if (removed) return removed;
     return errorResult("tool_not_found", `tool "${toolName}" not found`, {
       tool: toolName,
     });
+  }
+
+  private removedToolErrorFor(toolName: string, serverHint?: string): CallToolResult | undefined {
+    const candidates = serverHint
+      ? [`${serverHint}__${toolName.startsWith(`${serverHint}__`) ? toolName.slice(serverHint.length + 2) : toolName}`]
+      : toolName.includes("__")
+        ? [toolName]
+        : Array.from(this.removedTools.keys()).filter((key) => key.endsWith(`__${toolName}`));
+    if (candidates.length !== 1) return undefined;
+    const removed = this.removedTools.get(candidates[0]);
+    if (!removed) return undefined;
+    return errorResult(
+      "tool_removed_after_reconnect",
+      `tool "${removed.tool}" was removed from server "${removed.server}" after reconnect`,
+      {
+        server: removed.server,
+        tool: removed.tool,
+        lastSeenAt: removed.lastSeenAt,
+        removedAt: removed.removedAt,
+        currentTools: removed.alternatives,
+      }
+    );
   }
 
   private resolutionError(
@@ -1129,6 +1345,18 @@ export class UpstreamManager {
         ...this.failedConnections.map((failure) => failure.name),
       ])
     ).sort();
+  }
+
+  private splitKnownQualifiedToolName(
+    toolName: string
+  ): { server: string; actualName: string } | undefined {
+    for (const server of this.getKnownServerNames().sort((a, b) => b.length - a.length)) {
+      const prefix = `${server}__`;
+      if (toolName.startsWith(prefix)) {
+        return { server, actualName: toolName.slice(prefix.length) };
+      }
+    }
+    return undefined;
   }
 
   private indexUnqualifiedTool(server: string, tool: Tool): void {
@@ -1366,10 +1594,11 @@ export class UpstreamManager {
   resolveServer(
     toolName: string,
     serverHint?: string
-  ): { client: Client; actualName: string; server: string } | { error: CallToolResult } | null {
+  ): { actualName: string; server: string } | { error: CallToolResult } | null {
     if (serverHint) {
-      const client = this.clients.get(serverHint);
-      if (!client) {
+      const config = this.serverConfigs.get(serverHint);
+      const knownClient = this.clients.has(serverHint);
+      if (!config && !knownClient) {
         const availableServers = this.getKnownServerNames();
         const namespaceText = this.instanceIdentity.namespace
           ? ` (namespace: ${this.instanceIdentity.namespace})`
@@ -1399,7 +1628,11 @@ export class UpstreamManager {
         ? toolName.slice(qualifiedPrefix.length)
         : toolName;
 
-      if (!exposedTools?.has(actualName)) {
+      const removed = this.removedToolErrorFor(actualName, serverHint);
+      if (removed) return { error: removed };
+
+      const configuredTools = config?.tools ? new Set(config.tools) : undefined;
+      if (!exposedTools && configuredTools && !configuredTools.has(actualName)) {
         return {
           error: this.resolutionError(
             `tool "${actualName}" is not exposed on server "${serverHint}"`
@@ -1407,14 +1640,28 @@ export class UpstreamManager {
         };
       }
 
-      return { client, actualName, server: serverHint };
+      if (!exposedTools?.has(actualName)) {
+        if (!this.clients.has(serverHint)) {
+          return { actualName, server: serverHint };
+        }
+        return {
+          error: this.resolutionError(
+            `tool "${actualName}" is not exposed on server "${serverHint}"`
+          ),
+        };
+      }
+
+      return { actualName, server: serverHint };
     }
 
     const entry = this.toolMap.get(toolName);
     if (entry) {
-      const client = this.clients.get(entry.server);
-      if (!client) return null;
-      return { client, actualName: entry.tool.name, server: entry.server };
+      return { actualName: entry.tool.name, server: entry.server };
+    }
+
+    const knownQualified = this.splitKnownQualifiedToolName(toolName);
+    if (knownQualified) {
+      return this.resolveServer(knownQualified.actualName, knownQualified.server);
     }
 
     const unqualified = this.unqualifiedToolMap.get(toolName);
@@ -1426,10 +1673,7 @@ export class UpstreamManager {
 
       if (matches.length === 1) {
         const match = matches[0];
-        const client = this.clients.get(match.server);
-        if (client) {
-          return { client, actualName: match.tool.name, server: match.server };
-        }
+        return { actualName: match.tool.name, server: match.server };
       }
 
       if (matches.length > 1) {
@@ -1443,10 +1687,7 @@ export class UpstreamManager {
     }
 
     if (unqualified && unqualified !== null) {
-      const client = this.clients.get(unqualified.server);
-      if (client) {
-        return { client, actualName: unqualified.tool.name, server: unqualified.server };
-      }
+      return { actualName: unqualified.tool.name, server: unqualified.server };
     }
 
     if (unqualified === null) {
@@ -1457,6 +1698,8 @@ export class UpstreamManager {
       };
     }
 
+    const removed = this.removedToolErrorFor(toolName);
+    if (removed) return { error: removed };
     return null;
   }
 
@@ -1474,25 +1717,34 @@ export class UpstreamManager {
     let callClient: Client | undefined;
 
     try {
-      const client = await this.clientForCall(prepared.server, prepared.actualName, context);
-      if (client && "error" in client) return client.error;
-      if (!client) {
-        return this.toolNotFound(toolName);
-      }
-      callClient = client;
-      const result = await withTimeout(
-        client.callTool(
-          {
-            name: prepared.actualName,
-            arguments: prepared.resolvedArguments,
-          },
-          undefined,
-          this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
-        ),
-        this.callTimeoutMs,
-        `"${prepared.server}" tool "${prepared.actualName}" call`
-      );
-      return result as unknown as CallToolResult;
+      const invoke = async (forceReconnect = false): Promise<CallToolResult> => {
+        const client = await this.clientForCall(
+          prepared.server,
+          prepared.actualName,
+          forceReconnect ? { ...context, forceReconnect: true } : context
+        );
+        if (client && "error" in client) return client.error;
+        if (!client) {
+          return this.toolNotFound(toolName);
+        }
+        callClient = client;
+        const result = await withTimeout(
+          client.callTool(
+            {
+              name: prepared.actualName,
+              arguments: prepared.resolvedArguments,
+            },
+            undefined,
+            this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+          ),
+          this.callTimeoutMs,
+          `"${prepared.server}" tool "${prepared.actualName}" call`
+        );
+        return result as unknown as CallToolResult;
+      };
+
+      const result = await invoke();
+      return result;
     } catch (error) {
       const normalized = normalizeToolCallFailure(error);
       if (normalized.retryable) {
@@ -1503,6 +1755,46 @@ export class UpstreamManager {
           normalized.message,
           scopedKey
         );
+        if (context?.retryOnReconnect) {
+          const reconnected = await this.reconnectServer(prepared.server, "call");
+          if (reconnected) {
+            try {
+              return await (async () => {
+                const client = await this.clientForCall(
+                  prepared.server,
+                  prepared.actualName,
+                  { ...context, forceReconnect: true }
+                );
+                if (client && "error" in client) return client.error;
+                if (!client) return this.toolNotFound(toolName);
+                callClient = client;
+                const result = await withTimeout(
+                  client.callTool(
+                    {
+                      name: prepared.actualName,
+                      arguments: prepared.resolvedArguments,
+                    },
+                    undefined,
+                    this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+                  ),
+                  this.callTimeoutMs,
+                  `"${prepared.server}" tool "${prepared.actualName}" retry call`
+                );
+                return result as unknown as CallToolResult;
+              })();
+            } catch (retryError) {
+              const retryNormalized = normalizeToolCallFailure(retryError);
+              return errorResult("tool_call_failed", retryNormalized.message, {
+                tool: toolName,
+                ...(serverHint ? { server: serverHint } : {}),
+                category: retryNormalized.category,
+                rootCause: retryNormalized.rootCause,
+                retryable: retryNormalized.retryable,
+                retryAttempted: true,
+              });
+            }
+          }
+        }
       }
       return errorResult("tool_call_failed", normalized.message, {
         tool: toolName,
@@ -1510,6 +1802,7 @@ export class UpstreamManager {
         category: normalized.category,
         rootCause: normalized.rootCause,
         retryable: normalized.retryable,
+        ...(context?.retryOnReconnect ? { retryAttempted: true } : {}),
       });
     } finally {
       if (scopedKey) {
@@ -1541,6 +1834,13 @@ export class UpstreamManager {
 
   getServerInfo(server: string): ServerInfo | undefined {
     return this.serverInfoMap.get(server);
+  }
+
+  getToolSuiteStats(): { generation: number; lastChangeAt?: string } {
+    return {
+      generation: this.toolSuiteGeneration,
+      ...(this.lastToolSuiteChangeAt ? { lastChangeAt: this.lastToolSuiteChangeAt } : {}),
+    };
   }
 
   getServerConcurrency(server: string): number | undefined {
@@ -1581,21 +1881,12 @@ export class UpstreamManager {
       if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
     }
     await Promise.all([
-      ...Array.from(this.clients.entries()).map(async ([name, client]) => {
-        try {
-          await client.close();
-        } catch {
-          process.stderr.write(`[callmux] Warning: error closing "${name}"\n`);
-        }
-      }),
-      ...Array.from(this.sessionClients.entries()).map(async ([key, { client }]) => {
-        try {
-          await client.close();
-        } catch {
-          const [name] = key.split("\0", 1);
-          process.stderr.write(`[callmux] Warning: error closing session-scoped "${name}"\n`);
-        }
-      }),
+      ...Array.from(this.clients.entries()).map(([name, client]) =>
+        this.closeQuietly(client, this.transports.get(name))
+      ),
+      ...Array.from(this.sessionClients.values()).map(({ client, transport }) =>
+        this.closeQuietly(client, transport)
+      ),
     ]);
     this.clients.clear();
     this.transports.clear();
@@ -1603,12 +1894,14 @@ export class UpstreamManager {
     this.sessionClientConnects.clear();
     this.reconnects.clear();
     this.reconnectAttempts.clear();
+    this.immediateReconnectServers.clear();
     this.connectionGenerations.clear();
     this.serverConfigs.clear();
     this.toolsByServer.clear();
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     this.exposedToolsByServer.clear();
+    this.removedTools.clear();
     this.serverInfoMap.clear();
     this.serverConcurrency.clear();
     this.failedConnections = [];

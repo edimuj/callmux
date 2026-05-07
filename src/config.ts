@@ -14,6 +14,7 @@ import type {
   ConfigFormat,
   MetricsConfig,
   DashboardConfig,
+  ReconnectPolicyConfig,
   RecipeConfig,
   RecipeMode,
   ResponseShieldConfig,
@@ -487,6 +488,55 @@ function parseDashboardConfig(
     ...(enabled !== undefined ? { enabled } : {}),
     ...(path ? { path } : {}),
     ...(maxEvents !== undefined ? { maxEvents } : {}),
+  };
+}
+
+function parseReconnectPolicyConfig(
+  value: unknown,
+  optionName: string
+): ReconnectPolicyConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const initialDelayMs = value.initialDelayMs !== undefined
+    ? parsePositiveInteger(value.initialDelayMs, `${optionName}.initialDelayMs`)
+    : undefined;
+  const maxDelayMs = value.maxDelayMs !== undefined
+    ? parsePositiveInteger(value.maxDelayMs, `${optionName}.maxDelayMs`)
+    : undefined;
+  const jitterRatio = value.jitterRatio !== undefined
+    ? (typeof value.jitterRatio === "number" && Number.isFinite(value.jitterRatio) && value.jitterRatio >= 0 && value.jitterRatio <= 1
+      ? value.jitterRatio
+      : (() => { throw new Error(`${optionName}.jitterRatio must be a number between 0 and 1`); })())
+    : undefined;
+  const maxAttempts = value.maxAttempts !== undefined
+    ? (value.maxAttempts === null
+      ? null
+      : parsePositiveInteger(value.maxAttempts, `${optionName}.maxAttempts`))
+    : undefined;
+  const fastFailDuringBackoff = parseBooleanOption(
+    value.fastFailDuringBackoff,
+    `${optionName}.fastFailDuringBackoff`
+  );
+
+  if (
+    initialDelayMs === undefined &&
+    maxDelayMs === undefined &&
+    jitterRatio === undefined &&
+    maxAttempts === undefined &&
+    fastFailDuringBackoff === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(initialDelayMs !== undefined ? { initialDelayMs } : {}),
+    ...(maxDelayMs !== undefined ? { maxDelayMs } : {}),
+    ...(jitterRatio !== undefined ? { jitterRatio } : {}),
+    ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+    ...(fastFailDuringBackoff !== undefined ? { fastFailDuringBackoff } : {}),
   };
 }
 
@@ -990,6 +1040,10 @@ function parseConfigDocument(
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
     const dashboard = parseDashboardConfig(parsed.dashboard, "dashboard");
+    const reconnectPolicy = parseReconnectPolicyConfig(
+      parsed.reconnectPolicy,
+      "reconnectPolicy"
+    );
     const recipes = parseRecipesConfig(parsed.recipes, "recipes");
     return {
       cacheTtlSeconds:
@@ -1018,6 +1072,7 @@ function parseConfigDocument(
             ),
           }
         : {}),
+      ...(reconnectPolicy ? { reconnectPolicy } : {}),
       ...(parsed.sessionCwdIdleTtlSeconds !== undefined
         ? {
             sessionCwdIdleTtlSeconds: parseNonNegativeInteger(

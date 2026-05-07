@@ -183,6 +183,15 @@ export class CallCache {
     return isToolCacheable(tool);
   }
 
+  isSafeToRetry(tool: string, server?: string): boolean {
+    return this.shouldCache(tool, server);
+  }
+
+  canCache(tool: string, server?: string): boolean {
+    if (this.ttlMs <= 0) return false;
+    return this.shouldCache(tool, server);
+  }
+
   private key(
     tool: string,
     args?: Record<string, unknown>,

@@ -107,7 +107,7 @@ export class CallmuxProxy {
     );
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: this.allTools,
+      tools: this.currentTools(),
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -125,6 +125,7 @@ export class CallmuxProxy {
       {
         maxConcurrency: this.maxConcurrency,
         connectTimeoutMs: this.connectTimeoutMs,
+        reconnectPolicy: this.config.reconnectPolicy,
         sessionCwdIdleTtlSeconds: this.config.sessionCwdIdleTtlSeconds,
         strictStartup: this.config.strictStartup ?? false,
       }
@@ -161,8 +162,17 @@ export class CallmuxProxy {
   getCache(): CallCache { return this.cache; }
   getResponseStore(): ResponseStore { return this.responseStore; }
   getMaxConcurrency(): number { return this.maxConcurrency; }
-  getTools(): Tool[] { return this.allTools; }
+  getTools(): Tool[] { return this.currentTools(); }
   getConfig(): CallmuxConfig { return this.config; }
+
+  private currentTools(): Tool[] {
+    if (this.config.metaOnly) return [...META_TOOLS];
+    const proxiedTools = this.upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    return [...proxiedTools, ...META_TOOLS];
+  }
 
   private async handleToolCall(
     name: string,
@@ -278,7 +288,9 @@ export class CallmuxProxy {
     const target = this.responseShieldTarget(name, args);
     if (cached) return this.shieldResult(target, cached);
 
-    const result = await this.upstream.callTool(name, args);
+    const result = await this.upstream.callTool(name, args, undefined, {
+      retryOnReconnect: this.cache.isSafeToRetry(name),
+    });
     this.cache.set(name, args, result);
     return this.shieldResult(target, result);
   }

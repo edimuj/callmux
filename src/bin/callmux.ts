@@ -178,6 +178,13 @@ Config file format:
     "maxCacheEntries": 1000,
     "connectTimeoutMs": 30000,
     "callTimeoutMs": 30000,
+    "reconnectPolicy": {
+      "initialDelayMs": 250,
+      "maxDelayMs": 10000,
+      "jitterRatio": 0.2,
+      "maxAttempts": null,
+      "fastFailDuringBackoff": true
+    },
     "requestBodyMaxBytes": 1048576,
     "allowRequestBodyMaxOverride": false,
     "allowInsecureRemoteListener": false,

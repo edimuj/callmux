@@ -59,6 +59,7 @@
       "default": 30000,
       "description": "Timeout in milliseconds for downstream tool calls"
     },
+    "reconnectPolicy": { "$ref": "#/$defs/reconnectPolicy" },
     "sessionCwdIdleTtlSeconds": {
       "type": "integer",
       "minimum": 0,
@@ -222,6 +223,43 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Never cache matching tools (exact names or 'prefix*' wildcards). Takes precedence over allowTools."
+        }
+      },
+      "additionalProperties": false
+    },
+    "reconnectPolicy": {
+      "type": "object",
+      "description": "Downstream reconnect retry/backoff policy. By default callmux retries forever with bounded jittered backoff.",
+      "properties": {
+        "initialDelayMs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 250,
+          "description": "Initial reconnect backoff in milliseconds"
+        },
+        "maxDelayMs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10000,
+          "description": "Maximum reconnect backoff in milliseconds"
+        },
+        "jitterRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.2,
+          "description": "Random jitter ratio applied to reconnect delays"
+        },
+        "maxAttempts": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "default": null,
+          "description": "Maximum failed reconnect attempts before stopping; null retries forever"
+        },
+        "fastFailDuringBackoff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return downstream_unavailable during scheduled backoff instead of blocking each call on connect"
         }
       },
       "additionalProperties": false

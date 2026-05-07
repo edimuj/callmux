@@ -34,6 +34,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
 | `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
 | `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
+| `reconnectPolicy` | object | retry forever | Downstream reconnect/backoff policy (see [Resilience](#resilience)) |
 | `sessionCwdIdleTtlSeconds` | integer | `600` | Idle TTL for listener-mode session-cwd stdio clients (`0` = close after each call) |
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
 | `allowRequestBodyMaxOverride` | boolean | `false` | Allow per-request `x-callmux-max-body-bytes` header override |
@@ -89,6 +90,43 @@ Remote servers use `url` instead of `command`:
 Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
 
 Startup is degraded by default: if one downstream server fails to connect, callmux still starts with the healthy servers and reports failures in `callmux_status.failedServers`. Set `"strictStartup": true` or pass `--strict-startup` to fail startup when any downstream server fails.
+
+---
+
+## Resilience
+
+callmux keeps configured downstream servers as first-class targets even when they are down. A call routed to a configured-but-unavailable server returns a structured `downstream_unavailable` error with retry metadata instead of `server_not_found`.
+
+By default, failed downstream servers reconnect forever with jittered exponential backoff. Calls during a scheduled backoff window fast-fail so a down server does not block every request on a fresh connect attempt. Use `forceReconnect: true` on `callmux_call` to bypass that window for an explicit recovery attempt.
+
+```json
+{
+  "reconnectPolicy": {
+    "initialDelayMs": 250,
+    "maxDelayMs": 10000,
+    "jitterRatio": 0.2,
+    "maxAttempts": null,
+    "fastFailDuringBackoff": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `initialDelayMs` | integer | `250` | Initial reconnect backoff |
+| `maxDelayMs` | integer | `10000` | Maximum reconnect backoff |
+| `jitterRatio` | number | `0.2` | Random jitter applied to reconnect delays (`0` disables jitter) |
+| `maxAttempts` | integer or null | `null` | Maximum failed reconnect attempts before stopping; `null` retries forever |
+| `fastFailDuringBackoff` | boolean | `true` | Return `downstream_unavailable` during scheduled backoff instead of blocking on reconnect |
+
+When a connected server disconnects or a tool call hits a transport/session/protocol/timeout failure, callmux retires that client and allows the next call to try reconnecting immediately. For cacheable safe calls, callmux may retry once after reconnecting.
+
+Tool suites are refreshed on reconnect. `listTools` is dynamic, callmux meta-tools stay present, and `callmux_status` reports `toolSuiteGeneration` plus per-server `addedTools` and `removedTools`. Calling a tool that disappeared after reconnect returns `tool_removed_after_reconnect` with the current alternatives.
+
+Listener deployments expose two status endpoints:
+
+- `/health` always reports listener liveness and session counts.
+- `/ready` reports operational readiness and returns HTTP 503 when configured downstream servers are unavailable.
 
 ---
 
