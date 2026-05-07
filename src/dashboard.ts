@@ -287,9 +287,27 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; background: #f7f8fa; color: #17202a; }
-    header { background: #102033; color: white; padding: 18px 24px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
     h1 { margin: 0; font-size: 20px; font-weight: 650; }
-    main { padding: 20px 24px 32px; max-width: 1200px; margin: 0 auto; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .app-shell { display: flex; min-height: 100vh; }
+    .sidebar { background: #102033; color: white; display: flex; flex-direction: column; min-height: 100vh; position: sticky; top: 0; width: 230px; }
+    .brand { border-bottom: 1px solid rgba(255,255,255,0.12); padding: 18px 18px 16px; }
+    .brand-mark { align-items: center; display: flex; gap: 10px; }
+    .brand-icon { align-items: center; background: #05070a; border: 1px solid rgba(56,189,248,0.35); border-radius: 8px; color: #38bdf8; display: inline-flex; font-weight: 800; height: 32px; justify-content: center; width: 32px; }
+    .brand-title { font-size: 16px; font-weight: 700; }
+    .nav { display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; }
+    .nav-button { align-items: center; background: transparent; border: 0; border-radius: 6px; color: #c9d5e3; cursor: pointer; display: flex; font: inherit; gap: 10px; padding: 9px 10px; text-align: left; }
+    .nav-button:hover { background: rgba(255,255,255,0.08); color: white; }
+    .nav-button.active { background: #38bdf8; color: #06101d; font-weight: 700; }
+    .nav-icon { font-size: 16px; line-height: 1; width: 18px; }
+    .sidebar-footer { border-top: 1px solid rgba(255,255,255,0.12); color: #a7b7ca; font-size: 12px; margin-top: auto; padding: 14px 18px; }
+    .mobile-nav { background: #102033; border-bottom: 1px solid rgba(255,255,255,0.12); display: none; gap: 6px; overflow-x: auto; padding: 8px; position: sticky; top: 0; z-index: 5; }
+    .content { flex: 1; min-width: 0; }
+    header { background: white; border-bottom: 1px solid #d9dee7; padding: 16px 24px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    main { padding: 20px 24px 32px; max-width: 1240px; margin: 0 auto; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .view-header { align-items: baseline; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
     .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 14px; }
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
@@ -317,9 +335,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .detail-item { border: 1px solid #e4e7ec; border-radius: 6px; padding: 8px; }
     .detail-label { color: #667085; font-size: 12px; margin-bottom: 4px; }
     .detail-value { font-size: 13px; overflow-wrap: anywhere; }
+    .runtime-json { background: #0f1720; border-radius: 8px; color: #dbeafe; font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
-      header { background: #07111d; }
+      header { background: #161c23; border-bottom-color: #303946; }
+      .sidebar, .mobile-nav { background: #07111d; }
       .panel { background: #161c23; border-color: #303946; }
       th, td { border-bottom-color: #303946; }
       tr.event-row:hover { background: #1e2936; }
@@ -328,6 +348,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
+      .app-shell { display: block; }
+      .sidebar { display: none; }
+      .mobile-nav { display: flex; }
+      .nav-button { flex: 0 0 auto; padding: 8px 10px; }
       header { align-items: flex-start; flex-direction: column; padding: 14px 16px; }
       main { padding: 14px 12px 24px; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -349,33 +373,94 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
   </style>
 </head>
 <body>
-  <header>
-    <h1>callmux dashboard</h1>
-    <div id="updated" class="muted">Connecting...</div>
-  </header>
-  <main>
-    <section class="grid" id="summary"></section>
-    <section class="panel">
-      <h2>Servers</h2>
-      <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
-    </section>
-    <section class="panel" style="margin-top:18px">
-      <div class="toolbar">
-        <h2>Recent Events</h2>
-        <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span class="brand-icon">C</span><span class="brand-title">callmux</span></div>
       </div>
-      <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
-      <div id="event-detail" class="muted" style="margin-top:12px">Select an event for details.</div>
-    </section>
-  </main>
+      <nav class="nav" aria-label="Dashboard sections">
+        <button class="nav-button active" data-view-button="overview"><span class="nav-icon">O</span>Overview</button>
+        <button class="nav-button" data-view-button="servers"><span class="nav-icon">S</span>Servers</button>
+        <button class="nav-button" data-view-button="events"><span class="nav-icon">E</span>Events</button>
+        <button class="nav-button" data-view-button="runtime"><span class="nav-icon">{} </span>Runtime</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div id="sidebar-status">Connecting...</div>
+      </div>
+    </aside>
+    <div class="content">
+      <div class="mobile-nav" aria-label="Dashboard sections">
+        <button class="nav-button active" data-view-button="overview">Overview</button>
+        <button class="nav-button" data-view-button="servers">Servers</button>
+        <button class="nav-button" data-view-button="events">Events</button>
+        <button class="nav-button" data-view-button="runtime">Runtime</button>
+      </div>
+      <header>
+        <h1 id="view-title">Overview</h1>
+        <div id="updated" class="muted">Connecting...</div>
+      </header>
+      <main>
+        <section id="view-overview" class="view active">
+          <div class="view-header"><h2>Overview</h2><span class="muted">Live proxy activity</span></div>
+          <section class="grid" id="summary"></section>
+        </section>
+        <section id="view-servers" class="view">
+          <div class="view-header"><h2>Servers</h2><span class="muted">Downstream health and tool exposure</span></div>
+          <section class="panel">
+            <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
+          </section>
+        </section>
+        <section id="view-events" class="view">
+          <div class="toolbar">
+            <h2>Recent Events</h2>
+            <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
+          </div>
+          <section class="panel">
+            <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
+          </section>
+          <section class="panel" style="margin-top:18px">
+            <div id="event-detail" class="muted">Select an event for details.</div>
+          </section>
+        </section>
+        <section id="view-runtime" class="view">
+          <div class="view-header"><h2>Runtime</h2><span class="muted">Current status payload</span></div>
+          <section class="panel">
+            <pre id="runtime-json" class="runtime-json">{}</pre>
+          </section>
+        </section>
+      </main>
+    </div>
+  </div>
   <script>
     const dataUrl = ${JSON.stringify(`${basePath}/data`)};
     const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
+    const viewTitles = { overview: "Overview", servers: "Servers", events: "Recent Events", runtime: "Runtime" };
     let snapshot = null;
     let pendingSnapshot = null;
     let selectedEventKey = null;
     let hideTransportHttp = true;
+    let currentView = loadView();
 
+    function loadView() {
+      try {
+        return localStorage.getItem("callmux-dashboard-view") || "overview";
+      } catch {
+        return "overview";
+      }
+    }
+    function saveView(view) {
+      try {
+        localStorage.setItem("callmux-dashboard-view", view);
+      } catch {}
+    }
+    function switchView(view) {
+      if (!viewTitles[view]) return;
+      currentView = view;
+      saveView(view);
+      document.querySelectorAll(".view").forEach(section => section.classList.toggle("active", section.id === "view-" + view));
+      document.querySelectorAll("[data-view-button]").forEach(button => button.classList.toggle("active", button.dataset.viewButton === view));
+      document.getElementById("view-title").textContent = viewTitles[view];
+    }
     function cell(value, className = "", label = "") {
       return "<td" + (className ? " class=\\"" + className + "\\"" : "") + (label ? " data-label=\\"" + esc(label) + "\\"" : "") + ">" + String(value ?? "") + "</td>";
     }
@@ -439,6 +524,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function updateUpdatedClock() {
       const updated = document.getElementById("updated");
       updated.textContent = snapshot ? "Updated " + new Date().toLocaleTimeString() : "Connecting...";
+      document.getElementById("sidebar-status").textContent = snapshot ? "Live - " + new Date().toLocaleTimeString() : "Connecting...";
     }
     function isTransportHttpEvent(event) {
       return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
@@ -505,6 +591,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
         return "<tr>" + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
       }).join("");
+      document.getElementById("runtime-json").textContent = JSON.stringify(status, null, 2);
       const displayedEvents = data.events.filter(event => !hideTransportHttp || !isTransportHttpEvent(event)).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
         const key = eventKey(event);
@@ -541,10 +628,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       hideTransportHttp = event.target.checked;
       if (snapshot) render(snapshot);
     });
+    document.querySelectorAll("[data-view-button]").forEach(button => {
+      button.addEventListener("click", () => switchView(button.dataset.viewButton));
+    });
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
       if (res.ok) renderWhenSelectionAllows(await res.json());
     }
+    switchView(currentView);
     refresh();
     setInterval(updateUpdatedClock, 1000);
     const stream = new EventSource(eventsUrl);

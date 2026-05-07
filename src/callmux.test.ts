@@ -6907,6 +6907,14 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /Passthrough calls/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);
+  assert.match(html, /class="sidebar"/);
+  assert.match(html, /data-view-button="overview"/);
+  assert.match(html, /data-view-button="servers"/);
+  assert.match(html, /data-view-button="events"/);
+  assert.match(html, /data-view-button="runtime"/);
+  assert.match(html, /function switchView/);
+  assert.match(html, /callmux-dashboard-view/);
+  assert.match(html, /id="runtime-json"/);
   assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
   assert.ok(html.includes("Number(event.status ?? 0) < 400"));
 });
