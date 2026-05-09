@@ -160,8 +160,8 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 | `callmux_batch` | Same tool, many items. The bulk operation pattern |
 | `callmux_pipeline` | Chain tools where each step feeds into the next |
 | `callmux_search_tools` | Search downstream tools by task, keyword, server, description, and input fields |
-| `callmux_get_result` | Page through a full stored result when callmux returns a truncated response ref |
-| `callmux_call` | Call a single downstream tool by name (primary path in [meta-only mode](docs/meta-only-mode.md)) |
+| `callmux_get_result` | Page, filter, or project a full stored result when callmux returns a truncated response ref |
+| `callmux_call` | Call a single downstream tool by name, or `callmux_get_result` when the direct pagination tool is deferred |
 | `callmux_dry_run` | Validate and preview calls without executing |
 | `callmux_recipe_run` | Run a named [recipe](docs/recipes.md) from config |
 | `callmux_recipe_dry_run` | Preview a recipe without executing |

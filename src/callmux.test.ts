@@ -5774,11 +5774,53 @@ test("proxy shields large proxied results and pages stored refs", async () => {
   const shielded = await harness.handleToolCall("large_list", {});
   assert.equal(shielded.isError, undefined);
   const shieldedContent = shielded.structuredContent as {
-    _callmux: { truncated: boolean; ref: string; originalBytes: number };
+    _callmux: {
+      truncated: boolean;
+      ref: string;
+      originalBytes: number;
+      shape: { type: string; total: number; sampleKeys: string[] };
+      retrieval: {
+        tool: string;
+        arguments: { ref: string; offset: number; limit: number };
+        viaCallmuxCall: {
+          tool: string;
+          arguments: {
+            tool: string;
+            arguments: { ref: string; offset: number; limit: number };
+          };
+        };
+        supports: { fields: string; search: string };
+      };
+      message: string;
+    };
   };
   assert.equal(shieldedContent._callmux.truncated, true);
   assert.match(shieldedContent._callmux.ref, /^r_/);
   assert.ok(shieldedContent._callmux.originalBytes > 8192);
+  assert.equal(shieldedContent._callmux.shape.type, "array");
+  assert.equal(shieldedContent._callmux.shape.total, 120);
+  assert.deepEqual(shieldedContent._callmux.shape.sampleKeys, ["id", "name", "body"]);
+  assert.equal(shieldedContent._callmux.retrieval.tool, "callmux_get_result");
+  assert.deepEqual(shieldedContent._callmux.retrieval.arguments, {
+    ref: shieldedContent._callmux.ref,
+    offset: 0,
+    limit: 50,
+  });
+  assert.equal(
+    shieldedContent._callmux.retrieval.viaCallmuxCall.tool,
+    "callmux_call"
+  );
+  assert.deepEqual(shieldedContent._callmux.retrieval.viaCallmuxCall.arguments, {
+    tool: "callmux_get_result",
+    arguments: {
+      ref: shieldedContent._callmux.ref,
+      offset: 0,
+      limit: 50,
+    },
+  });
+  assert.match(shieldedContent._callmux.retrieval.supports.fields, /projection/);
+  assert.match(shieldedContent._callmux.retrieval.supports.search, /filter/);
+  assert.match(shieldedContent._callmux.message, /viaCallmuxCall/);
 
   const page = await harness.handleToolCall("callmux_get_result", {
     ref: shieldedContent._callmux.ref,
@@ -5797,6 +5839,26 @@ test("proxy shields large proxied results and pages stored refs", async () => {
   assert.equal(pageContent.count, 3);
   assert.equal(pageContent.hasMore, true);
   assert.deepEqual(pageContent.data, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+  const fallbackPage = await harness.handleToolCall("callmux_call", {
+    tool: "callmux_get_result",
+    arguments: {
+      ref: shieldedContent._callmux.ref,
+      offset: 3,
+      limit: 2,
+      fields: ["id"],
+    },
+  });
+  const fallbackPageContent = fallbackPage.structuredContent as {
+    type: string;
+    offset: number;
+    count: number;
+    data: Array<{ id: number }>;
+  };
+  assert.equal(fallbackPageContent.type, "array");
+  assert.equal(fallbackPageContent.offset, 3);
+  assert.equal(fallbackPageContent.count, 2);
+  assert.deepEqual(fallbackPageContent.data, [{ id: 4 }, { id: 5 }]);
 
   const status = await harness.handleToolCall("callmux_status", {});
   const statusContent = status.structuredContent as {
@@ -6760,6 +6822,76 @@ test("listener dashboard serves read-only runtime data when enabled", async () =
     assert.ok(body.events.some((event) => event.type === "http_request" && event.path === "/health"));
     assert.ok(!body.events.some((event) => event.path === "/dashboard" || event.path === "/dashboard/data"));
     assert.ok(body.events.some((event) => event.type === "tool_call" && event.tool === "get_item" && event.cacheHit === true));
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener dashboard supports trailing-slash reverse proxy paths", async () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      dashboard: { enabled: true, path: "/relay/" },
+    },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = await getFreePort();
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const withoutSlash = await fetch(`http://127.0.0.1:${port}/relay`);
+    assert.equal(withoutSlash.status, 200);
+    assert.match(await withoutSlash.text(), /dashboardEndpoint\("data"\)/);
+
+    const withSlash = await fetch(`http://127.0.0.1:${port}/relay/`);
+    assert.equal(withSlash.status, 200);
+
+    const data = await fetch(`http://127.0.0.1:${port}/relay/data`);
+    assert.equal(data.status, 200);
+
+    const doubleSlashData = await fetch(`http://127.0.0.1:${port}/relay//data`);
+    assert.equal(doubleSlashData.status, 404);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener dashboard supports root mount", async () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {},
+      dashboard: { enabled: true, path: "/" },
+    },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = await getFreePort();
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const html = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(html.status, 200);
+    assert.ok((await html.text()).includes('const configuredPath = "/"'));
+
+    const data = await fetch(`http://127.0.0.1:${port}/data`);
+    assert.equal(data.status, 200);
+
+    const events = await fetch(`http://127.0.0.1:${port}/events`);
+    assert.equal(events.status, 200);
+    await events.body?.cancel();
   } finally {
     await listener.close();
   }
@@ -9025,6 +9157,92 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     assert.ok(listBody.result.tools.length >= META_TOOLS.length);
     assert.ok(listBody.result.tools.some((tool: Tool) => tool.name === "callmux_status"));
     assert.ok(!listBody.result.tools.some((tool: Tool) => tool.name === "my_tool"));
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener lets callmux_call page stored truncated results", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("large_list") },
+  ]) as unknown as UpstreamManager;
+  (upstream as unknown as {
+    callTool: () => Promise<CallToolResult>;
+  }).callTool = async () =>
+    textResult(JSON.stringify(Array.from({ length: 120 }, (_, index) => ({
+      id: index + 1,
+      name: `item-${index + 1}`,
+      body: "x".repeat(500),
+    }))));
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: { github: { command: "ignored" } } },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const port = await getFreePort();
+  (listener as any).options.port = port;
+
+  await listener.start();
+  try {
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        id: 1,
+      }),
+    });
+    assert.equal(initRes.status, 200);
+    const sessionId = initRes.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+
+    const shielded = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "large_list", arguments: {} },
+        id: 2,
+      }),
+    });
+    assert.equal(shielded.status, 200);
+    const shieldedBody = await parseMcpResponseBody(shielded);
+    const ref = shieldedBody.result.structuredContent._callmux.ref;
+    assert.match(ref, /^r_/);
+
+    const page = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "callmux_call",
+          arguments: {
+            tool: "callmux_get_result",
+            arguments: { ref, offset: 1, limit: 2, fields: ["id"] },
+          },
+        },
+        id: 3,
+      }),
+    });
+    assert.equal(page.status, 200);
+    const pageBody = await parseMcpResponseBody(page);
+    assert.equal(pageBody.result.structuredContent.type, "array");
+    assert.deepEqual(pageBody.result.structuredContent.data, [{ id: 2 }, { id: 3 }]);
   } finally {
     await listener.close();
   }

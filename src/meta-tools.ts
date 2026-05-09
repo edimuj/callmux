@@ -138,7 +138,9 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_get_result",
     description:
       "Retrieve a stored full result when a prior call returned a truncated _callmux.ref. " +
-      "Supports pagination, optional dot-path selection, field projection, and text search.",
+      "Supports pagination, optional dot-path selection, field projection, and text search. " +
+      "For arrays, offset/limit page items; for strings, offset is a character offset and limit returns chunks of about 200 chars. " +
+      "If this tool is deferred by your MCP client, call callmux_call with tool=\"callmux_get_result\" and arguments={ref,...}.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -177,7 +179,8 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_call",
     description:
       "Call a single tool on a downstream server. Primary way to invoke tools in meta-only mode. " +
-      "Use callmux_search_tools to find available tools.",
+      "Use callmux_search_tools to find available tools. " +
+      "Also accepts tool=\"callmux_get_result\" to page stored truncated results when the direct pagination tool is deferred.",
     inputSchema: {
       type: "object" as const,
       properties: {

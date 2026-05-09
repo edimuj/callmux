@@ -184,6 +184,8 @@ When enabled, callmux serves:
 - `/dashboard/data` - JSON snapshot for the UI
 - `/dashboard/events` - SSE stream for live refreshes
 
+`dashboard.path` may also be a reverse-proxy mount such as `/relay/` or the root path `/`. Trailing slashes are normalized, and the browser UI resolves `data` and `events` relative to the URL it was loaded from, so both `/relay` and `/relay/` work behind path-prefix proxies.
+
 The dashboard shows server health, active sessions, cache and response-store stats, recent HTTP requests, tool calls, cache hits, tool-suite changes, config reloads, and recent errors. Event rows are clickable and show routing details such as JSON-RPC method, callmux meta-tool vs downstream tool classification, fan-out counts for batch/parallel/pipeline calls, and aggregated downstream targets. Tool arguments are intentionally not stored in dashboard history. It is read-only in this version; server editing will come later.
 
 If listener auth is configured, dashboard requests require the same auth as `/mcp`.

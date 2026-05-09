@@ -98,6 +98,22 @@ If a downstream response is too large, callmux returns a `_callmux.ref` with a c
 { "ref": "r_...", "offset": 0, "limit": 50, "fields": ["id", "name"] }
 ```
 
+The truncated response also includes `_callmux.shape` and `_callmux.retrieval`:
+
+- `_callmux.shape` describes the stored data type, item counts, object keys, and useful array paths.
+- `_callmux.retrieval.arguments` is a ready-to-call first-page argument object.
+- `_callmux.retrieval.supports` documents `path`, `offset`, `limit`, `fields`, and `search` semantics inline.
+
+If your MCP client defers `callmux_get_result`, use the fallback carried in `_callmux.retrieval.viaCallmuxCall.arguments`:
+
+```json
+// callmux_call
+{
+  "tool": "callmux_get_result",
+  "arguments": { "ref": "r_...", "offset": 0, "limit": 50 }
+}
+```
+
 Batch, pipeline, and recipe calls work identically to standard mode.
 
 ---

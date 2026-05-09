@@ -13,6 +13,9 @@ const DEFAULT_MAX_ARRAY_ITEMS = 50;
 const DEFAULT_MAX_STORED_RESULTS = 100;
 const DEFAULT_RESULT_PAGE_LIMIT = 50;
 const MAX_RESULT_PAGE_LIMIT = 100;
+const MAX_SHAPE_KEYS = 20;
+const MAX_SHAPE_PATHS = 8;
+const MAX_SHAPE_DEPTH = 5;
 
 interface StoredResponse {
   ref: string;
@@ -254,6 +257,127 @@ function valueAtPath(value: unknown, path: string | undefined): unknown {
   return current;
 }
 
+function sampleKeys(value: unknown): string[] | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value).slice(0, MAX_SHAPE_KEYS);
+  return keys.length > 0 ? keys : undefined;
+}
+
+function arrayShape(path: string, value: unknown[]): Record<string, unknown> {
+  const first = value[0];
+  const keys = sampleKeys(first);
+  return {
+    ...(path ? { path } : {}),
+    type: "array",
+    total: value.length,
+    ...(keys ? { sampleKeys: keys } : {}),
+  };
+}
+
+function collectArrayShapes(
+  value: unknown,
+  path: string,
+  depth: number,
+  result: Array<Record<string, unknown>>
+): void {
+  if (result.length >= MAX_SHAPE_PATHS || depth > MAX_SHAPE_DEPTH) return;
+
+  if (Array.isArray(value)) {
+    result.push(arrayShape(path, value));
+    return;
+  }
+
+  if (!isRecord(value)) return;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (result.length >= MAX_SHAPE_PATHS) return;
+    const childPath = path ? `${path}.${key}` : key;
+    if (Array.isArray(child)) {
+      result.push(arrayShape(childPath, child));
+    } else if (isRecord(child)) {
+      collectArrayShapes(child, childPath, depth + 1, result);
+    }
+  }
+}
+
+function summarizeDataShape(data: unknown): Record<string, unknown> {
+  if (Array.isArray(data)) {
+    return {
+      ...arrayShape("", data),
+      paging: {
+        offsetUnit: "items",
+        defaultLimit: DEFAULT_RESULT_PAGE_LIMIT,
+        maxLimit: MAX_RESULT_PAGE_LIMIT,
+      },
+    };
+  }
+
+  if (typeof data === "string") {
+    return {
+      type: "string",
+      totalChars: data.length,
+      paging: {
+        offsetUnit: "characters",
+        limitUnit: "about 200 characters per limit unit",
+        defaultLimit: DEFAULT_RESULT_PAGE_LIMIT,
+        maxLimit: MAX_RESULT_PAGE_LIMIT,
+      },
+    };
+  }
+
+  if (isRecord(data)) {
+    const arrays: Array<Record<string, unknown>> = [];
+    collectArrayShapes(data, "", 0, arrays);
+    return {
+      type: "object",
+      keys: Object.keys(data).slice(0, MAX_SHAPE_KEYS),
+      ...(arrays.length > 0 ? { arrays, suggestedPath: arrays[0].path } : {}),
+      paging: {
+        offsetUnit: arrays.length > 0 ? "items at selected path" : "single value",
+        defaultLimit: DEFAULT_RESULT_PAGE_LIMIT,
+        maxLimit: MAX_RESULT_PAGE_LIMIT,
+      },
+    };
+  }
+
+  return { type: data === null ? "null" : typeof data };
+}
+
+function retrievalHint(ref: string, shape: Record<string, unknown>): Record<string, unknown> {
+  const suggestedPath =
+    typeof shape.suggestedPath === "string" && shape.suggestedPath.length > 0
+      ? shape.suggestedPath
+      : undefined;
+  return {
+    tool: "callmux_get_result",
+    arguments: {
+      ref,
+      ...(suggestedPath ? { path: suggestedPath } : {}),
+      offset: 0,
+      limit: DEFAULT_RESULT_PAGE_LIMIT,
+    },
+    viaCallmuxCall: {
+      tool: "callmux_call",
+      arguments: {
+        tool: "callmux_get_result",
+        arguments: {
+          ref,
+          ...(suggestedPath ? { path: suggestedPath } : {}),
+          offset: 0,
+          limit: DEFAULT_RESULT_PAGE_LIMIT,
+        },
+      },
+    },
+    supports: {
+      path: "dot path inside the stored result, for example items or preview.items",
+      offset: "array item offset, or character offset for string results",
+      limit: `array item count, or about limit * 200 characters for strings; max ${MAX_RESULT_PAGE_LIMIT}`,
+      fields: "optional field projection for arrays of objects",
+      search: "optional case-insensitive filter before pagination",
+    },
+  };
+}
+
 function projectFields(item: unknown, fields: string[] | undefined): unknown {
   if (!fields || fields.length === 0 || !isRecord(item)) return item;
   const projected: Record<string, unknown> = {};
@@ -491,6 +615,7 @@ export function shieldToolResult(
   if (!shouldShield) return result;
 
   const entry = store.store(shieldTarget.tool, result);
+  const shape = summarizeDataShape(dataFromResult(result));
   const preview =
     compactedBytes <= resolvedOptions.maxResultBytes
       ? compacted.value
@@ -511,8 +636,11 @@ export function shieldToolResult(
       ...(shieldTarget.server ? { server: shieldTarget.server } : {}),
       originalBytes,
       previewBytes: byteLength(preview),
+      shape,
+      retrieval: retrievalHint(entry.ref, shape),
       message:
-        `Response was truncated. Use callmux_get_result with ref "${entry.ref}" to page through the full result.`,
+        `Response was truncated. Use callmux_get_result with ref "${entry.ref}" to page through the full result. ` +
+        `Use the _callmux.retrieval.arguments object for the first page; if that tool is deferred, call callmux_call with _callmux.retrieval.viaCallmuxCall.arguments.`,
     },
     preview,
   });

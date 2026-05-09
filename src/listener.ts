@@ -498,7 +498,11 @@ export class CallmuxListener {
   private isDashboardPath(path: string): boolean {
     if (!this.dashboardConfig.enabled) return false;
     const base = this.dashboardConfig.path;
-    return path === base || path === `${base}/data` || path === `${base}/events`;
+    return (
+      this.isDashboardBasePath(path, base) ||
+      path === this.dashboardChildPath(base, "data") ||
+      path === this.dashboardChildPath(base, "events")
+    );
   }
 
   private handleDashboard(
@@ -513,24 +517,33 @@ export class CallmuxListener {
     }
 
     const base = this.dashboardConfig.path;
-    if (path === base) {
+    if (this.isDashboardBasePath(path, base)) {
       const html = renderDashboardHtml(this.dashboardConfig);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
       return;
     }
 
-    if (path === `${base}/data`) {
+    if (path === this.dashboardChildPath(base, "data")) {
       this.writeJson(res, 200, context, this.createDashboardSnapshot());
       return;
     }
 
-    if (path === `${base}/events`) {
+    if (path === this.dashboardChildPath(base, "events")) {
       this.handleDashboardEvents(res);
       return;
     }
 
     this.writeJson(res, 404, context, { error: "Not found" });
+  }
+
+  private isDashboardBasePath(path: string, base: string): boolean {
+    if (base === "/") return path === "/";
+    return path === base || path === `${base}/`;
+  }
+
+  private dashboardChildPath(base: string, child: string): string {
+    return base === "/" ? `/${child}` : `${base}/${child}`;
   }
 
   private createDashboardSnapshot(): DashboardSnapshot {
@@ -962,11 +975,16 @@ export class CallmuxListener {
           );
           break;
         case "callmux_call":
-          target = this.responseShieldTarget(upstream, name, args);
-          result = this.shieldResult(
-            target,
-            await handleCall(upstream, cache, args, toolContext)
-          );
+          if (isCallmuxGetResultCall(args)) {
+            target = { tool: "callmux_get_result" };
+            result = handleGetResult(this.responseStore, args.arguments);
+          } else {
+            target = this.responseShieldTarget(upstream, name, args);
+            result = this.shieldResult(
+              target,
+              await handleCall(upstream, cache, args, toolContext)
+            );
+          }
           break;
         case "callmux_search_tools":
           result = handleSearchTools(upstream, config.descriptionMaxLength, args);
@@ -1534,6 +1552,7 @@ export class CallmuxListener {
 
     if (name === "callmux_call") {
       if (!isRecord(args)) return [];
+      if (isCallmuxGetResultCall(args)) return ["callmux_get_result"];
       const target = resolveTarget(args.tool, args.server);
       if (target === undefined) return undefined;
       if (target === null) return [];
@@ -1814,7 +1833,9 @@ export class CallmuxListener {
       return [];
     }
 
-    if (name === "callmux_call" && isRecord(args)) {
+    if (name === "callmux_call" && isCallmuxGetResultCall(args)) {
+      return [];
+    } else if (name === "callmux_call" && isRecord(args)) {
       addResolvedToolTarget(args.tool, args.server);
     } else if (name === "callmux_batch" && isRecord(args)) {
       addResolvedToolTarget(args.tool, args.server);
@@ -1879,6 +1900,14 @@ class InvalidRequestBodyOverrideError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCallmuxGetResultCall(args: unknown): args is { arguments?: unknown } {
+  return (
+    isRecord(args) &&
+    args.tool === "callmux_get_result" &&
+    (args.server === undefined || args.server === "callmux")
+  );
 }
 
 function inferServerFromQualifiedToolName(toolName: string): string | undefined {

@@ -270,8 +270,8 @@ Meta-tools exposed:
   callmux_batch         Apply one tool across many items
   callmux_pipeline      Chain tool calls with output mapping
   callmux_search_tools  Search downstream tools by task or keyword
-  callmux_get_result    Page through a stored truncated response
-  callmux_call          Call a single downstream tool by name
+  callmux_get_result    Page/filter/project a stored truncated response
+  callmux_call          Call one downstream tool; can also invoke callmux_get_result
   callmux_dry_run       Validate and preview calls without execution
   callmux_recipe_run    Run a named config recipe
   callmux_recipe_dry_run Preview a named config recipe without execution

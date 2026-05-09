@@ -213,6 +213,12 @@ export class CallmuxProxy {
         );
 
       case "callmux_call":
+        if (isCallmuxGetResultCall(args)) {
+          return handleGetResult(
+            this.responseStore,
+            args.arguments
+          );
+        }
         return this.shieldResult(
           this.responseShieldTarget(name, args),
           await handleCall(
@@ -347,4 +353,16 @@ export class CallmuxProxy {
     await this.upstream.close();
     await this.server.close();
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCallmuxGetResultCall(args: unknown): args is { arguments?: unknown } {
+  return (
+    isRecord(args) &&
+    args.tool === "callmux_get_result" &&
+    (args.server === undefined || args.server === "callmux")
+  );
 }

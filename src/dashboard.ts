@@ -139,7 +139,9 @@ export interface DashboardSnapshot {
 function normalizePath(path: string | undefined): string {
   if (!path || path.trim().length === 0) return DEFAULT_DASHBOARD_PATH;
   const trimmed = path.trim();
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  if (absolute === "/") return absolute;
+  return absolute.replace(/\/+$/, "");
 }
 
 export function normalizeDashboardConfig(
@@ -276,7 +278,7 @@ export class RuntimeEventStore {
 }
 
 export function renderDashboardHtml(config: Required<DashboardConfig>): string {
-  const basePath = config.path;
+  const configuredPath = config.path;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -500,8 +502,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     </div>
   </div>
   <script>
-    const dataUrl = ${JSON.stringify(`${basePath}/data`)};
-    const eventsUrl = ${JSON.stringify(`${basePath}/events`)};
+    const configuredPath = ${JSON.stringify(configuredPath)};
+    function dashboardEndpoint(name) {
+      const path = window.location.pathname || configuredPath || "/";
+      const base = path.endsWith("/") ? path : path + "/";
+      return new URL(name, window.location.origin + base).pathname;
+    }
+    const dataUrl = dashboardEndpoint("data");
+    const eventsUrl = dashboardEndpoint("events");
     const viewTitles = { overview: "Overview", servers: "Servers", tools: "Tool Suites", diagrams: "Runtime Diagrams", events: "Recent Events", runtime: "Runtime" };
     let snapshot = null;
     let pendingSnapshot = null;

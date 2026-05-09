@@ -156,7 +156,7 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
 
 ## Response Shielding
 
-Response shielding is enabled by default. When a tool result is too large, callmux stores the full result in memory and returns a compact preview with `_callmux.ref`. Use `callmux_get_result` to page through the stored result.
+Response shielding is enabled by default. When a tool result is too large, callmux stores the full result in memory and returns a compact preview with `_callmux.ref`, `_callmux.shape`, and `_callmux.retrieval`. Use `callmux_get_result` to page through the stored result. If an MCP client defers that tool, call `callmux_call` with `tool: "callmux_get_result"` and the same retrieval arguments.
 
 Defaults:
 
@@ -235,6 +235,8 @@ The dashboard is disabled by default. Enable it only for listener deployments wh
 | `enabled` | boolean | `false` | Serve the read-only dashboard endpoints |
 | `path` | string | `"/dashboard"` | Dashboard base path |
 | `maxEvents` | integer | `500` | Bounded in-memory event history size |
+
+`path` can be `/`, `/dashboard`, or a reverse-proxy prefix such as `/relay/`. Non-root trailing slashes are normalized, and the UI resolves `data` and `events` relative to the loaded page URL.
 
 When auth is configured, dashboard requests use the same listener authentication as `/mcp`.
 
