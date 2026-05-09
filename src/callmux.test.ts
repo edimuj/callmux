@@ -7141,6 +7141,12 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /function truncateText/);
   assert.match(html, /maxLength = 180/);
   assert.match(html, /truncateText\(detailText\(event\)\)/);
+  assert.match(html, /function clientRows/);
+  assert.match(html, /STDIO Bridge/);
+  assert.match(html, /function renderTrafficChart/);
+  assert.match(html, /Tool Call Traffic/);
+  assert.match(html, /eventDurationText\(event\)/);
+  assert.match(html, /event-detail-row/);
   assert.match(html, /function updateUpdatedClock/);
   assert.match(html, /setInterval\(updateUpdatedClock, 1000\)/);
   assert.match(html, /function hasActiveTextSelection/);
@@ -7150,6 +7156,9 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /Passthrough calls/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);
+  assert.doesNotMatch(html, /Live proxy activity/);
+  assert.doesNotMatch(html, /Current status payload/);
+  assert.doesNotMatch(html, /Traffic Path/);
   assert.match(html, /class="sidebar"/);
   assert.match(html, /data-view-button="overview"/);
   assert.match(html, /data-view-button="servers"/);
@@ -7167,6 +7176,8 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /function renderRuntimeDiagrams/);
   assert.match(html, /function eventMatchesFilters/);
   assert.match(html, /event-filter-server/);
+  assert.match(html, /class="filter-field search-field"/);
+  assert.match(html, /<th>Duration<\/th>/);
   assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
   assert.ok(html.includes("Number(event.status ?? 0) < 400"));
 });
@@ -8103,6 +8114,12 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     };
     assert.equal(payload.cwd, root);
     assert.deepEqual(payload.arguments, { id: 99 });
+    const diagnostics = (listener as any).getRuntimeDiagnostics() as {
+      sessions: Array<{ clientKind?: string; cwd?: string }>;
+    };
+    assert.ok(diagnostics.sessions.some((session) =>
+      session.clientKind === "stdio-bridge" && session.cwd === root
+    ));
 
     await listener.close();
     await listener.start();

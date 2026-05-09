@@ -44,7 +44,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `abuseControls` | object | - | Rate limits, in-flight caps, CIDR allowlist ([details](enterprise.md#rate-limiting-and-abuse-controls)) |
 | `auditLog` | object | - | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
 | `metrics` | object | - | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
-| `dashboard` | object | disabled | Read-only listener dashboard ([details](shared-server.md#read-only-dashboard)) |
+| `dashboard` | object | disabled | Read-only listener dashboard ([details](dashboard.md)) |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |

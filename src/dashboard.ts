@@ -315,7 +315,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     main { padding: 20px 24px 32px; max-width: 1240px; margin: 0 auto; }
     .view { display: none; }
     .view.active { display: block; }
-    .view-header { align-items: baseline; display: flex; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+    .view-header { align-items: baseline; display: none; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
     .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 14px; }
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
@@ -323,7 +323,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .flow { align-items: stretch; display: grid; gap: 10px; grid-template-columns: 1fr 34px 1fr 34px 1fr; }
     .flow-node { background: #f8fbff; border: 1px solid #d9dee7; border-radius: 8px; display: grid; gap: 5px; min-height: 92px; padding: 12px; }
     .flow-node strong { font-size: 14px; }
-    .flow-arrow { align-items: center; color: #667085; display: flex; font-weight: 800; justify-content: center; }
+    .flow-arrow { align-items: center; color: #667085; display: flex; font-size: 24px; font-weight: 700; justify-content: center; }
+    .mini-table { display: grid; gap: 5px; margin-top: 4px; }
+    .mini-row { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; }
+    .mini-row span:first-child { color: #536070; }
+    .mini-row strong { font-size: 13px; text-align: right; }
     .bar-list { display: grid; gap: 9px; }
     .bar-row { display: grid; gap: 6px; }
     .bar-meta { align-items: center; display: flex; font-size: 12px; justify-content: space-between; }
@@ -338,10 +342,12 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .events-table th:nth-child(1) { width: 82px; }
     .events-table th:nth-child(2) { width: 110px; }
     .events-table th:nth-child(3) { width: 28%; }
-    .events-table th:nth-child(4) { width: 72px; }
+    .events-table th:nth-child(4) { width: 82px; }
+    .events-table th:nth-child(5) { width: 104px; }
     tr.event-row { cursor: pointer; }
     tr.event-row:hover { background: #f0f4f8; }
     tr.selected { background: #e8f2ff; }
+    tr.event-detail-row td { background: #f8fbff; padding: 12px; }
     .ok { color: #167447; font-weight: 600; }
     .warn { color: #b54708; font-weight: 600; }
     .bad { color: #b42318; font-weight: 600; }
@@ -358,7 +364,8 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .server-row { cursor: pointer; }
     .server-row:hover { background: #f0f4f8; }
     .server-row.selected { background: #e8f2ff; }
-    .filters { align-items: end; display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(130px, 1fr)); margin-bottom: 12px; }
+    .filters { align-items: end; display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(130px, 1fr)); margin-bottom: 12px; }
+    .search-field { grid-column: 1 / -1; }
     .filter-field { display: grid; gap: 4px; }
     .filter-field label { color: #667085; font-size: 12px; font-weight: 600; }
     .filter-field input, .filter-field select { background: white; border: 1px solid #d9dee7; border-radius: 6px; color: inherit; font: inherit; padding: 7px 8px; }
@@ -367,6 +374,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .suite-card { display: grid; gap: 10px; }
     .suite-card + .suite-card { margin-top: 12px; }
     .runtime-json { background: #0f1720; border-radius: 8px; color: #dbeafe; font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
+    .traffic-chart { display: grid; gap: 8px; }
+    .traffic-chart svg { display: block; height: 180px; width: 100%; }
+    .chart-line { fill: none; stroke: #38bdf8; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
+    .chart-area { fill: rgba(56,189,248,0.12); }
+    .chart-axis { stroke: #d9dee7; stroke-width: 1; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
       header { background: #161c23; border-bottom-color: #303946; }
@@ -382,6 +394,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .tool-chip { background: #13283f; border-color: #26547d; color: #b9dcff; }
       .flow-node { background: #101820; border-color: #303946; }
       .bar-track { background: #263241; }
+      tr.event-detail-row td { background: #101820; }
+      .mini-row span:first-child { color: #a7b0be; }
+      .chart-axis { stroke: #303946; }
       th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
@@ -401,12 +416,16 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .events-table td::before { content: attr(data-label); color: #667085; font-size: 12px; font-weight: 600; }
       .events-table td[data-label="Detail"] { display: block; padding-top: 7px; }
       .events-table td[data-label="Detail"]::before { display: block; margin-bottom: 3px; }
+      .event-detail-row td { display: block; }
+      .event-detail-row td::before { content: ""; display: none; }
       .detail-grid { grid-template-columns: 1fr; }
       .split { grid-template-columns: 1fr; }
       .filters { grid-template-columns: 1fr; }
+      .search-field { grid-column: auto; }
       .flow { grid-template-columns: 1fr; }
-      .flow-arrow { min-height: 10px; }
+      .flow-arrow { min-height: 10px; transform: rotate(90deg); }
       .diagram-grid { grid-template-columns: 1fr; }
+      .view-header { display: flex; }
     }
     @media (max-width: 720px) and (prefers-color-scheme: dark) {
       .events-table tr.event-row { border-color: #303946; }
@@ -448,7 +467,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       </header>
       <main>
         <section id="view-overview" class="view active">
-          <div class="view-header"><h2>Overview</h2><span class="muted">Live proxy activity</span></div>
+          <div class="view-header"><h2>Overview</h2></div>
           <section class="grid" id="summary"></section>
           <section class="panel">
             <h2>Runtime Flow</h2>
@@ -456,7 +475,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           </section>
         </section>
         <section id="view-servers" class="view">
-          <div class="view-header"><h2>Servers</h2><span class="muted">Downstream health and tool exposure</span></div>
+          <div class="view-header"><h2>Servers</h2></div>
           <div class="split">
             <section class="panel">
               <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
@@ -467,11 +486,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           </div>
         </section>
         <section id="view-tools" class="view">
-          <div class="view-header"><h2>Tool Suites</h2><span class="muted">Current tool surfaces and recent changes</span></div>
+          <div class="view-header"><h2>Tool Suites</h2></div>
           <section id="tool-suites"></section>
         </section>
         <section id="view-diagrams" class="view">
-          <div class="view-header"><h2>Runtime Diagrams</h2><span class="muted">Real-time operational shape</span></div>
+          <div class="view-header"><h2>Runtime Diagrams</h2></div>
           <section id="runtime-diagrams" class="diagram-grid"></section>
         </section>
         <section id="view-events" class="view">
@@ -483,17 +502,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
             <div class="filter-field"><label for="event-filter-type">Type</label><select id="event-filter-type"><option value="">All</option><option value="tool_call">Tool call</option><option value="http_request">HTTP</option><option value="tool_suite_changed">Tool suite</option><option value="config_reload">Config reload</option></select></div>
             <div class="filter-field"><label for="event-filter-status">Status</label><select id="event-filter-status"><option value="">All</option><option value="ok">OK</option><option value="downstream_error">Downstream error</option><option value="error">Error</option></select></div>
             <div class="filter-field"><label for="event-filter-server">Server</label><select id="event-filter-server"><option value="">All</option></select></div>
-            <div class="filter-field"><label for="event-filter-search">Search</label><input id="event-filter-search" type="search" placeholder="Tool, path, error"></div>
+            <div class="filter-field search-field"><label for="event-filter-search">Search</label><input id="event-filter-search" type="search" placeholder="Tool, path, error"></div>
           </section>
           <section class="panel">
-            <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
-          </section>
-          <section class="panel" style="margin-top:18px">
-            <div id="event-detail" class="muted">Select an event for details.</div>
+            <table class="events-table"><thead><tr><th>Time</th><th>Type</th><th>Target</th><th>Duration</th><th>Status</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
           </section>
         </section>
         <section id="view-runtime" class="view">
-          <div class="view-header"><h2>Runtime</h2><span class="muted">Current status payload</span></div>
+          <div class="view-header"><h2>Runtime</h2></div>
           <section class="panel">
             <pre id="runtime-json" class="runtime-json">{}</pre>
           </section>
@@ -557,6 +573,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (cache && cache.enabled === false) return "disabled";
       return compactCount(cache?.entries ?? 0);
     }
+    function formatDateTime(value) {
+      if (!value) return "none";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    }
     function truncateText(value, maxLength = 180) {
       const text = String(value ?? "");
       return text.length > maxLength ? text.slice(0, maxLength - 3) + "..." : text;
@@ -569,24 +590,24 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (event.type === "tool_suite_changed") return event.server;
       return event.jsonRpcTool || event.path || "config";
     }
+    function downstreamCallCount(event) {
+      return Number(event.totalDownstreamToolCalls ?? event.realToolCalls ?? event.callmuxDownstreamToolCalls ?? 0);
+    }
+    function eventDurationText(event) {
+      return event.durationMs !== undefined ? event.durationMs + "ms" : "";
+    }
     function detailText(event) {
       if (event.error) return event.error;
+      if (event.status === "error" || event.success === false) return "error";
+      if (event.status === "downstream_error") return "downstream error";
+      if (event.type === "tool_call" && event.toolKind === "callmux_meta") {
+        const downstream = downstreamCallCount(event);
+        return downstream > 1 ? downstream + " downstream calls" : "";
+      }
       if (event.type === "tool_suite_changed") {
         return ["gen " + event.generation, event.addedTools?.length ? "+" + event.addedTools.join(",") : "", event.removedTools?.length ? "-" + event.removedTools.join(",") : ""].filter(Boolean).join(" · ");
       }
-      const totalDownstream = event.totalDownstreamToolCalls ?? event.realToolCalls;
-      const passthrough = event.passthroughToolCalls ?? (
-        event.toolKind === "downstream" ? event.realToolCalls : undefined
-      );
-      const meta = event.callmuxMetaToolCalls ?? event.callmuxToolCalls;
-      const metaDownstream = event.callmuxDownstreamToolCalls ?? (
-        event.toolKind === "callmux_meta" ? event.realToolCalls : undefined
-      );
-      const calls = totalDownstream !== undefined
-        ? ["downstream " + totalDownstream, passthrough ? "pass " + passthrough : "", meta ? "meta " + meta + "/" + (metaDownstream ?? 0) : ""].filter(Boolean).join(" · ")
-        : "";
-      if (event.type === "http_request") return [event.method + " " + event.durationMs + "ms", event.jsonRpcMethod, calls].filter(Boolean).join(" · ");
-      return [event.operation, event.durationMs ? event.durationMs + "ms" : "", calls].filter(Boolean).join(" · ");
+      return "";
     }
     function statusText(event, ok) {
       return String(event.status ?? (ok ? "ok" : "error")).replace(/_/g, " ");
@@ -650,15 +671,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       if (!Array.isArray(targets) || targets.length === 0) return "None";
       return targets.map(target => (target.server ? target.server + "__" : "") + target.tool + (target.count === 0 ? " planned, 0 calls" : " x" + target.count)).join(", ");
     }
-    function renderEventDetail(event) {
-      const detail = document.getElementById("event-detail");
-      if (!event) {
-        detail.className = "muted";
-        detail.innerHTML = "Select an event for details.";
-        return;
-      }
-      detail.className = "";
-      detail.innerHTML = "<h3 style=\\"margin:0 0 8px\\">Event details</h3><div class=\\"detail-grid\\">" + [
+    function eventDetailHtml(event) {
+      if (!event) return "";
+      return "<div><h3 style=\\"margin:0 0 8px\\">Event details</h3><div class=\\"detail-grid\\">" + [
         detailItem("Type", event.type),
         detailItem("Status", statusText(event, event.success !== false)),
         detailItem("Request id", event.requestId),
@@ -676,7 +691,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Tool suite generation", event.generation),
         detailItem("Duration", event.durationMs !== undefined ? event.durationMs + "ms" : ""),
         detailItem("Error", event.error),
-      ].join("") + "</div>";
+      ].join("") + "</div></div>";
     }
     function toolChips(tools) {
       if (!Array.isArray(tools) || tools.length === 0) return '<span class="muted">No exposed tools</span>';
@@ -695,9 +710,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Transport", server.transport),
         detailItem("Tools", (server.toolCount ?? server.exposedTools ?? 0) + "/" + (server.totalTools ?? server.toolCount ?? server.exposedTools ?? 0)),
         detailItem("Latency", server.connectDurationMs !== undefined ? server.connectDurationMs + "ms" : ""),
-        detailItem("Last connected", server.lastConnectedAt),
-        detailItem("Last failure", server.lastFailureAt),
-        detailItem("Next retry", server.nextRetryAt),
+        detailItem("Last connected", formatDateTime(server.lastConnectedAt)),
+        detailItem("Last failure", formatDateTime(server.lastFailureAt)),
+        detailItem("Next retry", formatDateTime(server.nextRetryAt)),
         detailItem("Last error", server.lastError ?? server.error),
       ].join("") + '</div><h4 style="margin:14px 0 6px">Tools</h4>' + toolChips(server.tools);
     }
@@ -707,13 +722,13 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const added = Array.isArray(server.addedTools) ? server.addedTools : [];
         const removed = Array.isArray(server.removedTools) ? server.removedTools : [];
         return '<section class="panel suite-card"><div><strong>' + esc(server.name) + '</strong><span class="muted"> - gen ' + esc(server.toolSuiteGeneration ?? status.toolSuiteGeneration ?? 0) + '</span></div>' +
-          '<div class="muted">Last change: ' + esc(server.lastToolSuiteChangeAt ?? status.lastToolSuiteChangeAt ?? "none") + '</div>' +
+          '<div class="muted">Last change: ' + esc(formatDateTime(server.lastToolSuiteChangeAt ?? status.lastToolSuiteChangeAt)) + '</div>' +
           '<div>' + toolChips(server.tools) + '</div>' +
           (added.length ? '<div><span class="ok">Added</span> ' + esc(added.join(", ")) + '</div>' : '') +
           (removed.length ? '<div><span class="bad">Removed</span> ' + esc(removed.join(", ")) + '</div>' : '') +
         '</section>';
       }).join("") + '<section class="panel" style="margin-top:18px"><h3 style="margin:0 0 8px">Recent tool-suite changes</h3>' +
-        (changes.length ? changes.map(change => '<div class="detail-item"><strong>' + esc(change.server) + '</strong><div class="muted">' + esc(new Date(change.timestamp).toLocaleString()) + ' - gen ' + esc(change.generation) + '</div><div>' + esc(detailText(change)) + '</div></div>').join("") : '<div class="muted">No tool-suite changes recorded.</div>') +
+        (changes.length ? changes.map(change => '<div class="detail-item"><strong>' + esc(change.server) + '</strong><div class="muted">' + esc(formatDateTime(change.timestamp)) + ' - gen ' + esc(change.generation) + '</div><div>' + esc(detailText(change)) + '</div></div>').join("") : '<div class="muted">No tool-suite changes recorded.</div>') +
         '</section>';
     }
     function updateServerFilterOptions(servers) {
@@ -727,28 +742,71 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const percent = max > 0 ? Math.max(2, Math.min(100, Math.round((Number(value || 0) / max) * 100))) : 0;
       return '<div class="bar-row"><div class="bar-meta"><span>' + esc(label) + '</span><strong>' + esc(compactCount(value || 0)) + '</strong></div><div class="bar-track"><div class="bar-fill ' + esc(className) + '" style="width:' + percent + '%"></div></div></div>';
     }
+    function miniRows(rows, emptyText = "No activity") {
+      const visible = rows.filter(row => Number(row[1] ?? 0) > 0);
+      if (visible.length === 0) return '<div class="muted">' + esc(emptyText) + '</div>';
+      return '<div class="mini-table">' + visible.map(row => '<div class="mini-row"><span>' + esc(row[0]) + '</span><strong>' + esc(compactCount(row[1])) + '</strong></div>').join("") + '</div>';
+    }
+    function clientRows(status) {
+      const sessions = Array.isArray(status.listener?.sessions) ? status.listener.sessions : [];
+      const bridge = sessions.filter(session => session.clientKind === "stdio-bridge").length;
+      const sse = sessions.filter(session => session.transport === "sse").length;
+      const http = sessions.filter(session => session.transport === "streamable-http" && session.clientKind !== "stdio-bridge").length;
+      return [["HTTP", http], ["SSE", sse], ["STDIO Bridge", bridge]];
+    }
+    function trafficUnits(event) {
+      if (event.type !== "tool_call") return 0;
+      if (event.toolKind === "callmux_meta") return Math.max(1, Number(event.callmuxDownstreamToolCalls ?? event.realToolCalls ?? 0));
+      return Math.max(1, Number(event.passthroughToolCalls ?? event.realToolCalls ?? 1));
+    }
+    function renderTrafficChart(events) {
+      const now = Date.now();
+      const bucketMs = 5000;
+      const bucketCount = 24;
+      const buckets = Array.from({ length: bucketCount }, () => 0);
+      for (const event of events) {
+        const timestamp = new Date(event.timestamp).getTime();
+        if (!Number.isFinite(timestamp)) continue;
+        const age = now - timestamp;
+        if (age < 0 || age >= bucketMs * bucketCount) continue;
+        const index = bucketCount - 1 - Math.floor(age / bucketMs);
+        buckets[index] += trafficUnits(event);
+      }
+      const max = Math.max(1, ...buckets);
+      const points = buckets.map((value, index) => {
+        const x = 8 + (index * 184) / Math.max(1, bucketCount - 1);
+        const y = 92 - (value / max) * 76;
+        return [x, y];
+      });
+      const line = points.map(point => point.join(",")).join(" ");
+      const area = "8,92 " + line + " 192,92";
+      const total = buckets.reduce((sum, value) => sum + value, 0);
+      return '<div class="traffic-chart"><svg viewBox="0 0 200 100" role="img" aria-label="Recent tool calls">' +
+        '<line class="chart-axis" x1="8" y1="92" x2="192" y2="92"></line>' +
+        '<polygon class="chart-area" points="' + esc(area) + '"></polygon>' +
+        '<polyline class="chart-line" points="' + esc(line) + '"></polyline>' +
+        '</svg><div class="muted">' + esc(compactCount(total)) + ' tool calls over the last 2 minutes</div></div>';
+    }
     function renderFlowDiagram(status, servers, summary) {
-      const totalEvents = summary.totalEvents ?? summary.eventCount ?? 0;
-      const totalDownstream = summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0;
+      const passthroughCalls = summary.passthroughToolCalls ?? 0;
       const metaCalls = summary.callmuxMetaToolCalls ?? summary.callmuxToolCalls ?? 0;
-      const healthy = servers.filter(server => server.state === "connected").length;
-      const unhealthy = servers.length - healthy + (status.failedServers?.length ?? 0);
+      const metaDownstreamCalls = summary.callmuxDownstreamToolCalls ?? 0;
       return '<div class="flow">' +
-        '<div class="flow-node"><strong>Clients</strong><span class="muted">HTTP, SSE, stdio bridge</span><div class="metric">' + esc(compactCount(totalEvents)) + '</div><span class="muted">events retained/seen</span></div>' +
-        '<div class="flow-arrow">-&gt;</div>' +
-        '<div class="flow-node"><strong>callmux</strong><span class="muted">routing, cache, shield, fan-out</span><div class="metric">' + esc(compactCount(metaCalls)) + '</div><span class="muted">meta calls</span></div>' +
-        '<div class="flow-arrow">-&gt;</div>' +
-        '<div class="flow-node"><strong>Downstream MCP</strong><span class="muted">' + esc(healthy) + ' healthy / ' + esc(unhealthy) + ' degraded</span><div class="metric">' + esc(compactCount(totalDownstream)) + '</div><span class="muted">tool calls</span></div>' +
+        '<div class="flow-node"><strong>Clients</strong>' + miniRows(clientRows(status), "No active clients") + '</div>' +
+        '<div class="flow-arrow">→</div>' +
+        '<div class="flow-node"><strong>callmux</strong>' + miniRows([["Passthrough", passthroughCalls], ["Meta calls", metaCalls]]) + '</div>' +
+        '<div class="flow-arrow">→</div>' +
+        '<div class="flow-node"><strong>MCP Servers</strong>' + miniRows([["Passthrough", passthroughCalls], ["Meta calls", metaDownstreamCalls]]) + '</div>' +
       '</div>';
     }
-    function renderRuntimeDiagrams(status, servers, summary) {
+    function renderRuntimeDiagrams(status, servers, summary, events) {
       const maxCalls = Math.max(1, summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0, summary.passthroughToolCalls ?? 0, summary.callmuxDownstreamToolCalls ?? 0);
       const connected = servers.filter(server => server.state === "connected").length;
       const degraded = servers.length - connected + (status.failedServers?.length ?? 0);
       const cacheEntries = status.cache?.entries ?? 0;
       const storedRefs = status.responseStore?.entries ?? 0;
       document.getElementById("runtime-diagrams").innerHTML = [
-        '<section class="panel"><h2>Traffic Path</h2>' + renderFlowDiagram(status, servers, summary) + '</section>',
+        '<section class="panel"><h2>Tool Call Traffic</h2>' + renderTrafficChart(events) + '</section>',
         '<section class="panel"><h2>Tool Call Mix</h2><div class="bar-list">' +
           barRow("Passthrough", summary.passthroughToolCalls ?? 0, maxCalls) +
           barRow("Meta fan-out", summary.callmuxDownstreamToolCalls ?? 0, maxCalls) +
@@ -805,24 +863,31 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       });
       renderServerDetail(servers.find(server => server.name === selectedServerName));
       renderToolSuites(status, servers, allEvents);
-      renderRuntimeDiagrams(status, servers, data.summary);
+      renderRuntimeDiagrams(status, servers, data.summary, allEvents);
       document.getElementById("runtime-json").textContent = JSON.stringify(status, null, 2);
       const displayedEvents = allEvents.filter(eventMatchesFilters).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
         const key = eventKey(event);
         const ok = event.type === "http_request" ? event.status < 400 : event.status !== "error" && event.success !== false;
         const selected = key === selectedEventKey ? " selected" : "";
-        return "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" + cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") + cell(esc(event.type), "", "Type") + cell(esc(targetText(event)), "", "Target") + cell(esc(statusText(event, ok)), statusClass(event, ok), "Status") + cell(esc(truncateText(detailText(event))), "muted", "Detail") + "</tr>";
+        const row = "<tr class=\\"event-row" + selected + "\\" data-event-index=\\"" + index + "\\">" +
+          cell(esc(new Date(event.timestamp).toLocaleTimeString()), "", "Time") +
+          cell(esc(event.type), "", "Type") +
+          cell(esc(targetText(event)), "", "Target") +
+          cell(esc(eventDurationText(event)), "", "Duration") +
+          cell(esc(statusText(event, ok)), statusClass(event, ok), "Status") +
+          cell(esc(truncateText(detailText(event))), "muted", "Detail") +
+          "</tr>";
+        return selected ? row + '<tr class="event-detail-row"><td colspan="6">' + eventDetailHtml(event) + '</td></tr>' : row;
       }).join("");
       document.querySelectorAll("tr.event-row").forEach(row => {
         row.addEventListener("click", () => {
           const event = displayedEvents[Number(row.dataset.eventIndex)];
-          selectedEventKey = eventKey(event);
-          renderEventDetail(event);
+          const key = eventKey(event);
+          selectedEventKey = selectedEventKey === key ? null : key;
           render(data);
         });
       });
-      renderEventDetail(displayedEvents.find(event => eventKey(event) === selectedEventKey));
     }
     function renderWhenSelectionAllows(data) {
       if (hasActiveTextSelection()) {

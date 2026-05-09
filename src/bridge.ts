@@ -10,6 +10,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { errorResult } from "./results.js";
 
 const BRIDGE_CWD_HEADER = "x-callmux-cwd";
+const BRIDGE_CLIENT_HEADER = "x-callmux-client";
 
 interface BridgeOptions {
   url: string;
@@ -22,6 +23,7 @@ function bridgeHeaders(options: BridgeOptions): Record<string, string> {
   return {
     ...(options.headers ?? {}),
     [BRIDGE_CWD_HEADER]: options.cwd,
+    [BRIDGE_CLIENT_HEADER]: "stdio-bridge",
   };
 }
 

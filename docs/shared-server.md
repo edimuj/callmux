@@ -190,6 +190,8 @@ The dashboard shows server health, active sessions, cache and response-store sta
 
 If listener auth is configured, dashboard requests require the same auth as `/mcp`.
 
+See [Dashboard](dashboard.md) for practical setup notes, including reverse-proxy prefix handling.
+
 ---
 
 ## Config Hot-Reload

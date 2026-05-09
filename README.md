@@ -132,7 +132,7 @@ Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access contro
 
 Optional dashboard for shared listeners. Disabled by default, then enabled with `dashboard.enabled`. It shows server health, active sessions, cache and response-store stats, recent tool calls, tool-suite changes, config reloads, and errors.
 
-[Full guide ->](docs/shared-server.md#read-only-dashboard)
+[Full guide ->](docs/dashboard.md)
 
 ### Recipes: Team Workflows as Callable Names
 
@@ -189,6 +189,7 @@ The wizard detects existing MCP servers, lets you pick from a curated list or ad
 | Topic | Description |
 |:------|:------------|
 | [Shared Server Mode](docs/shared-server.md) | Listener setup, client config, stdio bridge, session-cwd |
+| [Dashboard](docs/dashboard.md) | Enable the read-only dashboard and mount it behind reverse proxies |
 | [Meta-Only Mode](docs/meta-only-mode.md) | Fixed system prompt, tool discovery workflow |
 | [Enterprise Deployment](docs/enterprise.md) | Auth, RBAC, rate limiting, audit, OIDC, metrics |
 | [Recipes](docs/recipes.md) | Config-defined workflow templates |

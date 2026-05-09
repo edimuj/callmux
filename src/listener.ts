@@ -64,6 +64,7 @@ const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
 const REQUEST_ID_HEADER = "x-request-id";
 const CWD_HEADER = "x-callmux-cwd";
+const CLIENT_HEADER = "x-callmux-client";
 
 async function settleWithin<T>(
   promise: Promise<T> | T | undefined,
@@ -89,6 +90,7 @@ interface SessionEntry {
   server: Server;
   cwd?: string;
   cwdSource?: "header" | "meta" | "roots";
+  clientKind?: "stdio-bridge";
   rootsAttempted?: boolean;
 }
 
@@ -288,6 +290,7 @@ export class CallmuxListener {
           transport: this.transportName(session.transport),
           ...(session.cwd ? { cwd: session.cwd } : {}),
           ...(session.cwdSource ? { cwdSource: session.cwdSource } : {}),
+          ...(session.clientKind ? { clientKind: session.clientKind } : {}),
           rootsAttempted: session.rootsAttempted === true,
         }))
         .sort((left, right) => left.id.localeCompare(right.id)),
@@ -758,9 +761,15 @@ export class CallmuxListener {
 
   private sessionCwdFromHeader(
     req: IncomingMessage
-  ): Pick<SessionEntry, "cwd" | "cwdSource"> {
+  ): Pick<SessionEntry, "cwd" | "cwdSource" | "clientKind"> {
     const cwd = this.normalizeSessionCwd(headerValue(req.headers[CWD_HEADER]));
-    return cwd ? { cwd, cwdSource: "header" } : {};
+    const clientKind = headerValue(req.headers[CLIENT_HEADER]) === "stdio-bridge"
+      ? "stdio-bridge"
+      : undefined;
+    return {
+      ...(cwd ? { cwd, cwdSource: "header" as const } : {}),
+      ...(clientKind ? { clientKind } : {}),
+    };
   }
 
   private setSessionCwdFromHeader(session: SessionEntry, req: IncomingMessage): void {
@@ -768,6 +777,9 @@ export class CallmuxListener {
     if (!cwd) return;
     session.cwd = cwd;
     session.cwdSource = "header";
+    if (headerValue(req.headers[CLIENT_HEADER]) === "stdio-bridge") {
+      session.clientKind = "stdio-bridge";
+    }
   }
 
   private cwdFromMeta(meta: unknown): string | undefined {
