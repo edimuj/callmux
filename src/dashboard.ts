@@ -473,7 +473,6 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       </div>
       <header>
         <h1 id="view-title">Overview</h1>
-        <div id="updated" class="muted">Connecting...</div>
       </header>
       <main>
         <section id="view-overview" class="view active">
@@ -657,8 +656,6 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       return Boolean(selection && !selection.isCollapsed && selection.toString());
     }
     function updateUpdatedClock() {
-      const updated = document.getElementById("updated");
-      updated.textContent = snapshot ? "Updated " + new Date().toLocaleTimeString() : "Connecting...";
       document.getElementById("sidebar-status").textContent = snapshot ? "Live - " + new Date().toLocaleTimeString() : "Connecting...";
     }
     function renderHealthStrip(status, servers) {
@@ -729,12 +726,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function renderToolSuites(status, servers, events) {
       const changes = events.filter(event => event.type === "tool_suite_changed").slice(-20).reverse();
       document.getElementById("tool-suites").innerHTML = servers.map(server => {
+        const tools = Array.isArray(server.tools) ? server.tools : [];
         const added = Array.isArray(server.addedTools) ? server.addedTools : [];
         const removed = Array.isArray(server.removedTools) ? server.removedTools : [];
+        var showAdded = added.length > 0 && added.length < tools.length;
         return '<section class="panel suite-card"><div><strong>' + esc(server.name) + '</strong><span class="muted"> - gen ' + esc(server.toolSuiteGeneration ?? status.toolSuiteGeneration ?? 0) + '</span></div>' +
           '<div class="muted">Last change: ' + esc(formatDateTime(server.lastToolSuiteChangeAt ?? status.lastToolSuiteChangeAt)) + '</div>' +
-          '<div>' + toolChips(server.tools) + '</div>' +
-          (added.length ? '<div><span class="ok">Added</span> ' + esc(added.join(", ")) + '</div>' : '') +
+          '<div>' + toolChips(tools) + '</div>' +
+          (showAdded ? '<div><span class="ok">Added</span> ' + esc(added.join(", ")) + '</div>' : '') +
           (removed.length ? '<div><span class="bad">Removed</span> ' + esc(removed.join(", ")) + '</div>' : '') +
         '</section>';
       }).join("") + '<section class="panel" style="margin-top:18px"><h3 style="margin:0 0 8px">Recent tool-suite changes</h3>' +
