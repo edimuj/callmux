@@ -374,11 +374,19 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .suite-card { display: grid; gap: 10px; }
     .suite-card + .suite-card { margin-top: 12px; }
     .runtime-json { background: #0f1720; border-radius: 8px; color: #dbeafe; font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
-    .traffic-chart { display: grid; gap: 8px; }
-    .traffic-chart svg { display: block; height: 180px; width: 100%; }
-    .chart-line { fill: none; stroke: #38bdf8; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
-    .chart-area { fill: rgba(56,189,248,0.12); }
-    .chart-axis { stroke: #d9dee7; stroke-width: 1; }
+    .traffic-chart { display: grid; gap: 6px; }
+    .traffic-chart svg { display: block; height: 200px; width: 100%; }
+    .chart-grid { stroke: #e4e7ec; stroke-dasharray: 3 3; stroke-width: 0.5; }
+    .chart-label { fill: #667085; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 9px; }
+    .chart-line-meta { fill: none; stroke: #38bdf8; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-line-passthrough { fill: none; stroke: #34d399; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-line-downstream { fill: none; stroke: #a78bfa; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-area-meta { fill: rgba(56,189,248,0.12); }
+    .chart-area-passthrough { fill: rgba(52,211,153,0.12); }
+    .chart-area-downstream { fill: rgba(167,139,250,0.10); }
+    .chart-legend { display: flex; gap: 16px; justify-content: center; }
+    .chart-legend-item { align-items: center; color: #536070; display: flex; font-size: 12px; gap: 5px; }
+    .chart-legend-dot { border-radius: 50%; display: inline-block; height: 8px; width: 8px; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
       header { background: #161c23; border-bottom-color: #303946; }
@@ -396,7 +404,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .bar-track { background: #263241; }
       tr.event-detail-row td { background: #101820; }
       .mini-row span:first-child { color: #a7b0be; }
-      .chart-axis { stroke: #303946; }
+      .chart-grid { stroke: #303946; }
+      .chart-label { fill: #a7b0be; }
+      .chart-legend-item { color: #a7b0be; }
       th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
@@ -754,38 +764,77 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const http = sessions.filter(session => session.transport === "streamable-http" && session.clientKind !== "stdio-bridge").length;
       return [["HTTP", http], ["SSE", sse], ["STDIO Bridge", bridge]];
     }
-    function trafficUnits(event) {
-      if (event.type !== "tool_call") return 0;
-      if (event.toolKind === "callmux_meta") return Math.max(1, Number(event.callmuxDownstreamToolCalls ?? event.realToolCalls ?? 0));
-      return Math.max(1, Number(event.passthroughToolCalls ?? event.realToolCalls ?? 1));
-    }
     function renderTrafficChart(events) {
       const now = Date.now();
       const bucketMs = 5000;
       const bucketCount = 24;
-      const buckets = Array.from({ length: bucketCount }, () => 0);
+      const metaBuckets = Array.from({ length: bucketCount }, () => 0);
+      const passthroughBuckets = Array.from({ length: bucketCount }, () => 0);
+      const downstreamBuckets = Array.from({ length: bucketCount }, () => 0);
       for (const event of events) {
-        const timestamp = new Date(event.timestamp).getTime();
-        if (!Number.isFinite(timestamp)) continue;
-        const age = now - timestamp;
+        if (event.type !== "tool_call") continue;
+        const ts = new Date(event.timestamp).getTime();
+        if (!Number.isFinite(ts)) continue;
+        const age = now - ts;
         if (age < 0 || age >= bucketMs * bucketCount) continue;
-        const index = bucketCount - 1 - Math.floor(age / bucketMs);
-        buckets[index] += trafficUnits(event);
+        const i = bucketCount - 1 - Math.floor(age / bucketMs);
+        if (event.toolKind === "callmux_meta") {
+          metaBuckets[i] += 1;
+        } else {
+          passthroughBuckets[i] += 1;
+        }
+        downstreamBuckets[i] += Number(event.totalDownstreamToolCalls ?? event.realToolCalls ?? 1);
       }
-      const max = Math.max(1, ...buckets);
-      const points = buckets.map((value, index) => {
-        const x = 8 + (index * 184) / Math.max(1, bucketCount - 1);
-        const y = 92 - (value / max) * 76;
-        return [x, y];
-      });
-      const line = points.map(point => point.join(",")).join(" ");
-      const area = "8,92 " + line + " 192,92";
-      const total = buckets.reduce((sum, value) => sum + value, 0);
-      return '<div class="traffic-chart"><svg viewBox="0 0 200 100" role="img" aria-label="Recent tool calls">' +
-        '<line class="chart-axis" x1="8" y1="92" x2="192" y2="92"></line>' +
-        '<polygon class="chart-area" points="' + esc(area) + '"></polygon>' +
-        '<polyline class="chart-line" points="' + esc(line) + '"></polyline>' +
-        '</svg><div class="muted">' + esc(compactCount(total)) + ' tool calls over the last 2 minutes</div></div>';
+      const L = 38, R = 308, T = 12, B = 142, W = R - L, H = B - T;
+      const rawMax = Math.max(1, ...metaBuckets, ...passthroughBuckets, ...downstreamBuckets);
+      function niceNum(v) {
+        if (v <= 0) return 1;
+        const exp = Math.floor(Math.log10(v));
+        const f = v / Math.pow(10, exp);
+        return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * Math.pow(10, exp);
+      }
+      const ticks = 4;
+      const step = Math.max(1, niceNum(rawMax / ticks));
+      const nMax = step * ticks;
+      function toXY(buckets) {
+        return buckets.map(function(v, j) {
+          return [(L + j * W / Math.max(1, bucketCount - 1)).toFixed(1), (B - v / nMax * H).toFixed(1)];
+        });
+      }
+      function poly(pts) { return pts.map(function(p) { return p[0] + "," + p[1]; }).join(" "); }
+      function filled(pts) { return L + "," + B + " " + poly(pts) + " " + R + "," + B; }
+      var grid = "";
+      for (var t = 0; t <= ticks; t++) {
+        var val = t * step;
+        var y = (B - val / nMax * H).toFixed(1);
+        grid += '<line class="chart-grid" x1="' + L + '" y1="' + y + '" x2="' + R + '" y2="' + y + '"/>';
+        grid += '<text class="chart-label" x="' + (L - 4) + '" y="' + (Number(y) + 3).toFixed(1) + '" text-anchor="end">' + val + '</text>';
+      }
+      var xMarks = [[0, "2m"], [6, "90s"], [12, "1m"], [18, "30s"], [bucketCount - 1, "now"]];
+      var xSvg = "";
+      for (var m = 0; m < xMarks.length; m++) {
+        var x = (L + xMarks[m][0] * W / Math.max(1, bucketCount - 1)).toFixed(1);
+        xSvg += '<text class="chart-label" x="' + x + '" y="' + (B + 14) + '" text-anchor="middle">' + xMarks[m][1] + '</text>';
+      }
+      var series = [
+        { b: downstreamBuckets, lc: "chart-line-downstream", ac: "chart-area-downstream", label: "Downstream", color: "#a78bfa" },
+        { b: passthroughBuckets, lc: "chart-line-passthrough", ac: "chart-area-passthrough", label: "Passthrough", color: "#34d399" },
+        { b: metaBuckets, lc: "chart-line-meta", ac: "chart-area-meta", label: "Meta", color: "#38bdf8" },
+      ];
+      var sSvg = "";
+      for (var s = 0; s < series.length; s++) {
+        var pts = toXY(series[s].b);
+        sSvg += '<polygon class="' + series[s].ac + '" points="' + filled(pts) + '"/>';
+        sSvg += '<polyline class="' + series[s].lc + '" points="' + poly(pts) + '"/>';
+      }
+      var legendItems = series.slice().reverse();
+      var legend = '<div class="chart-legend">';
+      for (var li = 0; li < legendItems.length; li++) {
+        var total = legendItems[li].b.reduce(function(a, b) { return a + b; }, 0);
+        legend += '<div class="chart-legend-item"><span class="chart-legend-dot" style="background:' + legendItems[li].color + '"></span>' + legendItems[li].label + ' <span class="muted">(' + total + ')</span></div>';
+      }
+      legend += '</div>';
+      return '<div class="traffic-chart"><svg viewBox="0 0 320 165" role="img" aria-label="Tool call traffic">' + grid + xSvg + sSvg + '</svg>' + legend + '</div>';
     }
     function renderFlowDiagram(status, servers, summary) {
       const passthroughCalls = summary.passthroughToolCalls ?? 0;
