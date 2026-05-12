@@ -7154,6 +7154,10 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /document\.addEventListener\("selectionchange"/);
   assert.match(html, /renderWhenSelectionAllows\(await res\.json\(\)\)/);
   assert.match(html, /Passthrough calls/);
+  assert.match(html, /In-Flight Tool Calls/);
+  assert.match(html, /function activeToolCallRows/);
+  assert.match(html, /tool_call_lifecycle/);
+  assert.match(html, /client_aborted/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);
   assert.doesNotMatch(html, /Live proxy activity/);
@@ -9197,6 +9201,128 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     await waitFor(async () => (listener as any).getRuntimeDiagnostics().activeSessions === 0);
   } finally {
     await listener.close();
+  }
+});
+
+test("listener dashboard exposes in-flight and client-aborted tool calls", async () => {
+  const upstream = new UpstreamManager(1200);
+  const cache = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_CALL_MODE: "hang",
+      }),
+    });
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { fake: fakeMcpServer("fake") } },
+      upstream,
+      cache,
+      allTools,
+      maxConcurrency: 10,
+    });
+
+    const port = await getFreePort();
+    (listener as any).options.port = port;
+    await listener.start();
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0" },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(initRes.status, 200);
+    const sessionId = initRes.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+
+    const controller = new AbortController();
+    const callPromise = fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "fake__get_item", arguments: { id: 14 } },
+        id: 2,
+      }),
+      signal: controller.signal,
+    }).catch((error) => error);
+
+    await waitFor(async () => {
+      const diagnostics = (listener as any).getRuntimeDiagnostics() as {
+        activeToolCalls?: Array<{ status: string; server?: string; targetTool?: string }>;
+      };
+      return diagnostics.activeToolCalls?.some((call) =>
+        call.status === "in_flight" &&
+        call.server === "fake" &&
+        call.targetTool === "get_item"
+      ) === true;
+    });
+
+    controller.abort();
+    await callPromise;
+
+    await waitFor(async () => {
+      const diagnostics = (listener as any).getRuntimeDiagnostics() as {
+        activeToolCalls?: Array<{ status: string; server?: string; targetTool?: string }>;
+      };
+      return diagnostics.activeToolCalls?.some((call) =>
+        call.status === "client_aborted" &&
+        call.server === "fake" &&
+        call.targetTool === "get_item"
+      ) === true;
+    }, 1000, 10);
+
+    const lifecycleEvents = ((listener as any).runtimeEvents.list() as Array<{
+      type: string;
+      lifecycle?: string;
+      status?: string;
+      requestId?: string;
+      server?: string;
+      targetTool?: string;
+    }>).filter((event) => event.type === "tool_call_lifecycle");
+    assert.ok(lifecycleEvents.some((event) =>
+      event.lifecycle === "started" &&
+      event.status === "in_flight" &&
+      event.server === "fake" &&
+      event.targetTool === "get_item" &&
+      typeof event.requestId === "string"
+    ));
+    assert.ok(lifecycleEvents.some((event) =>
+      event.lifecycle === "client_aborted" &&
+      event.status === "client_aborted" &&
+      event.server === "fake" &&
+      event.targetTool === "get_item"
+    ));
+
+    await waitFor(async () =>
+      ((listener as any).getRuntimeDiagnostics() as { activeToolCallCount?: number })
+        .activeToolCallCount === 0,
+      3000,
+      20
+    );
+  } finally {
+    await listener?.close();
+    await upstream.close();
   }
 });
 

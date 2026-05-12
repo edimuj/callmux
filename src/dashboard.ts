@@ -32,6 +32,22 @@ type RuntimeEvent =
       downstreamTargets?: DashboardDownstreamTarget[];
     }
   | {
+      type: "tool_call_lifecycle";
+      lifecycle: "started" | "client_aborted";
+      timestamp: string;
+      requestId: string;
+      sessionId?: string;
+      tool: string;
+      server?: string;
+      targetTool?: string;
+      toolKind?: "callmux_meta" | "downstream";
+      operation?: string;
+      downstreamTargets?: DashboardDownstreamTarget[];
+      durationMs: number;
+      status: "in_flight" | "client_aborted";
+      success: boolean;
+    }
+  | {
       type: "tool_call";
       timestamp: string;
       tool: string;
@@ -200,6 +216,7 @@ export function classifyDashboardToolStatus(
 
 function isDashboardRuntimeError(event: RuntimeEvent): boolean {
   if (event.type === "http_request") return event.status >= 400;
+  if (event.type === "tool_call_lifecycle") return event.status === "client_aborted";
   if (event.type === "tool_call") {
     return event.status === "error" || (event.status === undefined && !event.success);
   }
@@ -387,6 +404,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .chart-legend { display: flex; gap: 16px; justify-content: center; }
     .chart-legend-item { align-items: center; color: #536070; display: flex; font-size: 12px; gap: 5px; }
     .chart-legend-dot { border-radius: 50%; display: inline-block; height: 8px; width: 8px; }
+    .active-calls { display: grid; gap: 8px; }
+    .active-call { align-items: start; border: 1px solid #e4e7ec; border-radius: 6px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 9px; }
+    .active-call-meta { color: #667085; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #e5edf5; }
       header { background: #161c23; border-bottom-color: #303946; }
@@ -407,6 +427,8 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .chart-grid { stroke: #303946; }
       .chart-label { fill: #a7b0be; }
       .chart-legend-item { color: #a7b0be; }
+      .active-call { border-color: #303946; }
+      .active-call-meta { color: #a7b0be; }
       th, .muted, .toggle { color: #a7b0be; }
     }
     @media (max-width: 720px) {
@@ -478,6 +500,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <section id="view-overview" class="view active">
           <div class="view-header"><h2>Overview</h2></div>
           <section class="grid" id="summary"></section>
+          <section class="panel" style="margin-bottom:18px">
+            <h2>In-Flight Tool Calls</h2>
+            <div id="active-calls" class="active-calls"></div>
+          </section>
           <section class="panel">
             <h2>Runtime Flow</h2>
             <div id="overview-flow" class="diagram"></div>
@@ -508,8 +534,8 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
             <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
           </div>
           <section class="panel filters">
-            <div class="filter-field"><label for="event-filter-type">Type</label><select id="event-filter-type"><option value="">All</option><option value="tool_call">Tool call</option><option value="http_request">HTTP</option><option value="tool_suite_changed">Tool suite</option><option value="config_reload">Config reload</option></select></div>
-            <div class="filter-field"><label for="event-filter-status">Status</label><select id="event-filter-status"><option value="">All</option><option value="ok">OK</option><option value="downstream_error">Downstream error</option><option value="error">Error</option></select></div>
+            <div class="filter-field"><label for="event-filter-type">Type</label><select id="event-filter-type"><option value="">All</option><option value="tool_call">Tool call</option><option value="tool_call_lifecycle">Tool lifecycle</option><option value="http_request">HTTP</option><option value="tool_suite_changed">Tool suite</option><option value="config_reload">Config reload</option></select></div>
+            <div class="filter-field"><label for="event-filter-status">Status</label><select id="event-filter-status"><option value="">All</option><option value="ok">OK</option><option value="in_flight">In flight</option><option value="client_aborted">Client aborted</option><option value="downstream_error">Downstream error</option><option value="error">Error</option></select></div>
             <div class="filter-field"><label for="event-filter-server">Server</label><select id="event-filter-server"><option value="">All</option></select></div>
             <div class="filter-field search-field"><label for="event-filter-search">Search</label><input id="event-filter-search" type="search" placeholder="Tool, path, error"></div>
           </section>
@@ -596,6 +622,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function targetText(event) {
       if (event.type === "tool_call") return (event.server ? event.server + "__" : "") + (event.targetTool || event.tool);
+      if (event.type === "tool_call_lifecycle") return (event.server ? event.server + "__" : "") + (event.targetTool || event.tool);
       if (event.type === "tool_suite_changed") return event.server;
       return event.jsonRpcTool || event.path || "config";
     }
@@ -607,6 +634,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function detailText(event) {
       if (event.error) return event.error;
+      if (event.type === "tool_call_lifecycle") return event.lifecycle === "client_aborted" ? "client disconnected before completion" : "waiting for completion";
       if (event.status === "error" || event.success === false) return "error";
       if (event.status === "downstream_error") return "downstream error";
       if (event.type === "tool_call" && event.toolKind === "callmux_meta") {
@@ -623,6 +651,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function statusClass(event, ok) {
       if (event.status === "downstream_error") return "warn";
+      if (event.status === "in_flight" || event.status === "client_aborted") return "warn";
       return ok ? "ok" : "bad";
     }
     function eventStatus(event) {
@@ -684,7 +713,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Type", event.type),
         detailItem("Status", statusText(event, event.success !== false)),
         detailItem("Request id", event.requestId),
+        detailItem("Session id", event.sessionId),
         detailItem("HTTP", event.method ? event.method + " " + (event.path || "") : ""),
+        detailItem("Lifecycle", event.lifecycle),
         detailItem("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / ")),
         detailItem("Tool kind", event.toolKind),
         detailItem("Operation", event.operation),
@@ -847,6 +878,21 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         '<div class="flow-node"><strong>MCP Servers</strong>' + miniRows([["Passthrough", passthroughCalls], ["Meta calls", metaDownstreamCalls]]) + '</div>' +
       '</div>';
     }
+    function activeToolCallRows(status) {
+      const calls = Array.isArray(status.listener?.activeToolCalls) ? status.listener.activeToolCalls : [];
+      if (calls.length === 0) return '<div class="muted">No active tool calls</div>';
+      return calls.map(call => {
+        const target = (call.server ? call.server + "__" : "") + (call.targetTool || call.tool);
+        const statusClassName = call.status === "client_aborted" ? "warn" : "ok";
+        const meta = [
+          call.requestId ? "request " + call.requestId : "",
+          call.sessionId ? "session " + call.sessionId : "",
+          call.cwd || "",
+          targetList(call.downstreamTargets),
+        ].filter(Boolean).join(" · ");
+        return '<div class="active-call"><div><strong>' + esc(target) + '</strong><div class="active-call-meta">' + esc(meta) + '</div></div><div><span class="' + statusClassName + '">' + esc(String(call.status || "in_flight").replace(/_/g, " ")) + '</span><div class="active-call-meta">' + esc(call.durationMs ?? 0) + 'ms</div></div></div>';
+      }).join("");
+    }
     function renderRuntimeDiagrams(status, servers, summary, events) {
       const maxCalls = Math.max(1, summary.totalDownstreamToolCalls ?? summary.realToolCalls ?? 0, summary.passthroughToolCalls ?? 0, summary.callmuxDownstreamToolCalls ?? 0);
       const connected = servers.filter(server => server.state === "connected").length;
@@ -886,6 +932,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       document.getElementById("summary").innerHTML = [
         ["Servers", servers.length],
         ["Sessions", status.listener?.activeSessions ?? 0],
+        ["In-flight", status.listener?.activeToolCallCount ?? 0],
         ["Cache entries", cacheEntriesText(cache)],
         ["Stored refs", responseStore.entries ?? 0],
         ["Events", compactCount(data.summary.totalEvents ?? data.summary.eventCount)],
@@ -894,6 +941,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         ["Total downstream", compactCount(data.summary.totalDownstreamToolCalls ?? data.summary.realToolCalls)],
         ["Recent errors", data.summary.recentErrors],
       ].map(([label, value]) => "<div class=\\"panel\\"><div class=\\"muted\\">" + esc(label) + "</div><div class=\\"metric\\">" + esc(value) + "</div></div>").join("");
+      document.getElementById("active-calls").innerHTML = activeToolCallRows(status);
       document.getElementById("overview-flow").innerHTML = renderFlowDiagram(status, servers, data.summary);
       document.getElementById("servers").innerHTML = servers.map((server) => {
         const stateClass = server.state === "connected" ? "ok" : "bad";

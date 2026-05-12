@@ -124,6 +124,24 @@ interface DashboardToolCallSummary {
   downstreamTargets: DashboardDownstreamTarget[];
 }
 
+interface ActiveToolCallEntry {
+  id: string;
+  requestId: string;
+  sessionId?: string;
+  tool: string;
+  server?: string;
+  targetTool?: string;
+  toolKind?: "callmux_meta" | "downstream";
+  operation?: string;
+  startedAt: number;
+  startedAtIso: string;
+  status: "in_flight" | "client_aborted";
+  cwd?: string;
+  principal?: string;
+  clientAbortedAt?: string;
+  downstreamTargets?: DashboardDownstreamTarget[];
+}
+
 const DOWNSTREAM_CAPABLE_META_TOOLS = new Set([
   "callmux_call",
   "callmux_batch",
@@ -153,12 +171,14 @@ export class CallmuxListener {
   private authConfig: CallmuxConfig["auth"];
   private oidcVerifier: OidcJwtVerifier | undefined;
   private authzContext = new AsyncLocalStorage<AuthorizationPrincipal | undefined>();
+  private requestContext = new AsyncLocalStorage<RequestContext>();
   private abuseController: AbuseController | undefined;
   private auditLogger: AuditLogger;
   private metrics: PrometheusMetrics;
   private responseStore: ResponseStore;
   private dashboardConfig: ReturnType<typeof normalizeDashboardConfig>;
   private runtimeEvents: RuntimeEventStore;
+  private activeToolCalls = new Map<string, ActiveToolCallEntry>();
   private unsubscribeToolSuiteChanges: (() => void) | undefined;
   private lastReloadAt: string | undefined;
   private lastReloadError: string | undefined;
@@ -284,6 +304,8 @@ export class CallmuxListener {
           }
         : {}),
       activeSessions: this.sessions.size,
+      activeToolCallCount: this.activeToolCalls.size,
+      activeToolCalls: this.activeToolCallDiagnostics(),
       sessions: Array.from(this.sessions.entries())
         .map(([id, session]) => ({
           id,
@@ -450,28 +472,30 @@ export class CallmuxListener {
         this.attachLeaseRelease(res, postAuthAbuseLease.release);
       }
 
-      await this.authzContext.run(principal ?? undefined, async () => {
-        if (path === "/mcp") {
-          await this.handleStreamableHttp(req, res, context);
-        } else if (
-          this.metrics.isEnabled() &&
-          path === this.metrics.getPath() &&
-          method === "GET"
-        ) {
-          this.handleMetrics(res, context);
-        } else if (this.isDashboardPath(path)) {
-          this.handleDashboard(req, res, path, context);
-        } else if (path === "/sse" && req.method === "GET") {
-          await this.handleSseConnect(req, res, context);
-        } else if (path === "/messages" && req.method === "POST") {
-          await this.handleSseMessage(req, res, url, context);
-        } else if (path === "/health" && req.method === "GET") {
-          this.writeJson(res, 200, context, { status: "ok", sessions: this.sessions.size });
-        } else if (path === "/ready" && req.method === "GET") {
-          this.handleReady(res, context);
-        } else {
-          this.writeJson(res, 404, context, { error: "Not found" });
-        }
+      await this.requestContext.run(context, async () => {
+        await this.authzContext.run(principal ?? undefined, async () => {
+          if (path === "/mcp") {
+            await this.handleStreamableHttp(req, res, context);
+          } else if (
+            this.metrics.isEnabled() &&
+            path === this.metrics.getPath() &&
+            method === "GET"
+          ) {
+            this.handleMetrics(res, context);
+          } else if (this.isDashboardPath(path)) {
+            this.handleDashboard(req, res, path, context);
+          } else if (path === "/sse" && req.method === "GET") {
+            await this.handleSseConnect(req, res, context);
+          } else if (path === "/messages" && req.method === "POST") {
+            await this.handleSseMessage(req, res, url, context);
+          } else if (path === "/health" && req.method === "GET") {
+            this.writeJson(res, 200, context, { status: "ok", sessions: this.sessions.size });
+          } else if (path === "/ready" && req.method === "GET") {
+            this.handleReady(res, context);
+          } else {
+            this.writeJson(res, 404, context, { error: "Not found" });
+          }
+        });
       });
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
@@ -986,6 +1010,9 @@ export class CallmuxListener {
       let cacheHit = false;
       let target: ResponseShieldTarget | undefined;
       const principal = this.authzContext.getStore();
+      const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
+      const active = this.beginActiveToolCall(name, args, session, extra.sessionId);
+      try {
       const authz = this.authorizeToolCall(name, args, principal);
       if (!authz.allowed) {
         const denied = errorResult("authorization_denied", "Authorization policy denied tool call", {
@@ -997,10 +1024,12 @@ export class CallmuxListener {
         this.recordToolCallEvent(name, target, denied, startedAt, false, args);
         return denied;
       }
-      const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
       const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
         ? await this.resolveToolCallContext(session, server, extra)
         : this.bareToolCallContext(extra);
+      this.updateActiveToolCall(active.id, {
+        ...(toolContext.cwd ? { cwd: toolContext.cwd } : {}),
+      });
 
       let result: CallToolResult;
       switch (name) {
@@ -1108,6 +1137,9 @@ export class CallmuxListener {
 
       this.recordToolCallEvent(name, target, result, startedAt, cacheHit, args);
       return result;
+      } finally {
+        this.completeActiveToolCall(active.id);
+      }
     });
 
     return server;
@@ -1162,6 +1194,115 @@ export class CallmuxListener {
       result,
       resolveResponseShieldOptions(this.options.config, target)
     );
+  }
+
+  private beginActiveToolCall(
+    tool: string,
+    args: unknown,
+    session: SessionEntry | undefined,
+    sessionId: string | undefined
+  ): ActiveToolCallEntry {
+    const context = this.requestContext.getStore();
+    const principal = this.authzContext.getStore();
+    const target = this.responseShieldTarget(
+      this.options.upstream,
+      tool,
+      isRecord(args) ? args : undefined
+    );
+    const summary = this.summarizeDashboardToolCall(tool, args, undefined, target);
+    const entry: ActiveToolCallEntry = {
+      id: randomUUID(),
+      requestId: context?.requestId ?? randomUUID(),
+      ...(sessionId ? { sessionId } : {}),
+      tool,
+      ...(target.server ? { server: target.server } : {}),
+      ...(target.tool ? { targetTool: target.tool } : {}),
+      toolKind: summary.toolKind,
+      operation: summary.operation,
+      startedAt: Date.now(),
+      startedAtIso: new Date().toISOString(),
+      status: "in_flight",
+      ...(session?.cwd ? { cwd: session.cwd } : {}),
+      ...(principal ? { principal: `${principal.kind}:${principal.id}` } : {}),
+      ...(summary.downstreamTargets.length > 0
+        ? { downstreamTargets: summary.downstreamTargets }
+        : {}),
+    };
+    this.activeToolCalls.set(entry.id, entry);
+    this.runtimeEvents.append({
+      type: "tool_call_lifecycle",
+      lifecycle: "started",
+      timestamp: entry.startedAtIso,
+      requestId: entry.requestId,
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      tool: entry.tool,
+      ...(entry.server ? { server: entry.server } : {}),
+      ...(entry.targetTool ? { targetTool: entry.targetTool } : {}),
+      ...(entry.toolKind ? { toolKind: entry.toolKind } : {}),
+      ...(entry.operation ? { operation: entry.operation } : {}),
+      ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
+      durationMs: 0,
+      status: "in_flight",
+      success: true,
+    });
+    return entry;
+  }
+
+  private updateActiveToolCall(id: string, updates: Partial<ActiveToolCallEntry>): void {
+    const entry = this.activeToolCalls.get(id);
+    if (!entry) return;
+    this.activeToolCalls.set(id, { ...entry, ...updates });
+  }
+
+  private completeActiveToolCall(id: string): void {
+    this.activeToolCalls.delete(id);
+  }
+
+  private markActiveToolCallsForRequestAborted(requestId: string): void {
+    const abortedAt = new Date().toISOString();
+    for (const entry of this.activeToolCalls.values()) {
+      if (entry.requestId !== requestId || entry.status === "client_aborted") continue;
+      entry.status = "client_aborted";
+      entry.clientAbortedAt = abortedAt;
+      this.runtimeEvents.append({
+        type: "tool_call_lifecycle",
+        lifecycle: "client_aborted",
+        timestamp: abortedAt,
+        requestId: entry.requestId,
+        ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+        tool: entry.tool,
+        ...(entry.server ? { server: entry.server } : {}),
+        ...(entry.targetTool ? { targetTool: entry.targetTool } : {}),
+        ...(entry.toolKind ? { toolKind: entry.toolKind } : {}),
+        ...(entry.operation ? { operation: entry.operation } : {}),
+        ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
+        durationMs: Date.now() - entry.startedAt,
+        status: "client_aborted",
+        success: false,
+      });
+    }
+  }
+
+  private activeToolCallDiagnostics(): ListenerRuntimeDiagnostics["activeToolCalls"] {
+    return Array.from(this.activeToolCalls.values())
+      .map((entry) => ({
+        id: entry.id,
+        requestId: entry.requestId,
+        ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+        tool: entry.tool,
+        ...(entry.server ? { server: entry.server } : {}),
+        ...(entry.targetTool ? { targetTool: entry.targetTool } : {}),
+        ...(entry.toolKind ? { toolKind: entry.toolKind } : {}),
+        ...(entry.operation ? { operation: entry.operation } : {}),
+        startedAt: entry.startedAtIso,
+        durationMs: Date.now() - entry.startedAt,
+        status: entry.status,
+        ...(entry.cwd ? { cwd: entry.cwd } : {}),
+        ...(entry.principal ? { principal: entry.principal } : {}),
+        ...(entry.clientAbortedAt ? { clientAbortedAt: entry.clientAbortedAt } : {}),
+        ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
+      }))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
   }
 
   private recordToolCallEvent(
@@ -1444,21 +1585,26 @@ export class CallmuxListener {
     context: RequestContext
   ): void {
     let completed = false;
-    const finalize = () => {
+    const finalize = (reason: "finish" | "close") => {
       if (completed) return;
       completed = true;
+      const aborted = reason === "close" && !res.writableEnded;
+      if (aborted) {
+        this.markActiveToolCallsForRequestAborted(context.requestId);
+      }
       const durationMs = Date.now() - context.startTimeMs;
+      const status = aborted ? 499 : res.statusCode;
       this.metrics.onRequestComplete({
         method: context.method,
         path: context.path,
-        status: res.statusCode,
+        status,
         durationMs,
       });
       this.auditLogger.writeRequestEvent({
         requestId: context.requestId,
         method: context.method,
         path: context.path,
-        status: res.statusCode,
+        status,
         durationMs,
         ...(context.remoteIp ? { remoteIp: context.remoteIp } : {}),
         ...(context.principal ? { principal: context.principal } : {}),
@@ -1471,15 +1617,15 @@ export class CallmuxListener {
         requestId: context.requestId,
         method: context.method,
         path: context.path,
-        status: res.statusCode,
+        status,
         durationMs,
         ...this.summarizeHttpRequestPayload(context.payload),
         ...(context.principal ? { principal: `${context.principal.kind}:${context.principal.id}` } : {}),
       });
     };
 
-    res.once("finish", finalize);
-    res.once("close", finalize);
+    res.once("finish", () => finalize("finish"));
+    res.once("close", () => finalize("close"));
   }
 
   private authorizeToolCall(

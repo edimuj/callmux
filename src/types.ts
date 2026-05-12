@@ -282,6 +282,28 @@ export interface ListenerRuntimeDiagnostics {
     lastReloadError?: string;
   };
   activeSessions: number;
+  activeToolCallCount?: number;
+  activeToolCalls?: Array<{
+    id: string;
+    requestId: string;
+    sessionId?: string;
+    tool: string;
+    server?: string;
+    targetTool?: string;
+    toolKind?: "callmux_meta" | "downstream";
+    operation?: string;
+    startedAt: string;
+    durationMs: number;
+    status: "in_flight" | "client_aborted";
+    cwd?: string;
+    principal?: string;
+    clientAbortedAt?: string;
+    downstreamTargets?: Array<{
+      server?: string;
+      tool: string;
+      count: number;
+    }>;
+  }>;
   sessions: Array<{
     id: string;
     transport: "streamable-http" | "sse" | "unknown";
