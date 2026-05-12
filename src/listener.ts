@@ -591,6 +591,47 @@ export class CallmuxListener {
     res: ServerResponse,
     context: RequestContext
   ): Promise<void> {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+    if (req.method !== "POST") {
+      if (sessionId && this.sessions.has(sessionId)) {
+        const session = this.sessions.get(sessionId)!;
+        if (!(session.transport instanceof StreamableHTTPServerTransport)) {
+          this.writeJsonRpcError(
+            res,
+            400,
+            context,
+            -32000,
+            "Session uses different transport"
+          );
+          return;
+        }
+        this.setSessionCwdFromHeader(session, req);
+        await session.transport.handleRequest(req, res);
+        return;
+      }
+
+      if (sessionId) {
+        this.writeJsonRpcError(
+          res,
+          400,
+          context,
+          -32000,
+          "Bad Request: Unknown session. Re-initialize and retry with a new MCP-Session-Id."
+        );
+        return;
+      }
+
+      this.writeJsonRpcError(
+        res,
+        400,
+        context,
+        -32000,
+        "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id."
+      );
+      return;
+    }
+
     const requestedLimit = this.parsePerRequestLimitOverride(req);
     const readLimit = requestedLimit === undefined
       ? this.preReadMaxBytes
@@ -609,8 +650,6 @@ export class CallmuxListener {
     if (effectiveLimit !== undefined && bytes > effectiveLimit) {
       throw new PayloadTooLargeError(effectiveLimit);
     }
-
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (sessionId && this.sessions.has(sessionId)) {
       const session = this.sessions.get(sessionId)!;

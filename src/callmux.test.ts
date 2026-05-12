@@ -8138,6 +8138,19 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     };
     assert.equal(restartedPayload.cwd, root);
     assert.deepEqual(restartedPayload.arguments, { id: 100 });
+
+    await bridgeClient.close();
+    bridgeClient = undefined;
+    await bridgeTransport.close();
+    bridgeTransport = undefined;
+    await waitFor(async () => {
+      const diagnostics = (listener as any).getRuntimeDiagnostics() as {
+        sessions: Array<{ clientKind?: string; cwd?: string }>;
+      };
+      return !diagnostics.sessions.some((session) =>
+        session.clientKind === "stdio-bridge" && session.cwd === root
+      );
+    });
   } finally {
     await bridgeClient?.close();
     await bridgeTransport?.close();
@@ -9174,6 +9187,14 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     assert.ok(listBody.result.tools.length >= META_TOOLS.length);
     assert.ok(listBody.result.tools.some((tool: Tool) => tool.name === "callmux_status"));
     assert.ok(!listBody.result.tools.some((tool: Tool) => tool.name === "my_tool"));
+
+    assert.equal((listener as any).getRuntimeDiagnostics().activeSessions, 1);
+    const deleteRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "DELETE",
+      headers: { "mcp-session-id": sessionId },
+    });
+    assert.equal(deleteRes.status, 200);
+    await waitFor(async () => (listener as any).getRuntimeDiagnostics().activeSessions === 0);
   } finally {
     await listener.close();
   }

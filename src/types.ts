@@ -287,6 +287,7 @@ export interface ListenerRuntimeDiagnostics {
     transport: "streamable-http" | "sse" | "unknown";
     cwd?: string;
     cwdSource?: "header" | "meta" | "roots";
+    clientKind?: "stdio-bridge";
     rootsAttempted: boolean;
   }>;
   scopedStdioClients: {

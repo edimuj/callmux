@@ -30,7 +30,7 @@ function bridgeHeaders(options: BridgeOptions): Record<string, string> {
 export class CallmuxBridge {
   private server: Server;
   private client: Client | undefined;
-  private transport: Transport | undefined;
+  private transport: StreamableHTTPClientTransport | undefined;
   private reconnectPromise: Promise<void> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempts = 0;
@@ -184,6 +184,7 @@ export class CallmuxBridge {
     this.client = undefined;
     this.transport = undefined;
 
+    await transport?.terminateSession().catch(() => undefined);
     await client?.close().catch(() => undefined);
     await transport?.close?.().catch(() => undefined);
   }
