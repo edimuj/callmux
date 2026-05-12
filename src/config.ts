@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { readFile, access, mkdir, writeFile } from "node:fs/promises";
-import { resolve, join, dirname } from "node:path";
+import { resolve, join, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import type {
   AbuseControlsConfig,
@@ -547,6 +547,14 @@ function parseNonEmptyString(value: unknown, optionName: string): string {
   return value;
 }
 
+function parseAbsoluteCwd(value: unknown, optionName: string): string {
+  const cwd = parseNonEmptyString(value, optionName).trim();
+  if (!isAbsolute(cwd)) {
+    throw new Error(`${optionName} must be an absolute path`);
+  }
+  return cwd;
+}
+
 function parseArgumentsRecord(
   value: unknown,
   optionName: string
@@ -592,6 +600,9 @@ function parseRecipeConfig(
   const timeoutMs = value.timeoutMs === undefined
     ? undefined
     : parsePositiveInteger(value.timeoutMs, `${optionName}.timeoutMs`);
+  const cwd = value.cwd === undefined
+    ? undefined
+    : parseAbsoluteCwd(value.cwd, `${optionName}.cwd`);
 
   if (mode === "call") {
     const tool = parseNonEmptyString(value.tool, `${optionName}.tool`);
@@ -603,6 +614,7 @@ function parseRecipeConfig(
       tool,
       ...(args ? { arguments: args } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(cwd ? { cwd } : {}),
     };
   }
 
@@ -629,12 +641,18 @@ function parseRecipeConfig(
             call.timeoutMs,
             `${optionName}.calls[${index}].timeoutMs`
           );
+      const callCwd = call.cwd === undefined
+        ? undefined
+        : parseAbsoluteCwd(call.cwd, `${optionName}.calls[${index}].cwd`);
       return {
         tool,
         ...(callServer ? { server: callServer } : {}),
         ...(args ? { arguments: args } : {}),
         ...((callTimeoutMs ?? timeoutMs) !== undefined
           ? { timeoutMs: callTimeoutMs ?? timeoutMs }
+          : {}),
+        ...((callCwd ?? cwd) !== undefined
+          ? { cwd: callCwd ?? cwd }
           : {}),
       };
     });
@@ -667,9 +685,13 @@ function parseRecipeConfig(
             item.timeoutMs,
             `${optionName}.items[${index}].timeoutMs`
           );
+      const itemCwd = item.cwd === undefined
+        ? undefined
+        : parseAbsoluteCwd(item.cwd, `${optionName}.items[${index}].cwd`);
       return {
         arguments: args,
         ...(itemTimeoutMs !== undefined ? { timeoutMs: itemTimeoutMs } : {}),
+        ...(itemCwd !== undefined ? { cwd: itemCwd } : {}),
       };
     });
     return {
@@ -678,6 +700,7 @@ function parseRecipeConfig(
       ...(server ? { server } : {}),
       tool,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
       items,
     };
   }
@@ -707,6 +730,9 @@ function parseRecipeConfig(
           step.timeoutMs,
           `${optionName}.steps[${index}].timeoutMs`
         );
+    const stepCwd = step.cwd === undefined
+      ? undefined
+      : parseAbsoluteCwd(step.cwd, `${optionName}.steps[${index}].cwd`);
     let inputMapping: Record<string, string> | undefined;
     if (step.inputMapping !== undefined) {
       if (!isRecord(step.inputMapping)) {
@@ -724,6 +750,9 @@ function parseRecipeConfig(
       ...(args ? { arguments: args } : {}),
       ...((stepTimeoutMs ?? timeoutMs) !== undefined
         ? { timeoutMs: stepTimeoutMs ?? timeoutMs }
+        : {}),
+      ...((stepCwd ?? cwd) !== undefined
+        ? { cwd: stepCwd ?? cwd }
         : {}),
       ...(inputMapping ? { inputMapping } : {}),
     };

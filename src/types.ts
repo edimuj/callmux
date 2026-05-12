@@ -337,6 +337,8 @@ export interface ParallelCall {
   tool: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
+  /** Absolute cwd override for this downstream call when using session-cwd stdio servers */
+  cwd?: string;
 }
 
 interface ParallelResult {
@@ -353,6 +355,8 @@ interface ParallelResult {
 export interface BatchItem {
   arguments: Record<string, unknown>;
   timeoutMs?: number;
+  /** Absolute cwd override for this item when using session-cwd stdio servers */
+  cwd?: string;
 }
 
 interface BatchResult {
@@ -373,6 +377,8 @@ export interface PipelineStep {
   tool: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
+  /** Absolute cwd override for this downstream step when using session-cwd stdio servers */
+  cwd?: string;
   /** jq-style path to extract from previous result and merge into arguments */
   inputMapping?: Record<string, string>;
 }
@@ -386,6 +392,8 @@ export interface RecipeConfig {
   tool?: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
+  /** Absolute cwd override for call/batch recipe modes */
+  cwd?: string;
   calls?: ParallelCall[];
   items?: BatchItem[];
   steps?: PipelineStep[];

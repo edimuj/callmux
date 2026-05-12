@@ -3650,6 +3650,7 @@ test("loadConfig parses reusable recipes from file", async () => {
             mode: "call",
             server: "github",
             tool: "create_issue",
+            cwd: "/tmp/callmux-recipe",
             arguments: {
               title: { $param: "title" },
               labels: ["bug"],
@@ -3662,6 +3663,7 @@ test("loadConfig parses reusable recipes from file", async () => {
     const config = await loadConfig(configPath);
     assert.equal(config.recipes?.open_bug.mode, "call");
     assert.equal(config.recipes?.open_bug.tool, "create_issue");
+    assert.equal(config.recipes?.open_bug.cwd, "/tmp/callmux-recipe");
     assert.deepEqual(config.recipes?.open_bug.arguments?.labels, ["bug"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -5432,8 +5434,8 @@ test("pipeline inputMapping on first step is ignored", async () => {
   assert.equal(capturedArgs.data, undefined);
 });
 
-test("meta tools pass timeoutMs overrides to upstream calls", async () => {
-  const observed: Array<number | undefined> = [];
+test("meta tools pass timeoutMs and cwd overrides to upstream calls", async () => {
+  const observed: Array<{ timeoutMs?: number; cwd?: string }> = [];
   const upstream = {
     resolveServer() {
       return { server: "github", actualName: "get_issue" };
@@ -5458,9 +5460,12 @@ test("meta tools pass timeoutMs overrides to upstream calls", async () => {
       _tool: string,
       _args?: Record<string, unknown>,
       _server?: string,
-      context?: { timeoutMs?: number }
+      context?: { timeoutMs?: number; cwd?: string }
     ) {
-      observed.push(context?.timeoutMs);
+      observed.push({
+        ...(context?.timeoutMs !== undefined ? { timeoutMs: context.timeoutMs } : {}),
+        ...(context?.cwd !== undefined ? { cwd: context.cwd } : {}),
+      });
       return textResult("ok");
     },
   };
@@ -5471,24 +5476,110 @@ test("meta tools pass timeoutMs overrides to upstream calls", async () => {
     tool: "get_issue",
     arguments: { id: 1 },
     timeoutMs: 1_000,
+    cwd: "/tmp/callmux-one",
   });
   await handleParallel(upstream as never, cache, {
-    calls: [{ server: "github", tool: "get_issue", arguments: { id: 2 }, timeoutMs: 2_000 }],
+    calls: [{
+      server: "github",
+      tool: "get_issue",
+      arguments: { id: 2 },
+      timeoutMs: 2_000,
+      cwd: "/tmp/callmux-two",
+    }],
   }, 1);
   await handleBatch(upstream as never, cache, {
     server: "github",
     tool: "get_issue",
     timeoutMs: 3_000,
+    cwd: "/tmp/callmux-three",
     items: [
       { arguments: { id: 3 } },
-      { arguments: { id: 4 }, timeoutMs: 4_000 },
+      { arguments: { id: 4 }, timeoutMs: 4_000, cwd: "/tmp/callmux-four" },
     ],
   }, 1);
   await handlePipeline(upstream as never, cache, {
-    steps: [{ server: "github", tool: "get_issue", arguments: { id: 5 }, timeoutMs: 5_000 }],
+    steps: [{
+      server: "github",
+      tool: "get_issue",
+      arguments: { id: 5 },
+      timeoutMs: 5_000,
+      cwd: "/tmp/callmux-five",
+    }],
   });
 
-  assert.deepEqual(observed, [1_000, 2_000, 3_000, 4_000, 5_000]);
+  assert.deepEqual(observed, [
+    { timeoutMs: 1_000, cwd: "/tmp/callmux-one" },
+    { timeoutMs: 2_000, cwd: "/tmp/callmux-two" },
+    { timeoutMs: 3_000, cwd: "/tmp/callmux-three" },
+    { timeoutMs: 4_000, cwd: "/tmp/callmux-four" },
+    { timeoutMs: 5_000, cwd: "/tmp/callmux-five" },
+  ]);
+});
+
+test("meta tool cwd overrides partition cached session-cwd calls", async () => {
+  const observedCwds: string[] = [];
+  const upstream = {
+    resolveServer() {
+      return { server: "github", actualName: "get_issue" };
+    },
+    getServerNames() {
+      return ["github"];
+    },
+    getServerTools() {
+      return ["get_issue"];
+    },
+    cacheScopeForCall(_tool: string, _server?: string, context?: { cwd?: string }) {
+      return context?.cwd;
+    },
+    async callTool(
+      _tool: string,
+      _args?: Record<string, unknown>,
+      _server?: string,
+      context?: { cwd?: string }
+    ) {
+      observedCwds.push(context?.cwd ?? "");
+      return textResult(JSON.stringify({ cwd: context?.cwd }));
+    },
+  };
+
+  const cache = new CallCache(60);
+  await handleCall(upstream as never, cache, {
+    server: "github",
+    tool: "get_issue",
+    arguments: { id: 1 },
+    cwd: "/tmp/callmux-cache-a",
+  });
+  await handleCall(upstream as never, cache, {
+    server: "github",
+    tool: "get_issue",
+    arguments: { id: 1 },
+    cwd: "/tmp/callmux-cache-b",
+  });
+
+  assert.deepEqual(observedCwds, ["/tmp/callmux-cache-a", "/tmp/callmux-cache-b"]);
+});
+
+test("meta tool cwd overrides must be absolute paths", async () => {
+  const upstream = {
+    resolveServer() {
+      return { server: "github", actualName: "get_issue" };
+    },
+    getServerNames() {
+      return ["github"];
+    },
+    getServerTools() {
+      return ["get_issue"];
+    },
+  };
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    server: "github",
+    tool: "get_issue",
+    cwd: "relative/project",
+  });
+
+  assert.equal(result.isError, true);
+  assert.match((result.content[0] as { text: string }).text, /cwd must be an absolute path/);
 });
 
 test("stdio bridge derives meta-call request timeout from child timeouts", () => {
@@ -8349,6 +8440,94 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     await listener?.close();
     await upstream.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stdio bridge preserves per-call cwd metadata for shared listener", async () => {
+  const upstream = new UpstreamManager();
+  const rootA = await mkdtemp(join(tmpdir(), "callmux-bridge-meta-a-"));
+  const rootB = await mkdtemp(join(tmpdir(), "callmux-bridge-meta-b-"));
+  const cache = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+  let bridgeClient: Client | undefined;
+  let bridgeTransport: StdioClientTransport | undefined;
+
+  try {
+    await upstream.connect({
+      fake: fakeMcpServer("fake", {
+        FAKE_MCP_TOOLS: JSON.stringify([
+          { name: "get_item", description: "Get a fake item" },
+        ]),
+      }),
+    });
+
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { fake: fakeMcpServer("fake") } },
+      upstream,
+      cache,
+      allTools,
+      maxConcurrency: 10,
+    });
+
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    (listener as any).options.port = port;
+    await listener.start();
+
+    bridgeTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        join(process.cwd(), "dist-test", "bin", "callmux.js"),
+        "bridge",
+        "--url",
+        `http://127.0.0.1:${port}/mcp`,
+        "--cwd",
+        rootA,
+      ],
+    });
+    bridgeClient = new Client(
+      { name: "bridge-meta-test", version: "1.0" },
+      { capabilities: {} }
+    );
+    await bridgeClient.connect(bridgeTransport);
+
+    const result = await bridgeClient.callTool({
+      name: "get_item",
+      arguments: { id: 101 },
+      _meta: { callmux: { cwd: rootB } },
+    } as never) as unknown as CallToolResult;
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse((result.content[0] as { text: string }).text) as {
+      cwd: string;
+      arguments: { id: number };
+    };
+    assert.equal(payload.cwd, rootB);
+    assert.deepEqual(payload.arguments, { id: 101 });
+
+    const diagnostics = (listener as any).getRuntimeDiagnostics() as {
+      sessions: Array<{ clientKind?: string; cwd?: string; cwdSource?: string }>;
+      scopedStdioClients: { items: Array<{ server: string; cwd: string }> };
+    };
+    assert.ok(diagnostics.sessions.some((session) =>
+      session.clientKind === "stdio-bridge" &&
+      session.cwd === rootB &&
+      session.cwdSource === "meta"
+    ));
+    assert.ok(diagnostics.scopedStdioClients.items.some((item) =>
+      item.server === "fake" && item.cwd === rootB
+    ));
+  } finally {
+    await bridgeClient?.close();
+    await bridgeTransport?.close();
+    await listener?.close();
+    await upstream.close();
+    await rm(rootA, { recursive: true, force: true });
+    await rm(rootB, { recursive: true, force: true });
   }
 });
 

@@ -52,6 +52,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
 
 Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
+Session-cwd precedence is: explicit meta-tool `cwd`, request `_meta` cwd, existing session cwd/header, then MCP roots when no session cwd exists.
 
 ---
 

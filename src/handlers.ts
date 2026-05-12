@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
@@ -137,12 +138,35 @@ function validateTimeoutMs(
   return validatePositiveInteger(value, field, Number.MAX_SAFE_INTEGER);
 }
 
-function contextWithTimeout(
+function validateCwd(
+  value: unknown,
+  field: string
+): string | undefined | CallToolResult {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return errorResult("invalid_arguments", `${field} must be a non-empty absolute path`, {
+      field,
+    });
+  }
+  const cwd = value.trim();
+  if (!isAbsolute(cwd)) {
+    return errorResult("invalid_arguments", `${field} must be an absolute path`, {
+      field,
+    });
+  }
+  return cwd;
+}
+
+function contextWithCallOverrides(
   context: ToolCallContext | undefined,
-  timeoutMs: number | undefined
+  overrides: { timeoutMs?: number; cwd?: string }
 ): ToolCallContext | undefined {
-  if (timeoutMs === undefined) return context;
-  return { ...context, timeoutMs };
+  if (overrides.timeoutMs === undefined && overrides.cwd === undefined) return context;
+  return {
+    ...context,
+    ...(overrides.timeoutMs !== undefined ? { timeoutMs: overrides.timeoutMs } : {}),
+    ...(overrides.cwd !== undefined ? { cwd: overrides.cwd } : {}),
+  };
 }
 
 function validateArgumentsObject(
@@ -193,12 +217,15 @@ function validateParallelArgs(
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
     const timeoutMs = validateTimeoutMs(call.timeoutMs, `calls[${index}].timeoutMs`);
     if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
+    const cwd = validateCwd(call.cwd, `calls[${index}].cwd`);
+    if (cwd !== undefined && typeof cwd !== "string") return cwd;
 
     calls.push({
       tool,
       ...(typeof server === "string" ? { server } : {}),
       ...(parsedArgs ? { arguments: parsedArgs } : {}),
       ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+      ...(typeof cwd === "string" ? { cwd } : {}),
     });
   }
 
@@ -207,7 +234,7 @@ function validateParallelArgs(
 
 function validateBatchArgs(
   args: unknown
-): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number } | CallToolResult {
+): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number; cwd?: string } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.items)) {
     return errorResult("invalid_arguments", `"items" must be an array`, {
       field: "items",
@@ -222,6 +249,8 @@ function validateBatchArgs(
   if (server !== undefined && typeof server !== "string") return server;
   const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
   if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
+  const cwd = validateCwd(args.cwd, "cwd");
+  if (cwd !== undefined && typeof cwd !== "string") return cwd;
 
   const items: BatchItem[] = [];
   for (let index = 0; index < args.items.length; index++) {
@@ -244,10 +273,15 @@ function validateBatchArgs(
     if (itemTimeoutMs !== undefined && typeof itemTimeoutMs !== "number") {
       return itemTimeoutMs;
     }
+    const itemCwd = validateCwd(item.cwd, `items[${index}].cwd`);
+    if (itemCwd !== undefined && typeof itemCwd !== "string") {
+      return itemCwd;
+    }
 
     items.push({
       arguments: parsedArgs,
       ...(typeof itemTimeoutMs === "number" ? { timeoutMs: itemTimeoutMs } : {}),
+      ...(typeof itemCwd === "string" ? { cwd: itemCwd } : {}),
     });
   }
 
@@ -256,6 +290,7 @@ function validateBatchArgs(
     items,
     ...(typeof server === "string" ? { server } : {}),
     ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+    ...(typeof cwd === "string" ? { cwd } : {}),
   };
 }
 
@@ -299,6 +334,8 @@ function validatePipelineArgs(
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
     const timeoutMs = validateTimeoutMs(step.timeoutMs, `steps[${index}].timeoutMs`);
     if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
+    const cwd = validateCwd(step.cwd, `steps[${index}].cwd`);
+    if (cwd !== undefined && typeof cwd !== "string") return cwd;
 
     let inputMapping: Record<string, string> | undefined;
     if (step.inputMapping !== undefined) {
@@ -327,6 +364,7 @@ function validatePipelineArgs(
       ...(typeof server === "string" ? { server } : {}),
       ...(parsedArgs ? { arguments: parsedArgs } : {}),
       ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+      ...(typeof cwd === "string" ? { cwd } : {}),
       ...(inputMapping ? { inputMapping } : {}),
     });
   }
@@ -405,6 +443,7 @@ interface DryRunCall {
   server?: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
+  cwd?: string;
   source:
     | { mode: "call" }
     | { mode: "parallel"; index: number }
@@ -471,6 +510,8 @@ function validateDryRunArgs(
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
     const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
     if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
+    const cwd = validateCwd(args.cwd, "cwd");
+    if (cwd !== undefined && typeof cwd !== "string") return cwd;
     return {
       mode: "call",
       calls: [{
@@ -478,6 +519,7 @@ function validateDryRunArgs(
         ...(typeof server === "string" ? { server } : {}),
         ...(parsedArgs ? { arguments: parsedArgs } : {}),
         ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+        ...(typeof cwd === "string" ? { cwd } : {}),
         source: { mode: "call" },
       }],
     };
@@ -507,6 +549,9 @@ function validateDryRunArgs(
         ...((item.timeoutMs ?? validated.timeoutMs) !== undefined
           ? { timeoutMs: item.timeoutMs ?? validated.timeoutMs }
           : {}),
+        ...((item.cwd ?? validated.cwd) !== undefined
+          ? { cwd: item.cwd ?? validated.cwd }
+          : {}),
         source: { mode: "batch", index },
       })),
     };
@@ -520,6 +565,8 @@ function validateDryRunArgs(
       tool: step.tool,
       ...(step.server ? { server: step.server } : {}),
       ...(step.arguments ? { arguments: step.arguments } : {}),
+      ...(step.timeoutMs ? { timeoutMs: step.timeoutMs } : {}),
+      ...(step.cwd ? { cwd: step.cwd } : {}),
       source: {
         mode: "pipeline",
         step: stepIndex,
@@ -648,6 +695,7 @@ export function expandRecipeInvocation(
   if (expandedRecipe.tool !== undefined) expandedArgs.tool = expandedRecipe.tool;
   if (expandedRecipe.arguments !== undefined) expandedArgs.arguments = expandedRecipe.arguments;
   if (expandedRecipe.timeoutMs !== undefined) expandedArgs.timeoutMs = expandedRecipe.timeoutMs;
+  if (expandedRecipe.cwd !== undefined) expandedArgs.cwd = expandedRecipe.cwd;
   if (expandedRecipe.calls !== undefined) expandedArgs.calls = expandedRecipe.calls;
   if (expandedRecipe.items !== undefined) expandedArgs.items = expandedRecipe.items;
   if (expandedRecipe.steps !== undefined) expandedArgs.steps = expandedRecipe.steps;
@@ -699,7 +747,11 @@ export async function handleParallel(
     if (serverSem) await serverSem.acquire();
     const callStart = Date.now();
     try {
-      const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, context);
+      const callContext = contextWithCallOverrides(context, {
+        timeoutMs: call.timeoutMs,
+        cwd: call.cwd,
+      });
+      const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, callContext);
       const cached = cache.get(call.tool, call.arguments, call.server, cacheScope);
       if (cached) {
         return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
@@ -709,7 +761,7 @@ export async function handleParallel(
         call.tool,
         call.arguments,
         call.server,
-        contextWithTimeout(context, call.timeoutMs)
+        callContext
       );
       cache.set(call.tool, call.arguments, result, call.server, cacheScope);
       return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
@@ -748,7 +800,7 @@ export async function handleBatch(
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
-  const { server, tool, items, timeoutMs } = parsedArgs;
+  const { server, tool, items, timeoutMs, cwd } = parsedArgs;
 
   const serverForLimit = resolveServerForConcurrency(upstream, tool, server);
   const serverLimit = serverForLimit
@@ -765,7 +817,11 @@ export async function handleBatch(
     await semaphore.acquire();
     const callStart = Date.now();
     try {
-      const cacheScope = cacheScopeForCall(upstream, tool, server, context);
+      const callContext = contextWithCallOverrides(context, {
+        timeoutMs: item.timeoutMs ?? timeoutMs,
+        cwd: item.cwd ?? cwd,
+      });
+      const cacheScope = cacheScopeForCall(upstream, tool, server, callContext);
       const cached = cache.get(tool, item.arguments, server, cacheScope);
       if (cached) {
         succeeded++;
@@ -776,7 +832,7 @@ export async function handleBatch(
         tool,
         item.arguments,
         server,
-        contextWithTimeout(context, item.timeoutMs ?? timeoutMs)
+        callContext
       );
       cache.set(tool, item.arguments, result, server, cacheScope);
       if (result.isError) failed++;
@@ -835,13 +891,17 @@ export async function handlePipeline(
     }
 
     try {
-      const cacheScope = cacheScopeForCall(upstream, step.tool, step.server, context);
+      const callContext = contextWithCallOverrides(context, {
+        timeoutMs: step.timeoutMs,
+        cwd: step.cwd,
+      });
+      const cacheScope = cacheScopeForCall(upstream, step.tool, step.server, callContext);
       const cached = cache.get(step.tool, mergedArgs, step.server, cacheScope);
       const result = cached ?? await upstream.callTool(
         step.tool,
         mergedArgs,
         step.server,
-        contextWithTimeout(context, step.timeoutMs)
+        callContext
       );
 
       if (!cached) {
@@ -913,7 +973,11 @@ export async function handleDryRun(
       continue;
     }
 
-    const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, context);
+    const callContext = contextWithCallOverrides(context, {
+      timeoutMs: call.timeoutMs,
+      cwd: call.cwd,
+    });
+    const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, callContext);
     const cacheHit = cache.get(call.tool, call.arguments, call.server, cacheScope) !== null;
     if (cacheHit) cacheHitCandidates++;
 
@@ -928,6 +992,7 @@ export async function handleDryRun(
       tool: call.tool,
       ...(call.server ? { serverHint: call.server } : {}),
       ...(call.timeoutMs ? { timeoutMs: call.timeoutMs } : {}),
+      ...(call.cwd ? { cwd: call.cwd } : {}),
       resolved: {
         server: prepare.server,
         actualTool: prepare.actualName,
@@ -981,6 +1046,8 @@ export async function handleCall(
   if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
   const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
   if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
+  const cwd = validateCwd(args.cwd, "cwd");
+  if (cwd !== undefined && typeof cwd !== "string") return cwd;
   const forceReconnect = args.forceReconnect === undefined
     ? false
     : typeof args.forceReconnect === "boolean"
@@ -1004,15 +1071,18 @@ export async function handleCall(
   }
   if ("error" in resolved) return resolved.error;
 
-  const cacheScope = cacheScopeForCall(upstream, tool, server, context);
+  const callContext = contextWithCallOverrides(context, {
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+    ...(typeof cwd === "string" ? { cwd } : {}),
+  });
+  const cacheScope = cacheScopeForCall(upstream, tool, server, callContext);
   const cached = cache.get(tool, parsedArgs, server, cacheScope);
   if (cached) return cached;
 
   const result = await upstream.callTool(tool, parsedArgs, server, {
-    ...context,
+    ...callContext,
     forceReconnect,
     retryOnReconnect: cache.isSafeToRetry(tool, server),
-    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
   });
   cache.set(tool, parsedArgs, result, server, cacheScope);
   return result;

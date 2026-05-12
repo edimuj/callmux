@@ -139,11 +139,12 @@ callmux client print claude --url http://localhost:4860/sse
 
 ## Session-Cwd Behavior
 
-For stdio servers in listener mode, callmux resolves the client session's project cwd from (in priority order):
+For stdio servers in listener mode, callmux resolves a downstream call's project cwd from (in priority order):
 
-1. MCP roots sent by the client
-2. `x-callmux-cwd` header (sent by the stdio bridge)
-3. Request `_meta`
+1. Explicit meta-tool `cwd` (`callmux_call.cwd`, `callmux_parallel.calls[].cwd`, `callmux_batch.cwd/items[].cwd`, or `callmux_pipeline.steps[].cwd`)
+2. Per-request `_meta` (`_meta.callmux.cwd`, `_meta["callmux.cwd"]`, `_meta.cwd`, or `_meta.workingDirectory`)
+3. Existing session cwd, usually the `x-callmux-cwd` header sent by the stdio bridge
+4. MCP roots, when the session does not already have a cwd
 
 This makes relative paths in downstream servers behave like they would in a per-project MCP process.
 

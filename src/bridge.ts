@@ -59,10 +59,7 @@ export class CallmuxBridge {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         return await this.withReconnect((client) => client.callTool(
-          {
-            name: request.params.name,
-            arguments: request.params.arguments,
-          },
+          request.params,
           undefined,
           deriveBridgeCallOptions(
             request.params.name,

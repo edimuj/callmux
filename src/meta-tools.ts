@@ -33,6 +33,11 @@ export const META_TOOLS: Tool[] = [
                 description:
                   "Optional timeout in milliseconds for this downstream tool call.",
               },
+              cwd: {
+                type: "string",
+                description:
+                  "Optional absolute cwd override for session-cwd stdio servers.",
+              },
             },
             required: ["tool"],
             additionalProperties: false,
@@ -62,6 +67,11 @@ export const META_TOOLS: Tool[] = [
           description:
             "Optional timeout in milliseconds applied to each item unless the item sets timeoutMs.",
         },
+        cwd: {
+          type: "string",
+          description:
+            "Optional absolute cwd override applied to each item unless the item sets cwd.",
+        },
         items: {
           type: "array",
           description: "Array of argument objects, one per call",
@@ -77,6 +87,11 @@ export const META_TOOLS: Tool[] = [
                 minimum: 1,
                 description:
                   "Optional timeout in milliseconds for this item.",
+              },
+              cwd: {
+                type: "string",
+                description:
+                  "Optional absolute cwd override for this item.",
               },
             },
             required: ["arguments"],
@@ -110,6 +125,11 @@ export const META_TOOLS: Tool[] = [
                 minimum: 1,
                 description:
                   "Optional timeout in milliseconds for this downstream tool call.",
+              },
+              cwd: {
+                type: "string",
+                description:
+                  "Optional absolute cwd override for session-cwd stdio servers.",
               },
               inputMapping: {
                 type: "object",
@@ -229,6 +249,10 @@ export const META_TOOLS: Tool[] = [
           minimum: 1,
           description: "Optional timeout in milliseconds for this downstream tool call.",
         },
+        cwd: {
+          type: "string",
+          description: "Optional absolute cwd override for session-cwd stdio servers.",
+        },
         forceReconnect: {
           type: "boolean",
           description:
@@ -260,6 +284,10 @@ export const META_TOOLS: Tool[] = [
           minimum: 1,
           description: "Optional timeout in milliseconds for call/batch mode.",
         },
+        cwd: {
+          type: "string",
+          description: "Optional absolute cwd override for call/batch mode.",
+        },
         calls: {
           type: "array",
           description: "Parallel mode calls",
@@ -270,6 +298,7 @@ export const META_TOOLS: Tool[] = [
               tool: { type: "string" },
               arguments: { type: "object" },
               timeoutMs: { type: "integer", minimum: 1 },
+              cwd: { type: "string" },
             },
             required: ["tool"],
             additionalProperties: false,
@@ -283,6 +312,7 @@ export const META_TOOLS: Tool[] = [
             properties: {
               arguments: { type: "object" },
               timeoutMs: { type: "integer", minimum: 1 },
+              cwd: { type: "string" },
             },
             required: ["arguments"],
             additionalProperties: false,
@@ -298,6 +328,7 @@ export const META_TOOLS: Tool[] = [
               tool: { type: "string" },
               arguments: { type: "object" },
               timeoutMs: { type: "integer", minimum: 1 },
+              cwd: { type: "string" },
               inputMapping: {
                 type: "object",
                 additionalProperties: { type: "string" },

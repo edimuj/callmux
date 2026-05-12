@@ -396,7 +396,8 @@
         "server": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "arguments": { "$ref": "#/$defs/recipeArguments" },
-        "timeoutMs": { "type": "integer", "minimum": 1 }
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "cwd": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
@@ -405,7 +406,8 @@
       "required": ["arguments"],
       "properties": {
         "arguments": { "$ref": "#/$defs/recipeArguments" },
-        "timeoutMs": { "type": "integer", "minimum": 1 }
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "cwd": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
@@ -417,6 +419,7 @@
         "tool": { "type": "string", "minLength": 1 },
         "arguments": { "$ref": "#/$defs/recipeArguments" },
         "timeoutMs": { "type": "integer", "minimum": 1 },
+        "cwd": { "type": "string", "minLength": 1 },
         "inputMapping": {
           "type": "object",
           "additionalProperties": { "type": "string" }
@@ -438,6 +441,7 @@
         "tool": { "type": "string", "minLength": 1 },
         "arguments": { "$ref": "#/$defs/recipeArguments" },
         "timeoutMs": { "type": "integer", "minimum": 1 },
+        "cwd": { "type": "string", "minLength": 1 },
         "calls": {
           "type": "array",
           "items": { "$ref": "#/$defs/recipeCall" }

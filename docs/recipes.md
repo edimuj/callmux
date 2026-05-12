@@ -118,7 +118,7 @@ Each step feeds into the next via `inputMapping`:
 | `batch` | `callmux_batch` | Same tool, many items |
 | `pipeline` | `callmux_pipeline` | Chained steps with `inputMapping` |
 
-Recipes may include `timeoutMs` at the recipe level, on individual `calls`, `items`, or `steps`. Per-call values win over the recipe-level value.
+Recipes may include `timeoutMs` and absolute `cwd` overrides at the recipe level, on individual `calls`, `items`, or `steps`. Per-call values win over the recipe-level value.
 
 ---
 
