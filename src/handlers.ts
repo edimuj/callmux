@@ -130,6 +130,21 @@ function validatePositiveInteger(
   return value;
 }
 
+function validateTimeoutMs(
+  value: unknown,
+  field: string
+): number | undefined | CallToolResult {
+  return validatePositiveInteger(value, field, Number.MAX_SAFE_INTEGER);
+}
+
+function contextWithTimeout(
+  context: ToolCallContext | undefined,
+  timeoutMs: number | undefined
+): ToolCallContext | undefined {
+  if (timeoutMs === undefined) return context;
+  return { ...context, timeoutMs };
+}
+
 function validateArgumentsObject(
   value: unknown,
   field: string
@@ -176,11 +191,14 @@ function validateParallelArgs(
       `calls[${index}].arguments`
     );
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+    const timeoutMs = validateTimeoutMs(call.timeoutMs, `calls[${index}].timeoutMs`);
+    if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
 
     calls.push({
       tool,
       ...(typeof server === "string" ? { server } : {}),
       ...(parsedArgs ? { arguments: parsedArgs } : {}),
+      ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
     });
   }
 
@@ -189,7 +207,7 @@ function validateParallelArgs(
 
 function validateBatchArgs(
   args: unknown
-): { server?: string; tool: string; items: BatchItem[] } | CallToolResult {
+): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.items)) {
     return errorResult("invalid_arguments", `"items" must be an array`, {
       field: "items",
@@ -202,6 +220,8 @@ function validateBatchArgs(
   const server =
     args.server === undefined ? undefined : validateToolName(args.server, "server");
   if (server !== undefined && typeof server !== "string") return server;
+  const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
+  if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
 
   const items: BatchItem[] = [];
   for (let index = 0; index < args.items.length; index++) {
@@ -220,14 +240,22 @@ function validateBatchArgs(
         { field: `items[${index}].arguments` }
       );
     }
+    const itemTimeoutMs = validateTimeoutMs(item.timeoutMs, `items[${index}].timeoutMs`);
+    if (itemTimeoutMs !== undefined && typeof itemTimeoutMs !== "number") {
+      return itemTimeoutMs;
+    }
 
-    items.push({ arguments: parsedArgs });
+    items.push({
+      arguments: parsedArgs,
+      ...(typeof itemTimeoutMs === "number" ? { timeoutMs: itemTimeoutMs } : {}),
+    });
   }
 
   return {
     tool,
     items,
     ...(typeof server === "string" ? { server } : {}),
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
   };
 }
 
@@ -269,6 +297,8 @@ function validatePipelineArgs(
       `steps[${index}].arguments`
     );
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+    const timeoutMs = validateTimeoutMs(step.timeoutMs, `steps[${index}].timeoutMs`);
+    if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
 
     let inputMapping: Record<string, string> | undefined;
     if (step.inputMapping !== undefined) {
@@ -296,6 +326,7 @@ function validatePipelineArgs(
       tool,
       ...(typeof server === "string" ? { server } : {}),
       ...(parsedArgs ? { arguments: parsedArgs } : {}),
+      ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
       ...(inputMapping ? { inputMapping } : {}),
     });
   }
@@ -373,6 +404,7 @@ interface DryRunCall {
   tool: string;
   server?: string;
   arguments?: Record<string, unknown>;
+  timeoutMs?: number;
   source:
     | { mode: "call" }
     | { mode: "parallel"; index: number }
@@ -437,12 +469,15 @@ function validateDryRunArgs(
     if (server !== undefined && typeof server !== "string") return server;
     const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+    const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
+    if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
     return {
       mode: "call",
       calls: [{
         tool,
         ...(typeof server === "string" ? { server } : {}),
         ...(parsedArgs ? { arguments: parsedArgs } : {}),
+        ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         source: { mode: "call" },
       }],
     };
@@ -469,6 +504,9 @@ function validateDryRunArgs(
         tool: validated.tool,
         ...(validated.server ? { server: validated.server } : {}),
         arguments: item.arguments,
+        ...((item.timeoutMs ?? validated.timeoutMs) !== undefined
+          ? { timeoutMs: item.timeoutMs ?? validated.timeoutMs }
+          : {}),
         source: { mode: "batch", index },
       })),
     };
@@ -609,6 +647,7 @@ export function expandRecipeInvocation(
   if (expandedRecipe.server !== undefined) expandedArgs.server = expandedRecipe.server;
   if (expandedRecipe.tool !== undefined) expandedArgs.tool = expandedRecipe.tool;
   if (expandedRecipe.arguments !== undefined) expandedArgs.arguments = expandedRecipe.arguments;
+  if (expandedRecipe.timeoutMs !== undefined) expandedArgs.timeoutMs = expandedRecipe.timeoutMs;
   if (expandedRecipe.calls !== undefined) expandedArgs.calls = expandedRecipe.calls;
   if (expandedRecipe.items !== undefined) expandedArgs.items = expandedRecipe.items;
   if (expandedRecipe.steps !== undefined) expandedArgs.steps = expandedRecipe.steps;
@@ -666,7 +705,12 @@ export async function handleParallel(
         return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(call.tool, call.arguments, call.server, context);
+      const result = await upstream.callTool(
+        call.tool,
+        call.arguments,
+        call.server,
+        contextWithTimeout(context, call.timeoutMs)
+      );
       cache.set(call.tool, call.arguments, result, call.server, cacheScope);
       return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
     } catch (err) {
@@ -704,7 +748,7 @@ export async function handleBatch(
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
-  const { server, tool, items } = parsedArgs;
+  const { server, tool, items, timeoutMs } = parsedArgs;
 
   const serverForLimit = resolveServerForConcurrency(upstream, tool, server);
   const serverLimit = serverForLimit
@@ -728,7 +772,12 @@ export async function handleBatch(
         return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(tool, item.arguments, server, context);
+      const result = await upstream.callTool(
+        tool,
+        item.arguments,
+        server,
+        contextWithTimeout(context, item.timeoutMs ?? timeoutMs)
+      );
       cache.set(tool, item.arguments, result, server, cacheScope);
       if (result.isError) failed++;
       else succeeded++;
@@ -788,7 +837,12 @@ export async function handlePipeline(
     try {
       const cacheScope = cacheScopeForCall(upstream, step.tool, step.server, context);
       const cached = cache.get(step.tool, mergedArgs, step.server, cacheScope);
-      const result = cached ?? await upstream.callTool(step.tool, mergedArgs, step.server, context);
+      const result = cached ?? await upstream.callTool(
+        step.tool,
+        mergedArgs,
+        step.server,
+        contextWithTimeout(context, step.timeoutMs)
+      );
 
       if (!cached) {
         cache.set(step.tool, mergedArgs, result, step.server, cacheScope);
@@ -873,6 +927,7 @@ export async function handleDryRun(
       source: call.source,
       tool: call.tool,
       ...(call.server ? { serverHint: call.server } : {}),
+      ...(call.timeoutMs ? { timeoutMs: call.timeoutMs } : {}),
       resolved: {
         server: prepare.server,
         actualTool: prepare.actualName,
@@ -924,6 +979,8 @@ export async function handleCall(
 
   const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
   if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
+  const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
+  if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;
   const forceReconnect = args.forceReconnect === undefined
     ? false
     : typeof args.forceReconnect === "boolean"
@@ -955,6 +1012,7 @@ export async function handleCall(
     ...context,
     forceReconnect,
     retryOnReconnect: cache.isSafeToRetry(tool, server),
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
   });
   cache.set(tool, parsedArgs, result, server, cacheScope);
   return result;

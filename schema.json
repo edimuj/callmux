@@ -56,7 +56,7 @@
     "callTimeoutMs": {
       "type": "integer",
       "minimum": 1,
-      "default": 30000,
+      "default": 180000,
       "description": "Timeout in milliseconds for downstream tool calls"
     },
     "reconnectPolicy": { "$ref": "#/$defs/reconnectPolicy" },
@@ -160,6 +160,11 @@
           "minimum": 1,
           "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
         },
+        "callTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Timeout in milliseconds for tool calls to this server (omit to use global callTimeoutMs)"
+        },
         "requestBodyMaxBytes": {
           "type": "integer",
           "minimum": 0,
@@ -199,6 +204,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Max concurrent calls to this server (omit to use global maxConcurrency)"
+        },
+        "callTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Timeout in milliseconds for tool calls to this server (omit to use global callTimeoutMs)"
         },
         "requestBodyMaxBytes": {
           "type": "integer",
@@ -385,7 +395,8 @@
       "properties": {
         "server": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
-        "arguments": { "$ref": "#/$defs/recipeArguments" }
+        "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "timeoutMs": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
@@ -393,7 +404,8 @@
       "type": "object",
       "required": ["arguments"],
       "properties": {
-        "arguments": { "$ref": "#/$defs/recipeArguments" }
+        "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "timeoutMs": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
@@ -404,6 +416,7 @@
         "server": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
         "inputMapping": {
           "type": "object",
           "additionalProperties": { "type": "string" }
@@ -424,6 +437,7 @@
         "server": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "arguments": { "$ref": "#/$defs/recipeArguments" },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
         "calls": {
           "type": "array",
           "items": { "$ref": "#/$defs/recipeCall" }

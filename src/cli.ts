@@ -20,6 +20,8 @@ interface ServerMutation {
   cacheAllowTools?: string[];
   cacheDenyTools?: string[];
   clearCachePolicy?: boolean;
+  callTimeoutMs?: number;
+  clearCallTimeoutMs?: boolean;
   requestBodyMaxBytes?: number;
   clearRequestBodyMaxBytes?: boolean;
 }
@@ -38,6 +40,20 @@ function buildCachePolicy(
     ...(allowTools ? { allowTools } : {}),
     ...(denyTools ? { denyTools } : {}),
   };
+}
+
+function parsePositiveIntegerOption(raw: string, optionName: string): number {
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`Invalid ${optionName} value "${raw}". Expected positive integer.`);
+  }
+  return Number(raw);
+}
+
+function parseNonNegativeIntegerOption(raw: string, optionName: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`Invalid ${optionName} value "${raw}". Expected non-negative integer.`);
+  }
+  return Number(raw);
 }
 
 function formatCommand(server: ServerConfig): string {
@@ -142,6 +158,7 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
   let cwd: string | undefined;
   let cacheAllowTools: string[] | undefined;
   let cacheDenyTools: string[] | undefined;
+  let callTimeoutMs: number | undefined;
   let requestBodyMaxBytes: number | undefined;
   const env: Record<string, string> = {};
 
@@ -158,12 +175,10 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
       cacheAllowTools = parseCommaList(args[++i]);
     } else if (arg === "--cache-deny" && i + 1 < dashDash) {
       cacheDenyTools = parseCommaList(args[++i]);
+    } else if (arg === "--call-timeout" && i + 1 < dashDash) {
+      callTimeoutMs = parsePositiveIntegerOption(args[++i], "--call-timeout");
     } else if (arg === "--request-body-max-bytes" && i + 1 < dashDash) {
-      const raw = args[++i];
-      if (!/^\d+$/.test(raw)) {
-        throw new Error(`Invalid --request-body-max-bytes value "${raw}". Expected non-negative integer.`);
-      }
-      requestBodyMaxBytes = Number(raw);
+      requestBodyMaxBytes = parseNonNegativeIntegerOption(args[++i], "--request-body-max-bytes");
     } else {
       throw new Error(`Unknown server add option "${arg}"`);
     }
@@ -178,6 +193,7 @@ export function parseServerDefinitionArgs(args: string[]): ServerConfig {
     ...(buildCachePolicy(cacheAllowTools, cacheDenyTools)
       ? { cachePolicy: buildCachePolicy(cacheAllowTools, cacheDenyTools) }
       : {}),
+    ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
   };
 }
@@ -218,12 +234,12 @@ export function parseServerMutationArgs(args: string[]): ServerMutation {
       mutation.cacheDenyTools = parseCommaList(args[++i]) ?? [];
     } else if (arg === "--clear-cache-policy") {
       mutation.clearCachePolicy = true;
+    } else if (arg === "--call-timeout" && i + 1 < optionsLimit) {
+      mutation.callTimeoutMs = parsePositiveIntegerOption(args[++i], "--call-timeout");
+    } else if (arg === "--clear-call-timeout") {
+      mutation.clearCallTimeoutMs = true;
     } else if (arg === "--request-body-max-bytes" && i + 1 < optionsLimit) {
-      const raw = args[++i];
-      if (!/^\d+$/.test(raw)) {
-        throw new Error(`Invalid --request-body-max-bytes value "${raw}". Expected non-negative integer.`);
-      }
-      mutation.requestBodyMaxBytes = Number(raw);
+      mutation.requestBodyMaxBytes = parseNonNegativeIntegerOption(args[++i], "--request-body-max-bytes");
     } else if (arg === "--clear-request-body-max-bytes") {
       mutation.clearRequestBodyMaxBytes = true;
     } else {
@@ -253,6 +269,8 @@ export function parseServerMutationArgs(args: string[]): ServerMutation {
     mutation.cacheAllowTools === undefined &&
     mutation.cacheDenyTools === undefined &&
     !mutation.clearCachePolicy &&
+    mutation.callTimeoutMs === undefined &&
+    !mutation.clearCallTimeoutMs &&
     mutation.requestBodyMaxBytes === undefined &&
     !mutation.clearRequestBodyMaxBytes
   ) {
@@ -332,6 +350,13 @@ export function applyServerMutation(
       ...(server.headers ? { headers: server.headers } : {}),
       ...(tools ? { tools } : {}),
       ...(cachePolicy ? { cachePolicy } : {}),
+      ...(mutation.clearCallTimeoutMs
+        ? {}
+        : mutation.callTimeoutMs !== undefined
+          ? { callTimeoutMs: mutation.callTimeoutMs }
+          : server.callTimeoutMs !== undefined
+            ? { callTimeoutMs: server.callTimeoutMs }
+            : {}),
       ...(mutation.clearRequestBodyMaxBytes
         ? {}
         : mutation.requestBodyMaxBytes !== undefined
@@ -373,6 +398,13 @@ export function applyServerMutation(
     ...(server.cwdMode ? { cwdMode: server.cwdMode } : {}),
     ...(tools ? { tools } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
+    ...(mutation.clearCallTimeoutMs
+      ? {}
+      : mutation.callTimeoutMs !== undefined
+        ? { callTimeoutMs: mutation.callTimeoutMs }
+        : server.callTimeoutMs !== undefined
+          ? { callTimeoutMs: server.callTimeoutMs }
+          : {}),
     ...(mutation.clearRequestBodyMaxBytes
       ? {}
       : mutation.requestBodyMaxBytes !== undefined
@@ -395,6 +427,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
   envKeys?: string[];
   cachePolicy?: CachePolicyConfig;
   requestBodyMaxBytes?: number;
+  callTimeoutMs?: number;
 }> {
   return Object.entries(config.servers).map(([name, server]) => {
     if (isHttpServerConfig(server)) {
@@ -404,6 +437,9 @@ export function serializeServers(config: CallmuxConfig): Array<{
         ...(server.transport ? { transport: server.transport } : {}),
         ...(server.tools ? { tools: server.tools } : {}),
         ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+        ...(server.callTimeoutMs !== undefined
+          ? { callTimeoutMs: server.callTimeoutMs }
+          : {}),
         ...(server.requestBodyMaxBytes !== undefined
           ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
           : {}),
@@ -418,6 +454,9 @@ export function serializeServers(config: CallmuxConfig): Array<{
       ...(server.tools ? { tools: server.tools } : {}),
       ...(server.env ? { envKeys: Object.keys(server.env).sort() } : {}),
       ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
+      ...(server.callTimeoutMs !== undefined
+        ? { callTimeoutMs: server.callTimeoutMs }
+        : {}),
       ...(server.requestBodyMaxBytes !== undefined
         ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
         : {}),
@@ -453,10 +492,15 @@ export function formatServerList(config: CallmuxConfig): string {
         server.requestBodyMaxBytes === undefined
           ? undefined
           : String(server.requestBodyMaxBytes);
+      const callTimeoutMs =
+        server.callTimeoutMs === undefined
+          ? undefined
+          : String(server.callTimeoutMs);
 
       if (tools) lines.push(`  tools: ${tools}`);
       if (cacheAllow) lines.push(`  cache allow: ${cacheAllow}`);
       if (cacheDeny) lines.push(`  cache deny: ${cacheDeny}`);
+      if (callTimeoutMs !== undefined) lines.push(`  call timeout ms: ${callTimeoutMs}`);
       if (requestBodyMaxBytes !== undefined) {
         lines.push(
           `  request body max bytes: ${

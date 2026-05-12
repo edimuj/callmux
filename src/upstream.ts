@@ -23,7 +23,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
-const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_CALL_TIMEOUT_MS = 180_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS = 600;
 const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
@@ -343,6 +343,10 @@ export class UpstreamManager {
   private lifecycleGeneration = 0;
 
   constructor(private callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS) {}
+
+  private effectiveCallTimeoutMs(server: string, context?: ToolCallContext): number {
+    return context?.timeoutMs ?? this.serverConfigs.get(server)?.callTimeoutMs ?? this.callTimeoutMs;
+  }
 
   private normalizeReconnectPolicy(
     policy?: ReconnectPolicyConfig
@@ -1778,6 +1782,7 @@ export class UpstreamManager {
           return this.toolNotFound(toolName);
         }
         callClient = client;
+        const timeoutMs = this.effectiveCallTimeoutMs(prepared.server, context);
         const result = await withTimeout(
           client.callTool(
             {
@@ -1785,9 +1790,9 @@ export class UpstreamManager {
               arguments: prepared.resolvedArguments,
             },
             undefined,
-            this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+            timeoutMs > 0 ? { timeout: timeoutMs } : undefined
           ),
-          this.callTimeoutMs,
+          timeoutMs,
           `"${prepared.server}" tool "${prepared.actualName}" call`
         );
         return result as unknown as CallToolResult;
@@ -1818,6 +1823,7 @@ export class UpstreamManager {
                 if (client && "error" in client) return client.error;
                 if (!client) return this.toolNotFound(toolName);
                 callClient = client;
+                const timeoutMs = this.effectiveCallTimeoutMs(prepared.server, context);
                 const result = await withTimeout(
                   client.callTool(
                     {
@@ -1825,9 +1831,9 @@ export class UpstreamManager {
                       arguments: prepared.resolvedArguments,
                     },
                     undefined,
-                    this.callTimeoutMs > 0 ? { timeout: this.callTimeoutMs } : undefined
+                    timeoutMs > 0 ? { timeout: timeoutMs } : undefined
                   ),
-                  this.callTimeoutMs,
+                  timeoutMs,
                   `"${prepared.server}" tool "${prepared.actualName}" retry call`
                 );
                 return result as unknown as CallToolResult;

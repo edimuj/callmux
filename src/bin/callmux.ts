@@ -101,7 +101,7 @@ Options:
   --cache-deny <list>   Comma-separated cache denylist for single-server mode
   --concurrency <n>     Max parallel calls (default: 20)
   --connect-timeout <ms> Timeout for downstream startup connect/list-tools (default: 30000)
-  --call-timeout <ms>   Timeout for downstream tool calls (default: 30000)
+  --call-timeout <ms>   Timeout for downstream tool calls (default: 180000)
   --request-body-max-bytes <n> Max inbound request payload bytes (0 = unlimited, default: 1048576)
   --allow-request-body-override Allow per-request x-callmux-max-body-bytes override header
   --allow-insecure-remote-listener Allow remote --listen without auth (unsafe)
@@ -138,6 +138,7 @@ Server Add Options:
   --cwd <path>          Working directory for the downstream server
   --cache-allow <list>  Per-server cache allowlist
   --cache-deny <list>   Per-server cache denylist
+  --call-timeout <ms>   Per-server downstream tool call timeout (omit = use global)
   --request-body-max-bytes <n> Per-server inbound payload cap (0 = unlimited, omit = use global)
 
 Server Set/Edit Options:
@@ -153,6 +154,8 @@ Server Set/Edit Options:
   --cache-allow <list>  Replace per-server cache allowlist
   --cache-deny <list>   Replace per-server cache denylist
   --clear-cache-policy  Remove per-server cache policy
+  --call-timeout <ms>   Replace per-server downstream tool call timeout
+  --clear-call-timeout  Remove per-server downstream tool call timeout
   --request-body-max-bytes <n> Replace per-server inbound payload cap (0 = unlimited)
   --clear-request-body-max-bytes Remove per-server inbound payload cap
 
@@ -177,7 +180,7 @@ Config file format:
     "maxConcurrency": 20,
     "maxCacheEntries": 1000,
     "connectTimeoutMs": 30000,
-    "callTimeoutMs": 30000,
+    "callTimeoutMs": 180000,
     "reconnectPolicy": {
       "initialDelayMs": 250,
       "maxDelayMs": 10000,

@@ -27,6 +27,12 @@ export const META_TOOLS: Tool[] = [
                 type: "object",
                 description: "Arguments to pass to the tool",
               },
+              timeoutMs: {
+                type: "integer",
+                minimum: 1,
+                description:
+                  "Optional timeout in milliseconds for this downstream tool call.",
+              },
             },
             required: ["tool"],
             additionalProperties: false,
@@ -50,6 +56,12 @@ export const META_TOOLS: Tool[] = [
           description: "Target server name (optional if only one server)",
         },
         tool: { type: "string", description: "Tool name to call for each item" },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Optional timeout in milliseconds applied to each item unless the item sets timeoutMs.",
+        },
         items: {
           type: "array",
           description: "Array of argument objects, one per call",
@@ -59,6 +71,12 @@ export const META_TOOLS: Tool[] = [
               arguments: {
                 type: "object",
                 description: "Arguments for this call",
+              },
+              timeoutMs: {
+                type: "integer",
+                minimum: 1,
+                description:
+                  "Optional timeout in milliseconds for this item.",
               },
             },
             required: ["arguments"],
@@ -87,6 +105,12 @@ export const META_TOOLS: Tool[] = [
               server: { type: "string", description: "Target server name (optional)" },
               tool: { type: "string", description: "Tool name" },
               arguments: { type: "object", description: "Base arguments" },
+              timeoutMs: {
+                type: "integer",
+                minimum: 1,
+                description:
+                  "Optional timeout in milliseconds for this downstream tool call.",
+              },
               inputMapping: {
                 type: "object",
                 description:
@@ -122,11 +146,13 @@ export const META_TOOLS: Tool[] = [
           description: "Optional server name filter.",
         },
         limit: {
-          type: "number",
+          type: "integer",
+          minimum: 1,
           description: "Max results to return (default 10, max 50).",
         },
         descriptionMaxLength: {
-          type: "number",
+          type: "integer",
+          minimum: 0,
           description:
             "Max chars per tool description. 0 disables truncation for this call; omit uses the config default.",
         },
@@ -198,6 +224,11 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           description: "Arguments to pass to the tool",
         },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional timeout in milliseconds for this downstream tool call.",
+        },
         forceReconnect: {
           type: "boolean",
           description:
@@ -224,6 +255,11 @@ export const META_TOOLS: Tool[] = [
         tool: { type: "string", description: "Tool name for call/batch mode" },
         server: { type: "string", description: "Optional server hint for call/batch mode" },
         arguments: { type: "object", description: "Arguments for call mode" },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional timeout in milliseconds for call/batch mode.",
+        },
         calls: {
           type: "array",
           description: "Parallel mode calls",
@@ -233,6 +269,7 @@ export const META_TOOLS: Tool[] = [
               server: { type: "string" },
               tool: { type: "string" },
               arguments: { type: "object" },
+              timeoutMs: { type: "integer", minimum: 1 },
             },
             required: ["tool"],
             additionalProperties: false,
@@ -245,6 +282,7 @@ export const META_TOOLS: Tool[] = [
             type: "object",
             properties: {
               arguments: { type: "object" },
+              timeoutMs: { type: "integer", minimum: 1 },
             },
             required: ["arguments"],
             additionalProperties: false,
@@ -259,6 +297,7 @@ export const META_TOOLS: Tool[] = [
               server: { type: "string" },
               tool: { type: "string" },
               arguments: { type: "object" },
+              timeoutMs: { type: "integer", minimum: 1 },
               inputMapping: {
                 type: "object",
                 additionalProperties: { type: "string" },

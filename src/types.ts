@@ -15,6 +15,8 @@ export interface StdioServerConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
   maxConcurrency?: number;
+  /** Timeout in milliseconds for tool calls to this server (omit to use global callTimeoutMs) */
+  callTimeoutMs?: number;
   /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
@@ -31,6 +33,8 @@ export interface HttpServerConfig {
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
   maxConcurrency?: number;
+  /** Timeout in milliseconds for tool calls to this server (omit to use global callTimeoutMs) */
+  callTimeoutMs?: number;
   /** Max inbound request payload bytes for calls targeting this server (0 = unlimited, omit to use global) */
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
@@ -82,14 +86,14 @@ export interface ResponseShieldConfig {
   denyTools?: string[];
 }
 
-export interface BearerAuthTokenHashConfig {
+interface BearerAuthTokenHashConfig {
   /** Stable token identifier for audit/logging */
   id: string;
   /** Scrypt hash of bearer token */
   hash: string;
 }
 
-export interface BearerAuthTokenHashRefConfig {
+interface BearerAuthTokenHashRefConfig {
   /** Stable token identifier for audit/logging */
   id: string;
   /** Secret reference for scrypt hash (`env:NAME` or `file:/path`) */
@@ -103,7 +107,7 @@ export interface BearerAuthTokenPlaintextConfig {
   token: string;
 }
 
-export interface BearerAuthTokenPlaintextRefConfig {
+interface BearerAuthTokenPlaintextRefConfig {
   /** Stable token identifier for audit/logging */
   id: string;
   /** Secret reference for plaintext token (`env:NAME` or `file:/path`) */
@@ -274,6 +278,8 @@ export interface ToolCallContext {
   forceReconnect?: boolean;
   /** Retry once after reconnect when a safe/read-only call hits retryable transport failure */
   retryOnReconnect?: boolean;
+  /** Override the configured downstream tool call timeout for this call */
+  timeoutMs?: number;
 }
 
 export interface ListenerRuntimeDiagnostics {
@@ -330,9 +336,10 @@ export interface ParallelCall {
   server?: string;
   tool: string;
   arguments?: Record<string, unknown>;
+  timeoutMs?: number;
 }
 
-export interface ParallelResult {
+interface ParallelResult {
   results: Array<{
     call: ParallelCall;
     /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
@@ -345,9 +352,10 @@ export interface ParallelResult {
 
 export interface BatchItem {
   arguments: Record<string, unknown>;
+  timeoutMs?: number;
 }
 
-export interface BatchResult {
+interface BatchResult {
   results: Array<{
     index: number;
     /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
@@ -364,6 +372,7 @@ export interface PipelineStep {
   server?: string;
   tool: string;
   arguments?: Record<string, unknown>;
+  timeoutMs?: number;
   /** jq-style path to extract from previous result and merge into arguments */
   inputMapping?: Record<string, string>;
 }
@@ -376,12 +385,13 @@ export interface RecipeConfig {
   server?: string;
   tool?: string;
   arguments?: Record<string, unknown>;
+  timeoutMs?: number;
   calls?: ParallelCall[];
   items?: BatchItem[];
   steps?: PipelineStep[];
 }
 
-export interface PipelineResult {
+interface PipelineResult {
   steps: Array<{
     step: number;
     tool: string;

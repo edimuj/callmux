@@ -11,6 +11,7 @@ import { errorResult } from "./results.js";
 
 const BRIDGE_CWD_HEADER = "x-callmux-cwd";
 const BRIDGE_CLIENT_HEADER = "x-callmux-client";
+const META_TOOL_TIMEOUT_OVERHEAD_MS = 5_000;
 
 interface BridgeOptions {
   url: string;
@@ -63,7 +64,11 @@ export class CallmuxBridge {
             arguments: request.params.arguments,
           },
           undefined,
-          this.callOptions()
+          deriveBridgeCallOptions(
+            request.params.name,
+            request.params.arguments,
+            this.options.callTimeoutMs
+          )
         )) as unknown as CallToolResult;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -189,11 +194,85 @@ export class CallmuxBridge {
     await transport?.close?.().catch(() => undefined);
   }
 
-  private callOptions(): { timeout: number } | undefined {
-    return this.options.callTimeoutMs && this.options.callTimeoutMs > 0
-      ? { timeout: this.options.callTimeoutMs }
-      : undefined;
+}
+
+export function deriveBridgeCallOptions(
+  toolName: string,
+  args: unknown,
+  configuredTimeoutMs?: number
+): { timeout: number } | undefined {
+  const configured = positiveTimeoutMs(configuredTimeoutMs);
+  const metaTimeout = derivedMetaToolRequestTimeoutMs(toolName, args, configured);
+  const timeout = maxDefined(configured, metaTimeout);
+  return timeout === undefined ? undefined : { timeout };
+}
+
+function derivedMetaToolRequestTimeoutMs(
+  toolName: string,
+  args: unknown,
+  defaultChildTimeoutMs: number | undefined
+): number | undefined {
+  if (!isRecord(args)) return undefined;
+
+  if (toolName === "callmux_call") {
+    return addTimeoutOverhead(positiveTimeoutMs(args.timeoutMs) ?? defaultChildTimeoutMs);
   }
+
+  if (toolName === "callmux_parallel" && Array.isArray(args.calls)) {
+    const childTimeouts = args.calls
+      .filter(isRecord)
+      .map((call) => positiveTimeoutMs(call.timeoutMs) ?? defaultChildTimeoutMs);
+    return addTimeoutOverhead(maxDefined(...childTimeouts));
+  }
+
+  if (toolName === "callmux_batch" && Array.isArray(args.items)) {
+    const batchTimeout = positiveTimeoutMs(args.timeoutMs) ?? defaultChildTimeoutMs;
+    const totalChildTimeout = args.items
+      .filter(isRecord)
+      .map((item) => positiveTimeoutMs(item.timeoutMs) ?? batchTimeout)
+      .reduce<number | undefined>((total, timeout) => {
+        if (timeout === undefined) return total;
+        return (total ?? 0) + timeout;
+      }, undefined);
+    return addTimeoutOverhead(totalChildTimeout);
+  }
+
+  if (toolName === "callmux_pipeline" && Array.isArray(args.steps)) {
+    const totalChildTimeout = args.steps
+      .filter(isRecord)
+      .map((step) => positiveTimeoutMs(step.timeoutMs) ?? defaultChildTimeoutMs)
+      .reduce<number | undefined>((total, timeout) => {
+        if (timeout === undefined) return total;
+        return (total ?? 0) + timeout;
+      }, undefined);
+    return addTimeoutOverhead(totalChildTimeout);
+  }
+
+  return undefined;
+}
+
+function positiveTimeoutMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function maxDefined(...values: Array<number | undefined>): number | undefined {
+  let max: number | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    max = max === undefined ? value : Math.max(max, value);
+  }
+  return max;
+}
+
+function addTimeoutOverhead(timeoutMs: number | undefined): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, timeoutMs + META_TOOL_TIMEOUT_OVERHEAD_MS);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isReconnectableBridgeError(error: unknown): boolean {

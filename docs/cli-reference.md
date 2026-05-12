@@ -42,7 +42,7 @@ Single-server mode flags (used with `callmux -- <server-command>`):
 | `--cache-deny <list>` | Non-cacheable tool patterns |
 | `--concurrency <n>` | Max parallel calls (default: 20) |
 | `--connect-timeout <ms>` | Startup connect/list-tools timeout |
-| `--call-timeout <ms>` | Downstream tool call timeout |
+| `--call-timeout <ms>` | Downstream tool call timeout (default: `180000`) |
 | `--request-body-max-bytes <n>` | Max inbound request payload bytes (0 = unlimited) |
 | `--allow-request-body-override` | Allow `x-callmux-max-body-bytes` per-request override |
 | `--allow-insecure-remote-listener` | Allow remote listener startup without auth (unsafe) |
@@ -74,6 +74,8 @@ callmux server add github -- npx -y @modelcontextprotocol/server-github
 ```
 
 Without `--tools`, callmux probes the server and lets you pick which tools to expose interactively.
+
+Use `--call-timeout <ms>` on `server add` or `server set` to override the global tool-call timeout for that server.
 
 ### Filter Tools on an Existing Server
 

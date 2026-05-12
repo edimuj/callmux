@@ -62,6 +62,7 @@ import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js"
 import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
 import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
+import { deriveBridgeCallOptions } from "./bridge.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -950,6 +951,8 @@ test("parseServerDefinitionArgs parses server add options", () => {
     "get_*,list_*",
     "--cache-deny",
     "get_secret",
+    "--call-timeout",
+    "60000",
     "--request-body-max-bytes",
     "2048",
     "--",
@@ -968,6 +971,7 @@ test("parseServerDefinitionArgs parses server add options", () => {
       allowTools: ["get_*", "list_*"],
       denyTools: ["get_secret"],
     },
+    callTimeoutMs: 60000,
     requestBodyMaxBytes: 2048,
   });
 });
@@ -997,6 +1001,8 @@ test("parseServerMutationArgs parses server set options and command replacement"
     "get_*,list_*",
     "--cache-deny",
     "get_secret",
+    "--call-timeout",
+    "70000",
     "--request-body-max-bytes",
     "4096",
     "--",
@@ -1012,6 +1018,7 @@ test("parseServerMutationArgs parses server set options and command replacement"
     cwd: "/tmp/project",
     cacheAllowTools: ["get_*", "list_*"],
     cacheDenyTools: ["get_secret"],
+    callTimeoutMs: 70000,
     requestBodyMaxBytes: 4096,
     command: "uvx",
     args: ["server-github"],
@@ -1027,6 +1034,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
       cwd: "/tmp/old",
       tools: ["get_issue", "create_issue"],
       cachePolicy: { allowTools: ["get_*"], denyTools: ["create_*"] },
+      callTimeoutMs: 50000,
       requestBodyMaxBytes: 1024,
     },
     {
@@ -1039,6 +1047,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
       cwd: "/tmp/new",
       cacheAllowTools: [],
       cacheDenyTools: ["create_*", "delete_*"],
+      callTimeoutMs: 80000,
       requestBodyMaxBytes: 2048,
     }
   );
@@ -1055,6 +1064,7 @@ test("applyServerMutation updates tools env cwd and cache policy without leaking
     cachePolicy: {
       denyTools: ["create_*", "delete_*"],
     },
+    callTimeoutMs: 80000,
     requestBodyMaxBytes: 2048,
   });
 });
@@ -1066,6 +1076,7 @@ test("serializeServers redacts env values and preserves cache policy", () => {
     args: ["server.js"],
     env: { B_TOKEN: "b", A_TOKEN: "a" },
     cachePolicy: { allowTools: ["get_*"] },
+    callTimeoutMs: 90000,
     requestBodyMaxBytes: 2048,
   };
 
@@ -1076,6 +1087,7 @@ test("serializeServers redacts env values and preserves cache policy", () => {
       args: ["server.js"],
       envKeys: ["A_TOKEN", "B_TOKEN"],
       cachePolicy: { allowTools: ["get_*"] },
+      callTimeoutMs: 90000,
       requestBodyMaxBytes: 2048,
     },
   ]);
@@ -1089,6 +1101,7 @@ test("formatServerList redacts env values and shows key metadata", () => {
     env: { GITHUB_TOKEN: "secret" },
     tools: ["get_issue"],
     cachePolicy: { allowTools: ["get_*"] },
+    callTimeoutMs: 90000,
     requestBodyMaxBytes: 2048,
   };
 
@@ -1098,6 +1111,7 @@ test("formatServerList redacts env values and shows key metadata", () => {
   assert.match(output, /command: npx -y @modelcontextprotocol\/server-github/);
   assert.match(output, /tools: get_issue/);
   assert.match(output, /env keys: GITHUB_TOKEN/);
+  assert.match(output, /call timeout ms: 90000/);
   assert.match(output, /request body max bytes: 2048/);
   assert.doesNotMatch(output, /secret/);
 });
@@ -2465,6 +2479,65 @@ test("UpstreamManager call timeout returns a structured tool error", async () =>
   assert.equal(structured.error.details?.category, "timeout");
   assert.equal(structured.error.details?.retryable, true);
   assert.match(String(structured.error.details?.rootCause ?? ""), /timed out after 5ms/i);
+});
+
+test("UpstreamManager defaults tool calls to 180s timeout", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+  let observedTimeout: number | undefined;
+
+  upstream.clients = new Map([
+    ["github", {
+      async callTool(_params: unknown, _schema?: unknown, options?: { timeout?: number }) {
+        observedTimeout = options?.timeout;
+        return textResult("ok");
+      },
+    }],
+  ]);
+  upstream.toolMap = new Map([
+    ["get_issue", { server: "github", tool: { name: "get_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["get_issue"])]]);
+
+  await upstream.callTool("get_issue", { id: 1 });
+
+  assert.equal(observedTimeout, 180_000);
+});
+
+test("UpstreamManager applies server and per-call timeout overrides", async () => {
+  const upstream = new UpstreamManager(180_000) as unknown as {
+    clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
+    serverConfigs: Map<string, ServerConfig>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string, context?: { timeoutMs?: number }) => Promise<CallToolResult>;
+  };
+  const observedTimeouts: Array<number | undefined> = [];
+
+  upstream.clients = new Map([
+    ["github", {
+      async callTool(_params: unknown, _schema?: unknown, options?: { timeout?: number }) {
+        observedTimeouts.push(options?.timeout);
+        return textResult("ok");
+      },
+    }],
+  ]);
+  upstream.serverConfigs = new Map([
+    ["github", { command: "node", callTimeoutMs: 60_000 }],
+  ]);
+  upstream.toolMap = new Map([
+    ["get_issue", { server: "github", tool: { name: "get_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["get_issue"])]]);
+
+  await upstream.callTool("get_issue", { id: 1 }, "github");
+  await upstream.callTool("get_issue", { id: 2 }, "github", { timeoutMs: 5_000 });
+
+  assert.deepEqual(observedTimeouts, [60_000, 5_000]);
 });
 
 test("UpstreamManager enforces hard call timeout when client ignores SDK timeout", async () => {
@@ -4528,7 +4601,7 @@ test("loadConfig parses startup timeout settings from file", async () => {
     await writeFile(
       configPath,
       JSON.stringify({
-        servers: { github: { command: "node", args: ["server.js"] } },
+        servers: { github: { command: "node", args: ["server.js"], callTimeoutMs: 3000 } },
         connectTimeoutMs: 1000,
         callTimeoutMs: 2000,
         sessionCwdIdleTtlSeconds: 300,
@@ -4539,6 +4612,7 @@ test("loadConfig parses startup timeout settings from file", async () => {
     const config = await loadConfig(configPath);
     assert.equal(config.connectTimeoutMs, 1000);
     assert.equal(config.callTimeoutMs, 2000);
+    assert.equal((config.servers.github as StdioServerConfig).callTimeoutMs, 3000);
     assert.equal(config.sessionCwdIdleTtlSeconds, 300);
     assert.equal(config.strictStartup, true);
   } finally {
@@ -5356,6 +5430,116 @@ test("pipeline inputMapping on first step is ignored", async () => {
 
   assert.equal(capturedArgs.id, 1);
   assert.equal(capturedArgs.data, undefined);
+});
+
+test("meta tools pass timeoutMs overrides to upstream calls", async () => {
+  const observed: Array<number | undefined> = [];
+  const upstream = {
+    resolveServer() {
+      return { server: "github", actualName: "get_issue" };
+    },
+    getServerConcurrency() {
+      return undefined;
+    },
+    getServerNames() {
+      return ["github"];
+    },
+    getServerTools() {
+      return ["get_issue"];
+    },
+    async prepareToolCall(tool: string, args?: Record<string, unknown>, server?: string) {
+      return {
+        server: server ?? "github",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+    async callTool(
+      _tool: string,
+      _args?: Record<string, unknown>,
+      _server?: string,
+      context?: { timeoutMs?: number }
+    ) {
+      observed.push(context?.timeoutMs);
+      return textResult("ok");
+    },
+  };
+  const cache = new CallCache(0);
+
+  await handleCall(upstream as never, cache, {
+    server: "github",
+    tool: "get_issue",
+    arguments: { id: 1 },
+    timeoutMs: 1_000,
+  });
+  await handleParallel(upstream as never, cache, {
+    calls: [{ server: "github", tool: "get_issue", arguments: { id: 2 }, timeoutMs: 2_000 }],
+  }, 1);
+  await handleBatch(upstream as never, cache, {
+    server: "github",
+    tool: "get_issue",
+    timeoutMs: 3_000,
+    items: [
+      { arguments: { id: 3 } },
+      { arguments: { id: 4 }, timeoutMs: 4_000 },
+    ],
+  }, 1);
+  await handlePipeline(upstream as never, cache, {
+    steps: [{ server: "github", tool: "get_issue", arguments: { id: 5 }, timeoutMs: 5_000 }],
+  });
+
+  assert.deepEqual(observed, [1_000, 2_000, 3_000, 4_000, 5_000]);
+});
+
+test("stdio bridge derives meta-call request timeout from child timeouts", () => {
+  assert.deepEqual(
+    deriveBridgeCallOptions(
+      "callmux_parallel",
+      {
+        calls: [
+          { tool: "short", timeoutMs: 1_000 },
+          { tool: "long", timeoutMs: 300_000 },
+        ],
+      },
+      180_000
+    ),
+    { timeout: 305_000 }
+  );
+
+  assert.deepEqual(
+    deriveBridgeCallOptions(
+      "callmux_batch",
+      {
+        tool: "get_issue",
+        timeoutMs: 10_000,
+        items: [
+          { arguments: { id: 1 } },
+          { arguments: { id: 2 }, timeoutMs: 20_000 },
+        ],
+      },
+      5_000
+    ),
+    { timeout: 35_000 }
+  );
+
+  assert.deepEqual(
+    deriveBridgeCallOptions(
+      "callmux_pipeline",
+      {
+        steps: [
+          { tool: "search", timeoutMs: 30_000 },
+          { tool: "read" },
+        ],
+      },
+      60_000
+    ),
+    { timeout: 95_000 }
+  );
+
+  assert.deepEqual(
+    deriveBridgeCallOptions("get_issue", { id: 1 }, 180_000),
+    { timeout: 180_000 }
+  );
 });
 
 // ─── Pipeline error mid-chain tests ──────────────────────────

@@ -80,7 +80,7 @@ export class CallmuxProxy {
   }
 
   constructor(private config: CallmuxConfig) {
-    this.upstream = new UpstreamManager(config.callTimeoutMs ?? 30_000);
+    this.upstream = new UpstreamManager(config.callTimeoutMs ?? 180_000);
     this.cache = new CallCache(
       config.cacheTtlSeconds ?? 0,
       config.cachePolicy,

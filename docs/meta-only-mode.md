@@ -77,7 +77,7 @@ This is useful for browsing the whole exposed surface. Use `descriptionMaxLength
 Single tool call:
 ```json
 // callmux_call
-{ "tool": "get_issue", "server": "github", "arguments": { "number": 42 } }
+{ "tool": "get_issue", "server": "github", "arguments": { "number": 42 }, "timeoutMs": 300000 }
 ```
 
 Parallel calls:
@@ -85,11 +85,13 @@ Parallel calls:
 // callmux_parallel
 {
   "calls": [
-    { "tool": "get_issue", "server": "github", "arguments": { "number": 1 } },
+    { "tool": "get_issue", "server": "github", "arguments": { "number": 1 }, "timeoutMs": 300000 },
     { "tool": "get_issue", "server": "github", "arguments": { "number": 2 } }
   ]
 }
 ```
+
+`timeoutMs` is optional. When set on a meta-tool call, it overrides the server/global timeout for that downstream call.
 
 If a downstream response is too large, callmux returns a `_callmux.ref` with a compact preview. Page through the full stored result with:
 

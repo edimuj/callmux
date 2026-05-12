@@ -33,7 +33,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `cachePolicy` | object | - | Global cache allow/deny rules (see [Caching](#caching)) |
 | `maxConcurrency` | integer | `20` | Global max concurrent calls for parallel/batch |
 | `connectTimeoutMs` | integer | `30000` | Timeout for downstream startup connect + list-tools |
-| `callTimeoutMs` | integer | `30000` | Timeout for downstream tool calls |
+| `callTimeoutMs` | integer | `180000` | Timeout for downstream tool calls |
 | `reconnectPolicy` | object | retry forever | Downstream reconnect/backoff policy (see [Resilience](#resilience)) |
 | `sessionCwdIdleTtlSeconds` | integer | `600` | Idle TTL for listener-mode session-cwd stdio clients (`0` = close after each call) |
 | `requestBodyMaxBytes` | integer | `1048576` | Global max inbound request payload bytes (`0` = unlimited) |
@@ -51,6 +51,8 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `descriptionMaxLength` | integer | - | Default max chars for tool descriptions in `callmux_status` |
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
 
+Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
+
 ---
 
 ## Stdio Server Config
@@ -66,6 +68,7 @@ Local process servers use `command` to launch:
 | `cwdMode` | `"global"` or `"session"` | - | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
 | `maxConcurrency` | integer | - | Max concurrent calls to this server |
+| `callTimeoutMs` | integer | - | Timeout for tool calls to this server (omit = global) |
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | - | Per-server cache allow/deny rules |
 | `responseShield` | object | - | Per-server response shielding overrides |
@@ -83,6 +86,7 @@ Remote servers use `url` instead of `command`:
 | `headers` | object | - | HTTP headers (e.g. authorization) |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
 | `maxConcurrency` | integer | - | Max concurrent calls to this server |
+| `callTimeoutMs` | integer | - | Timeout for tool calls to this server (omit = global) |
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | - | Per-server cache allow/deny rules |
 | `responseShield` | object | - | Per-server response shielding overrides |
@@ -363,7 +367,7 @@ The `server` field in meta-tool calls lets you target specific servers:
   "cachePolicy": { "denyTools": ["create_*"] },
   "maxConcurrency": 20,
   "connectTimeoutMs": 30000,
-  "callTimeoutMs": 30000,
+  "callTimeoutMs": 180000,
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80,

@@ -589,6 +589,9 @@ function parseRecipeConfig(
     value.server === undefined
       ? undefined
       : parseNonEmptyString(value.server, `${optionName}.server`);
+  const timeoutMs = value.timeoutMs === undefined
+    ? undefined
+    : parsePositiveInteger(value.timeoutMs, `${optionName}.timeoutMs`);
 
   if (mode === "call") {
     const tool = parseNonEmptyString(value.tool, `${optionName}.tool`);
@@ -599,6 +602,7 @@ function parseRecipeConfig(
       ...(server ? { server } : {}),
       tool,
       ...(args ? { arguments: args } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     };
   }
 
@@ -619,10 +623,19 @@ function parseRecipeConfig(
         call.arguments,
         `${optionName}.calls[${index}].arguments`
       );
+      const callTimeoutMs = call.timeoutMs === undefined
+        ? undefined
+        : parsePositiveInteger(
+            call.timeoutMs,
+            `${optionName}.calls[${index}].timeoutMs`
+          );
       return {
         tool,
         ...(callServer ? { server: callServer } : {}),
         ...(args ? { arguments: args } : {}),
+        ...((callTimeoutMs ?? timeoutMs) !== undefined
+          ? { timeoutMs: callTimeoutMs ?? timeoutMs }
+          : {}),
       };
     });
     return {
@@ -648,13 +661,23 @@ function parseRecipeConfig(
       if (!args) {
         throw new Error(`${optionName}.items[${index}].arguments must be an object`);
       }
-      return { arguments: args };
+      const itemTimeoutMs = item.timeoutMs === undefined
+        ? undefined
+        : parsePositiveInteger(
+            item.timeoutMs,
+            `${optionName}.items[${index}].timeoutMs`
+          );
+      return {
+        arguments: args,
+        ...(itemTimeoutMs !== undefined ? { timeoutMs: itemTimeoutMs } : {}),
+      };
     });
     return {
       ...(description ? { description } : {}),
       mode,
       ...(server ? { server } : {}),
       tool,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       items,
     };
   }
@@ -678,6 +701,12 @@ function parseRecipeConfig(
       step.arguments,
       `${optionName}.steps[${index}].arguments`
     );
+    const stepTimeoutMs = step.timeoutMs === undefined
+      ? undefined
+      : parsePositiveInteger(
+          step.timeoutMs,
+          `${optionName}.steps[${index}].timeoutMs`
+        );
     let inputMapping: Record<string, string> | undefined;
     if (step.inputMapping !== undefined) {
       if (!isRecord(step.inputMapping)) {
@@ -693,6 +722,9 @@ function parseRecipeConfig(
       tool,
       ...(stepServer ? { server: stepServer } : {}),
       ...(args ? { arguments: args } : {}),
+      ...((stepTimeoutMs ?? timeoutMs) !== undefined
+        ? { timeoutMs: stepTimeoutMs ?? timeoutMs }
+        : {}),
       ...(inputMapping ? { inputMapping } : {}),
     };
   });
@@ -936,6 +968,9 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   const maxConcurrency = value.maxConcurrency !== undefined
     ? parsePositiveInteger(value.maxConcurrency, `servers.${serverName}.maxConcurrency`)
     : undefined;
+  const callTimeoutMs = value.callTimeoutMs !== undefined
+    ? parsePositiveInteger(value.callTimeoutMs, `servers.${serverName}.callTimeoutMs`)
+    : undefined;
   const requestBodyMaxBytes = value.requestBodyMaxBytes !== undefined
     ? parseNonNegativeInteger(
         value.requestBodyMaxBytes,
@@ -948,6 +983,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     ...(cachePolicy ? { cachePolicy } : {}),
     ...(responseShield ? { responseShield } : {}),
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
+    ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
   };
 
