@@ -7135,7 +7135,11 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
   assert.match(html, /%2338bdf8/);
   assert.match(html, /id="hide-transport" type="checkbox" checked/);
+  assert.match(html, /id="hide-agent-status" type="checkbox" checked/);
   assert.match(html, /function isTransportHttpEvent/);
+  assert.match(html, /function isAgentStatusEvent/);
+  assert.match(html, /agent\\s\+\(ready\|idle\|busy\)/);
+  assert.match(html, /notifications\/initialized/);
   assert.match(html, /function cacheEntriesText/);
   assert.match(html, /return "disabled"/);
   assert.match(html, /function truncateText/);

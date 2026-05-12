@@ -531,7 +531,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <section id="view-events" class="view">
           <div class="toolbar">
             <h2>Recent Events</h2>
-            <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
+            <div style="display:flex;gap:12px;flex-wrap:wrap">
+              <label class="toggle"><input id="hide-agent-status" type="checkbox" checked> Hide agent status</label>
+              <label class="toggle"><input id="hide-transport" type="checkbox" checked> Hide transport HTTP</label>
+            </div>
           </div>
           <section class="panel filters">
             <div class="filter-field"><label for="event-filter-type">Type</label><select id="event-filter-type"><option value="">All</option><option value="tool_call">Tool call</option><option value="tool_call_lifecycle">Tool lifecycle</option><option value="http_request">HTTP</option><option value="tool_suite_changed">Tool suite</option><option value="config_reload">Config reload</option></select></div>
@@ -566,6 +569,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let pendingSnapshot = null;
     let selectedEventKey = null;
     let selectedServerName = null;
+    let hideAgentStatus = true;
     let hideTransportHttp = true;
     let eventFilters = { type: "", status: "", server: "", search: "" };
     let currentView = loadView();
@@ -659,6 +663,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       return statusText(event, ok);
     }
     function eventMatchesFilters(event) {
+      if (hideAgentStatus && isAgentStatusEvent(event)) return false;
       if (hideTransportHttp && isTransportHttpEvent(event)) return false;
       if (eventFilters.type && event.type !== eventFilters.type) return false;
       if (eventFilters.status && eventStatus(event) !== eventFilters.status.replace(/_/g, " ")) return false;
@@ -699,6 +704,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function isTransportHttpEvent(event) {
       return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
+    }
+    function isAgentStatusEvent(event) {
+      const text = [event.type, targetText(event), detailText(event), event.error, event.jsonRpcMethod, event.jsonRpcTool]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (/\\bagent\\s+(ready|idle|busy)\\b/.test(text)) return true;
+      return event.type === "http_request" &&
+        Number(event.status ?? 0) < 400 &&
+        !event.jsonRpcTool &&
+        ["initialize", "notifications/initialized", "tools/list"].includes(event.jsonRpcMethod);
     }
     function detailItem(label, value) {
       return "<div class=\\"detail-item\\"><div class=\\"detail-label\\">" + esc(label) + "</div><div class=\\"detail-value\\">" + esc(value ?? "") + "</div></div>";
@@ -1002,6 +1018,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     });
     document.getElementById("hide-transport").addEventListener("change", event => {
       hideTransportHttp = event.target.checked;
+      if (snapshot) render(snapshot);
+    });
+    document.getElementById("hide-agent-status").addEventListener("change", event => {
+      hideAgentStatus = event.target.checked;
       if (snapshot) render(snapshot);
     });
     document.getElementById("event-filter-type").addEventListener("change", event => {
