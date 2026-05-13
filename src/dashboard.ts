@@ -33,7 +33,7 @@ type RuntimeEvent =
     }
   | {
       type: "tool_call_lifecycle";
-      lifecycle: "started" | "client_aborted";
+      lifecycle: "client_aborted" | "timeout_overrun";
       timestamp: string;
       requestId: string;
       sessionId?: string;
@@ -44,8 +44,10 @@ type RuntimeEvent =
       operation?: string;
       downstreamTargets?: DashboardDownstreamTarget[];
       durationMs: number;
-      status: "in_flight" | "client_aborted";
+      timeoutMs?: number;
+      status: "client_aborted" | "error";
       success: boolean;
+      error?: string;
     }
   | {
       type: "tool_call";
@@ -216,7 +218,7 @@ export function classifyDashboardToolStatus(
 
 function isDashboardRuntimeError(event: RuntimeEvent): boolean {
   if (event.type === "http_request") return event.status >= 400;
-  if (event.type === "tool_call_lifecycle") return event.status === "client_aborted";
+  if (event.type === "tool_call_lifecycle") return event.success === false;
   if (event.type === "tool_call") {
     return event.status === "error" || (event.status === undefined && !event.success);
   }
@@ -638,7 +640,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function detailText(event) {
       if (event.error) return event.error;
-      if (event.type === "tool_call_lifecycle") return event.lifecycle === "client_aborted" ? "client disconnected before completion" : "waiting for completion";
+      if (event.type === "tool_call_lifecycle") return event.lifecycle === "client_aborted" ? "client disconnected before completion" : "call exceeded timeout while still in flight";
       if (event.status === "error" || event.success === false) return "error";
       if (event.status === "downstream_error") return "downstream error";
       if (event.type === "tool_call" && event.toolKind === "callmux_meta") {

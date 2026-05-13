@@ -7428,6 +7428,7 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /function activeToolCallRows/);
   assert.match(html, /tool_call_lifecycle/);
   assert.match(html, /client_aborted/);
+  assert.match(html, /call exceeded timeout/);
   assert.match(html, /Meta calls \/ downstream/);
   assert.match(html, /Total downstream/);
   assert.doesNotMatch(html, /Live proxy activity/);
@@ -9599,13 +9600,7 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
       server?: string;
       targetTool?: string;
     }>).filter((event) => event.type === "tool_call_lifecycle");
-    assert.ok(lifecycleEvents.some((event) =>
-      event.lifecycle === "started" &&
-      event.status === "in_flight" &&
-      event.server === "fake" &&
-      event.targetTool === "get_item" &&
-      typeof event.requestId === "string"
-    ));
+    assert.ok(!lifecycleEvents.some((event) => event.lifecycle === "started"));
     assert.ok(lifecycleEvents.some((event) =>
       event.lifecycle === "client_aborted" &&
       event.status === "client_aborted" &&
@@ -9622,6 +9617,101 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
   } finally {
     await listener?.close();
     await upstream.close();
+  }
+});
+
+test("listener emits timeout overrun event only for still-active tool calls", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as UpstreamManager & {
+    callTool: () => Promise<CallToolResult>;
+  };
+  const cache = new CallCache(0, undefined, {}, 100);
+  let releaseCall: ((result: CallToolResult) => void) | undefined;
+  upstream.callTool = async () => new Promise<CallToolResult>((resolve) => {
+    releaseCall = resolve;
+  });
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      callTimeoutMs: 20,
+      servers: { github: { command: "ignored" } },
+    },
+    upstream,
+    cache,
+    allTools: [{ name: "get_issue", description: "test", inputSchema: { type: "object", properties: {} } }],
+    maxConcurrency: 10,
+  });
+
+  await listener.start();
+  try {
+    const port = listenerPort(listener);
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0" },
+        },
+        id: 1,
+      }),
+    });
+    assert.equal(initRes.status, 200);
+    const sessionId = initRes.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+
+    const callPromise = fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "get_issue", arguments: { id: 1 } },
+        id: 2,
+      }),
+    });
+
+    await waitFor(async () => releaseCall !== undefined);
+    await waitFor(async () => {
+      const events = ((listener as any).runtimeEvents.list() as Array<{
+        type: string;
+        lifecycle?: string;
+        status?: string;
+        timeoutMs?: number;
+        success?: boolean;
+        error?: string;
+      }>).filter((event) => event.type === "tool_call_lifecycle");
+      return events.some((event) =>
+        event.lifecycle === "timeout_overrun" &&
+        event.status === "error" &&
+        event.timeoutMs === 20 &&
+        event.success === false &&
+        /still in flight/.test(event.error ?? "")
+      );
+    }, 2500, 20);
+
+    assert.ok(!((listener as any).runtimeEvents.list() as Array<{ lifecycle?: string }>)
+      .some((event) => event.lifecycle === "started"));
+
+    releaseCall?.(textResult("late ok"));
+    const callRes = await callPromise;
+    assert.equal(callRes.status, 200);
+    const callBody = await parseMcpResponseBody(callRes);
+    assert.equal(callBody.result.isError, undefined);
+    assert.ok(((listener as any).runtimeEvents.list() as Array<{ type: string; tool?: string }>)
+      .some((event) => event.type === "tool_call" && event.tool === "get_issue"));
+  } finally {
+    await listener.close();
   }
 });
 

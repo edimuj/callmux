@@ -61,6 +61,8 @@ import {
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 180_000;
+const TOOL_CALL_TIMEOUT_OVERRUN_GRACE_MS = 1_000;
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
 const REQUEST_ID_HEADER = "x-request-id";
 const CWD_HEADER = "x-callmux-cwd";
@@ -136,6 +138,10 @@ interface ActiveToolCallEntry {
   startedAt: number;
   startedAtIso: string;
   status: "in_flight" | "client_aborted";
+  timeoutMs?: number;
+  timeoutOverrunAt?: string;
+  timeoutOverrunRecorded?: boolean;
+  timeoutOverrunTimer?: ReturnType<typeof setTimeout>;
   cwd?: string;
   principal?: string;
   clientAbortedAt?: string;
@@ -1011,25 +1017,31 @@ export class CallmuxListener {
       let target: ResponseShieldTarget | undefined;
       const principal = this.authzContext.getStore();
       const session = extra.sessionId ? this.sessions.get(extra.sessionId) : undefined;
-      const active = this.beginActiveToolCall(name, args, session, extra.sessionId);
+      const active = this.beginActiveToolCall(
+        name,
+        args,
+        session,
+        extra.sessionId,
+        this.toolCallTimeoutBudgetMs(name, args)
+      );
       try {
-      const authz = this.authorizeToolCall(name, args, principal);
-      if (!authz.allowed) {
-        const denied = errorResult("authorization_denied", "Authorization policy denied tool call", {
-          code: authz.code,
-          reason: authz.reason,
-          ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
-          ...(authz.tool ? { tool: authz.tool } : {}),
+        const authz = this.authorizeToolCall(name, args, principal);
+        if (!authz.allowed) {
+          const denied = errorResult("authorization_denied", "Authorization policy denied tool call", {
+            code: authz.code,
+            reason: authz.reason,
+            ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
+            ...(authz.tool ? { tool: authz.tool } : {}),
+          });
+          this.recordToolCallEvent(name, target, denied, startedAt, false, args);
+          return denied;
+        }
+        const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
+          ? await this.resolveToolCallContext(session, server, extra)
+          : this.bareToolCallContext(extra);
+        this.updateActiveToolCall(active.id, {
+          ...(toolContext.cwd ? { cwd: toolContext.cwd } : {}),
         });
-        this.recordToolCallEvent(name, target, denied, startedAt, false, args);
-        return denied;
-      }
-      const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
-        ? await this.resolveToolCallContext(session, server, extra)
-        : this.bareToolCallContext(extra);
-      this.updateActiveToolCall(active.id, {
-        ...(toolContext.cwd ? { cwd: toolContext.cwd } : {}),
-      });
 
       let result: CallToolResult;
       switch (name) {
@@ -1196,11 +1208,91 @@ export class CallmuxListener {
     );
   }
 
+  private toolCallTimeoutBudgetMs(tool: string, args: unknown): number | undefined {
+    const downstreamTimeout = (targetTool: unknown, server: unknown, override?: unknown) => {
+      const explicit = positiveTimeoutMs(override);
+      if (explicit !== undefined) return explicit;
+      if (typeof targetTool !== "string") return this.defaultToolCallTimeoutMs();
+
+      const serverHint = typeof server === "string" ? server : undefined;
+      const resolved = this.options.upstream.resolveServer(targetTool, serverHint);
+      const resolvedServer = resolved && !("error" in resolved) ? resolved.server : serverHint;
+      if (resolvedServer) {
+        const serverConfig = this.options.config.servers[resolvedServer];
+        if (serverConfig?.callTimeoutMs !== undefined) return serverConfig.callTimeoutMs;
+      }
+      return this.defaultToolCallTimeoutMs();
+    };
+
+    if (tool === "callmux_call") {
+      if (!isRecord(args) || isCallmuxGetResultCall(args)) return undefined;
+      return downstreamTimeout(args.tool, args.server, args.timeoutMs);
+    }
+
+    if (tool === "callmux_parallel") {
+      if (!isRecord(args) || !Array.isArray(args.calls)) return undefined;
+      return maxDefined(
+        ...args.calls
+          .filter(isRecord)
+          .map((call) => downstreamTimeout(call.tool, call.server, call.timeoutMs))
+      );
+    }
+
+    if (tool === "callmux_batch") {
+      if (!isRecord(args) || !Array.isArray(args.items)) return undefined;
+      const batchTimeout = downstreamTimeout(args.tool, args.server, args.timeoutMs);
+      return sumDefined(
+        ...args.items
+          .filter(isRecord)
+          .map((item) => positiveTimeoutMs(item.timeoutMs) ?? batchTimeout)
+      );
+    }
+
+    if (tool === "callmux_pipeline") {
+      if (!isRecord(args) || !Array.isArray(args.steps)) return undefined;
+      return sumDefined(
+        ...args.steps
+          .filter(isRecord)
+          .map((step) => downstreamTimeout(step.tool, step.server, step.timeoutMs))
+      );
+    }
+
+    if (tool === "callmux_recipe_run") {
+      const expanded = expandRecipeInvocation(this.options.config.recipes, args);
+      if (isRecord(expanded) && isRecord(expanded.args)) {
+        const mode = expanded.args.mode;
+        if (mode === "call") return this.toolCallTimeoutBudgetMs("callmux_call", expanded.args);
+        if (mode === "parallel") return this.toolCallTimeoutBudgetMs("callmux_parallel", expanded.args);
+        if (mode === "batch") return this.toolCallTimeoutBudgetMs("callmux_batch", expanded.args);
+        if (mode === "pipeline") return this.toolCallTimeoutBudgetMs("callmux_pipeline", expanded.args);
+      }
+      return undefined;
+    }
+
+    if (
+      tool === "callmux_status" ||
+      tool === "callmux_search_tools" ||
+      tool === "callmux_get_result" ||
+      tool === "callmux_cache_clear" ||
+      tool === "callmux_dry_run" ||
+      tool === "callmux_recipe_dry_run"
+    ) {
+      return undefined;
+    }
+
+    return downstreamTimeout(tool, undefined);
+  }
+
+  private defaultToolCallTimeoutMs(): number {
+    return this.options.config.callTimeoutMs ?? DEFAULT_TOOL_CALL_TIMEOUT_MS;
+  }
+
   private beginActiveToolCall(
     tool: string,
     args: unknown,
     session: SessionEntry | undefined,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    timeoutMs: number | undefined
   ): ActiveToolCallEntry {
     const context = this.requestContext.getStore();
     const principal = this.authzContext.getStore();
@@ -1222,6 +1314,7 @@ export class CallmuxListener {
       startedAt: Date.now(),
       startedAtIso: new Date().toISOString(),
       status: "in_flight",
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(session?.cwd ? { cwd: session.cwd } : {}),
       ...(principal ? { principal: `${principal.kind}:${principal.id}` } : {}),
       ...(summary.downstreamTargets.length > 0
@@ -1229,22 +1322,7 @@ export class CallmuxListener {
         : {}),
     };
     this.activeToolCalls.set(entry.id, entry);
-    this.runtimeEvents.append({
-      type: "tool_call_lifecycle",
-      lifecycle: "started",
-      timestamp: entry.startedAtIso,
-      requestId: entry.requestId,
-      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
-      tool: entry.tool,
-      ...(entry.server ? { server: entry.server } : {}),
-      ...(entry.targetTool ? { targetTool: entry.targetTool } : {}),
-      ...(entry.toolKind ? { toolKind: entry.toolKind } : {}),
-      ...(entry.operation ? { operation: entry.operation } : {}),
-      ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
-      durationMs: 0,
-      status: "in_flight",
-      success: true,
-    });
+    this.scheduleActiveToolCallTimeoutOverrun(entry.id);
     return entry;
   }
 
@@ -1255,7 +1333,60 @@ export class CallmuxListener {
   }
 
   private completeActiveToolCall(id: string): void {
+    const entry = this.activeToolCalls.get(id);
+    if (entry?.timeoutOverrunTimer) clearTimeout(entry.timeoutOverrunTimer);
     this.activeToolCalls.delete(id);
+  }
+
+  private scheduleActiveToolCallTimeoutOverrun(id: string): void {
+    const entry = this.activeToolCalls.get(id);
+    if (!entry?.timeoutMs) return;
+
+    const delay = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      entry.timeoutMs + TOOL_CALL_TIMEOUT_OVERRUN_GRACE_MS
+    );
+    entry.timeoutOverrunTimer = setTimeout(() => {
+      this.recordActiveToolCallTimeoutOverrun(id);
+    }, delay);
+    entry.timeoutOverrunTimer.unref?.();
+  }
+
+  private recordActiveToolCallTimeoutOverrun(id: string): void {
+    const entry = this.activeToolCalls.get(id);
+    if (
+      !entry ||
+      entry.status !== "in_flight" ||
+      entry.timeoutOverrunRecorded ||
+      entry.timeoutMs === undefined
+    ) {
+      return;
+    }
+
+    const durationMs = Date.now() - entry.startedAt;
+    if (durationMs < entry.timeoutMs) return;
+
+    const overrunAt = new Date().toISOString();
+    entry.timeoutOverrunAt = overrunAt;
+    entry.timeoutOverrunRecorded = true;
+    this.runtimeEvents.append({
+      type: "tool_call_lifecycle",
+      lifecycle: "timeout_overrun",
+      timestamp: overrunAt,
+      requestId: entry.requestId,
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      tool: entry.tool,
+      ...(entry.server ? { server: entry.server } : {}),
+      ...(entry.targetTool ? { targetTool: entry.targetTool } : {}),
+      ...(entry.toolKind ? { toolKind: entry.toolKind } : {}),
+      ...(entry.operation ? { operation: entry.operation } : {}),
+      ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
+      durationMs,
+      timeoutMs: entry.timeoutMs,
+      status: "error",
+      success: false,
+      error: `tool call exceeded ${entry.timeoutMs}ms timeout and is still in flight`,
+    });
   }
 
   private markActiveToolCallsForRequestAborted(requestId: string): void {
@@ -1264,6 +1395,7 @@ export class CallmuxListener {
       if (entry.requestId !== requestId || entry.status === "client_aborted") continue;
       entry.status = "client_aborted";
       entry.clientAbortedAt = abortedAt;
+      if (entry.timeoutOverrunTimer) clearTimeout(entry.timeoutOverrunTimer);
       this.runtimeEvents.append({
         type: "tool_call_lifecycle",
         lifecycle: "client_aborted",
@@ -1277,6 +1409,7 @@ export class CallmuxListener {
         ...(entry.operation ? { operation: entry.operation } : {}),
         ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
         durationMs: Date.now() - entry.startedAt,
+        ...(entry.timeoutMs !== undefined ? { timeoutMs: entry.timeoutMs } : {}),
         status: "client_aborted",
         success: false,
       });
@@ -1297,9 +1430,11 @@ export class CallmuxListener {
         startedAt: entry.startedAtIso,
         durationMs: Date.now() - entry.startedAt,
         status: entry.status,
+        ...(entry.timeoutMs !== undefined ? { timeoutMs: entry.timeoutMs } : {}),
         ...(entry.cwd ? { cwd: entry.cwd } : {}),
         ...(entry.principal ? { principal: entry.principal } : {}),
         ...(entry.clientAbortedAt ? { clientAbortedAt: entry.clientAbortedAt } : {}),
+        ...(entry.timeoutOverrunAt ? { timeoutOverrunAt: entry.timeoutOverrunAt } : {}),
         ...(entry.downstreamTargets ? { downstreamTargets: entry.downstreamTargets } : {}),
       }))
       .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
@@ -2097,6 +2232,30 @@ class InvalidRequestBodyOverrideError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function positiveTimeoutMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function maxDefined(...values: Array<number | undefined>): number | undefined {
+  let max: number | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    max = max === undefined ? value : Math.max(max, value);
+  }
+  return max;
+}
+
+function sumDefined(...values: Array<number | undefined>): number | undefined {
+  let total: number | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    total = Math.min(Number.MAX_SAFE_INTEGER, (total ?? 0) + value);
+  }
+  return total;
 }
 
 function isCallmuxGetResultCall(args: unknown): args is { arguments?: unknown } {

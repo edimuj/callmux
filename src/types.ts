@@ -301,9 +301,11 @@ export interface ListenerRuntimeDiagnostics {
     startedAt: string;
     durationMs: number;
     status: "in_flight" | "client_aborted";
+    timeoutMs?: number;
     cwd?: string;
     principal?: string;
     clientAbortedAt?: string;
+    timeoutOverrunAt?: string;
     downstreamTargets?: Array<{
       server?: string;
       tool: string;
