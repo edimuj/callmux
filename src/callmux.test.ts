@@ -6537,6 +6537,14 @@ test("unwrap preserves error info from upstream", async () => {
 
 import { CallmuxListener } from "./listener.js";
 
+function listenerPort(listener: CallmuxListener): number {
+  const address = (listener as any).httpServer?.address();
+  if (!address || typeof address === "string") {
+    throw new Error("listener is not bound to a TCP port");
+  }
+  return address.port;
+}
+
 test("listener applyRuntimeConfig updates runtime security settings", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
@@ -6870,7 +6878,7 @@ test("listener /health returns ok with session count", async () => {
   const tools: Tool[] = [{ name: "test_tool", description: "A test", inputSchema: { type: "object", properties: {} } }];
 
   const listener = new CallmuxListener({
-    port: 0, // will bind to any free port — override below
+    port: 0,
     host: "127.0.0.1",
     config: { servers: {} },
     upstream,
@@ -6879,12 +6887,9 @@ test("listener /health returns ok with session count", async () => {
     maxConcurrency: 10,
   });
 
-  // Use a random port
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -6917,11 +6922,9 @@ test("listener /ready reports degraded/down separately from /health", async () =
     allTools: [],
     maxConcurrency: 10,
   });
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const health = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(health.status, 200);
     const ready = await fetch(`http://127.0.0.1:${port}/ready`);
@@ -6975,11 +6978,9 @@ test("listener /ready reports degraded when some downstream servers are healthy"
     allTools: [],
     maxConcurrency: 10,
   });
-  const port = await getFreePort();
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const ready = await fetch(`http://127.0.0.1:${port}/ready`);
     assert.equal(ready.status, 503);
     const body = await ready.json() as {
@@ -7035,11 +7036,9 @@ test("listener dashboard is disabled by default", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/dashboard`);
     assert.equal(res.status, 404);
   } finally {
@@ -7063,11 +7062,9 @@ test("listener dashboard serves read-only runtime data when enabled", async () =
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const html = await fetch(`http://127.0.0.1:${port}/dashboard`);
     assert.equal(html.status, 200);
     assert.match(await html.text(), /callmux dashboard/);
@@ -7116,11 +7113,9 @@ test("listener dashboard supports trailing-slash reverse proxy paths", async () 
     maxConcurrency: 10,
   });
 
-  const port = await getFreePort();
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const withoutSlash = await fetch(`http://127.0.0.1:${port}/relay`);
     assert.equal(withoutSlash.status, 200);
     assert.match(await withoutSlash.text(), /dashboardEndpoint\("data"\)/);
@@ -7152,11 +7147,9 @@ test("listener dashboard supports root mount", async () => {
     maxConcurrency: 10,
   });
 
-  const port = await getFreePort();
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const html = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(html.status, 200);
     assert.ok((await html.text()).includes('const configuredPath = "/"'));
@@ -7218,11 +7211,9 @@ test("listener dashboard exposes tool suite change events", async () => {
     maxConcurrency: 10,
   });
 
-  const port = await getFreePort();
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     clients[0].onclose?.();
     await upstream.callTool("get_issue", {}, "github", { forceReconnect: true });
 
@@ -7462,7 +7453,8 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /class="filter-field search-field"/);
   assert.match(html, /<th>Duration<\/th>/);
   assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
-  assert.ok(html.includes("Number(event.status ?? 0) < 400"));
+  assert.ok(html.includes("status < 400"));
+  assert.ok(html.includes('status === 499 && (event.path === "/sse" || (event.path === "/mcp" && event.method === "GET"))'));
 });
 
 test("listener dashboard summarizes meta-tool fanout without arguments", () => {
@@ -7567,11 +7559,9 @@ test("listener dashboard uses listener authentication", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/dashboard`);
     assert.equal(unauthorized.status, 401);
 
@@ -7598,11 +7588,9 @@ test("runListenerDoctor validates streamable listener cwd diagnostics", async ()
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const report = await runListenerDoctor({
       url: `http://127.0.0.1:${port}/mcp`,
       cwd: root,
@@ -7645,11 +7633,9 @@ test("listener requires bearer auth for /health by default when auth is configur
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(unauthorized.status, 401);
 
@@ -7684,11 +7670,9 @@ test("listener accepts hashed bearer auth tokens", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(unauthorized.status, 401);
 
@@ -7736,11 +7720,9 @@ test("listener accepts valid oidc_jwt bearer tokens", async () => {
     nbf: nowSeconds - 30,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(unauthorized.status, 401);
 
@@ -7790,11 +7772,9 @@ test("listener accepts valid ES256 oidc_jwt bearer tokens", async () => {
     nbf: nowSeconds - 30,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const authorized = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -7840,11 +7820,9 @@ test("listener rejects oidc_jwt token with invalid signature", async () => {
     exp: nowSeconds + 300,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${badToken}` },
     });
@@ -7890,11 +7868,9 @@ test("listener rejects expired oidc_jwt token", async () => {
     exp: nowSeconds - 5,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${expiredToken}` },
     });
@@ -7947,11 +7923,9 @@ test("listener refreshes JWKS on kid rotation for oidc_jwt tokens", async () => 
     exp: nowSeconds + 300,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const first = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${tokenOne}` },
     });
@@ -8005,11 +7979,9 @@ test("listener throttles forced JWKS refreshes on repeated unknown kid misses", 
     exp: nowSeconds + 300,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const first = await fetch(`http://127.0.0.1:${port}/health`, {
       headers: { Authorization: `Bearer ${badToken}` },
     });
@@ -8049,11 +8021,9 @@ test("listener allows unauthenticated /health when configured", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(res.status, 200);
   } finally {
@@ -8075,11 +8045,9 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
@@ -8114,11 +8082,9 @@ test("listener /mcp returns JSON-RPC parse error for invalid JSON", async () => 
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -8160,11 +8126,9 @@ test("listener requires bearer auth for /mcp", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
@@ -8217,9 +8181,8 @@ test("listener scopes stdio downstream cwd per MCP session", async () => {
       maxConcurrency: 10,
     });
 
-    const port = 30000 + Math.floor(Math.random() * 20000);
-    (listener as any).options.port = port;
     await listener.start();
+    const port = listenerPort(listener);
 
     const mcpHeaders = {
       "Content-Type": "application/json",
@@ -8352,8 +8315,9 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
       ...tool,
       name: qualifiedName,
     }));
+    const port = await getFreePort();
     listener = new CallmuxListener({
-      port: 0,
+      port,
       host: "127.0.0.1",
       config: { servers: { fake: fakeMcpServer("fake") } },
       upstream,
@@ -8362,8 +8326,6 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
       maxConcurrency: 10,
     });
 
-    const port = 30000 + Math.floor(Math.random() * 20000);
-    (listener as any).options.port = port;
     await listener.start();
 
     bridgeTransport = new StdioClientTransport({
@@ -8475,9 +8437,8 @@ test("stdio bridge preserves per-call cwd metadata for shared listener", async (
       maxConcurrency: 10,
     });
 
-    const port = 30000 + Math.floor(Math.random() * 20000);
-    (listener as any).options.port = port;
     await listener.start();
+    const port = listenerPort(listener);
 
     bridgeTransport = new StdioClientTransport({
       command: process.execPath,
@@ -8687,11 +8648,9 @@ test("listener enforces authorization policy for direct and meta-routed tool cal
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const mcpHeaders = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
@@ -8802,9 +8761,8 @@ test("listener includes request IDs in error responses and headers", async () =>
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
   await listener.start();
+  const port = listenerPort(listener);
   try {
     const unauthorized = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
@@ -8866,9 +8824,8 @@ test("listener serves prometheus metrics endpoint and tracks request counters", 
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
   await listener.start();
+  const port = listenerPort(listener);
   try {
     const health = await fetch(`http://127.0.0.1:${port}/health`);
     assert.equal(health.status, 200);
@@ -8911,9 +8868,8 @@ test("listener can require auth for metrics endpoint", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
   await listener.start();
+  const port = listenerPort(listener);
   try {
     const unauthorized = await fetch(`http://127.0.0.1:${port}/metrics`);
     assert.equal(unauthorized.status, 401);
@@ -8948,9 +8904,8 @@ test("listener audit log redacts sensitive payload fields", async () => {
       maxConcurrency: 10,
     });
 
-    const port = 30000 + Math.floor(Math.random() * 20000);
-    (listener as any).options.port = port;
     await listener.start();
+    const port = listenerPort(listener);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method: "POST",
@@ -9010,11 +8965,9 @@ test("listener enforces global abuse rate limit", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const first = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
@@ -9057,11 +9010,9 @@ test("listener applies global abuse rate limits before authentication work", asy
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const first = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -9114,11 +9065,9 @@ test("listener enforces principal abuse rate limit independently per principal",
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const request = (token: string, id: number) =>
       fetch(`http://127.0.0.1:${port}/mcp`, {
         method: "POST",
@@ -9162,10 +9111,9 @@ test("listener enforces source IP CIDR allowlist", async () => {
     maxConcurrency: 10,
   });
 
-  const deniedPort = 30000 + Math.floor(Math.random() * 20000);
-  (deniedListener as any).options.port = deniedPort;
   await deniedListener.start();
   try {
+    const deniedPort = listenerPort(deniedListener);
     const denied = await fetch(`http://127.0.0.1:${deniedPort}/health`);
     assert.equal(denied.status, 403);
   } finally {
@@ -9187,10 +9135,9 @@ test("listener enforces source IP CIDR allowlist", async () => {
     maxConcurrency: 10,
   });
 
-  const allowedPort = 30000 + Math.floor(Math.random() * 20000);
-  (allowedListener as any).options.port = allowedPort;
   await allowedListener.start();
   try {
+    const allowedPort = listenerPort(allowedListener);
     const allowed = await fetch(`http://127.0.0.1:${allowedPort}/health`);
     assert.equal(allowed.status, 200);
   } finally {
@@ -9221,11 +9168,9 @@ test("listener enforces principal in-flight abuse limit with backpressure", asyn
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const controller = new AbortController();
     const first = await fetch(`http://127.0.0.1:${port}/sse`, {
       headers: {
@@ -9293,11 +9238,9 @@ test("listener rejects oversized /mcp payloads with 413", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const oversized = "x".repeat(1024 * 1024 + 256);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
@@ -9330,11 +9273,9 @@ test("listener allows per-request payload override when enabled", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const body = JSON.stringify({
       jsonrpc: "2.0",
       method: "tools/list",
@@ -9373,11 +9314,9 @@ test("listener rejects per-request payload override when disabled", async () => 
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -9414,11 +9353,9 @@ test("listener applies per-server payload limit for targeted tools", async () =>
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
@@ -9467,11 +9404,9 @@ test("listener applies per-server payload limit for unique unqualified callmux_c
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -9512,11 +9447,9 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const mcpHeaders = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
@@ -9596,9 +9529,8 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
       maxConcurrency: 10,
     });
 
-    const port = await getFreePort();
-    (listener as any).options.port = port;
     await listener.start();
+    const port = listenerPort(listener);
     const mcpHeaders = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
@@ -9716,11 +9648,9 @@ test("listener lets callmux_call page stored truncated results", async () => {
     maxConcurrency: 10,
   });
 
-  const port = await getFreePort();
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const mcpHeaders = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
@@ -9793,11 +9723,9 @@ test("listener SSE endpoint establishes connection", async () => {
     maxConcurrency: 10,
   });
 
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  (listener as any).options.port = port;
-
   await listener.start();
   try {
+    const port = listenerPort(listener);
     const controller = new AbortController();
     const res = await fetch(`http://127.0.0.1:${port}/sse`, {
       signal: controller.signal,

@@ -703,7 +703,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       ].join("");
     }
     function isTransportHttpEvent(event) {
-      return event.type === "http_request" && ["/mcp", "/sse", "/messages"].includes(event.path) && Number(event.status ?? 0) < 400;
+      if (event.type !== "http_request" || !["/mcp", "/sse", "/messages"].includes(event.path)) return false;
+      const status = Number(event.status ?? 0);
+      if (status < 400) return true;
+      return status === 499 && (event.path === "/sse" || (event.path === "/mcp" && event.method === "GET"));
     }
     function isAgentStatusEvent(event) {
       const text = [event.type, targetText(event), detailText(event), event.error, event.jsonRpcMethod, event.jsonRpcTool]
