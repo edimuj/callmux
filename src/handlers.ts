@@ -179,6 +179,90 @@ function contextWithCallOverrides(
   };
 }
 
+function contextWithSafeRetry(
+  cache: CallCache,
+  tool: string,
+  server: string | undefined,
+  context: ToolCallContext | undefined
+): ToolCallContext {
+  return {
+    ...(context ?? {}),
+    retryOnReconnect: cache.isSafeToRetry(tool, server),
+  };
+}
+
+const TEXT_ARGUMENT_FIELDS = new Set([
+  "body",
+  "description",
+  "comment",
+  "text",
+  "content",
+]);
+
+function suspiciousJsonMappingLiteral(value: string): boolean {
+  return value === "$json" || value.startsWith("$json.");
+}
+
+function pathFieldName(path: string): string | undefined {
+  const segment = path.split(".").at(-1);
+  if (!segment) return undefined;
+  const bracket = segment.indexOf("[");
+  return bracket === -1 ? segment : segment.slice(0, bracket);
+}
+
+function collectArgumentWarnings(
+  value: unknown,
+  path = "arguments"
+): Array<Record<string, unknown>> {
+  const warnings: Array<Record<string, unknown>> = [];
+
+  const visit = (current: unknown, currentPath: string) => {
+    if (typeof current === "string") {
+      if (suspiciousJsonMappingLiteral(current)) {
+        warnings.push({
+          code: "literal_json_mapping",
+          path: currentPath,
+          message:
+            "`$json` is a pipeline inputMapping expression, not a downstream argument file reference.",
+          recommendation:
+            "Move `$json`/`$json.path` to a pipeline inputMapping entry, or use `$file`/`$text` for literal string fields.",
+        });
+      }
+      return;
+    }
+
+    const fieldName = pathFieldName(currentPath);
+    if (
+      fieldName &&
+      TEXT_ARGUMENT_FIELDS.has(fieldName) &&
+      (Array.isArray(current) || isRecord(current))
+    ) {
+      warnings.push({
+        code: "structured_text_field",
+        path: currentPath,
+        message:
+          `Argument field "${fieldName}" resolved to ${Array.isArray(current) ? "an array" : "an object"}, but this field usually expects a string.`,
+        recommendation:
+          "Use `$file` or `$text` for markdown/text bodies. Reserve `$jsonFile`/`$yamlFile` for structured payload fields.",
+      });
+    }
+
+    if (Array.isArray(current)) {
+      current.forEach((item, index) => visit(item, `${currentPath}[${index}]`));
+      return;
+    }
+
+    if (isRecord(current)) {
+      for (const [key, nested] of Object.entries(current)) {
+        visit(nested, `${currentPath}.${key}`);
+      }
+    }
+  };
+
+  visit(value, path);
+  return warnings;
+}
+
 function validateArgumentsObject(
   value: unknown,
   field: string
@@ -771,7 +855,7 @@ export async function handleParallel(
         call.tool,
         call.arguments,
         call.server,
-        callContext
+        contextWithSafeRetry(cache, call.tool, call.server, callContext)
       );
       cache.set(call.tool, call.arguments, result, call.server, cacheScope);
       return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
@@ -853,7 +937,7 @@ export async function handleBatch(
         tool,
         item.arguments,
         server,
-        callContext
+        contextWithSafeRetry(cache, tool, server, callContext)
       );
       cache.set(tool, item.arguments, result, server, cacheScope);
       if (result.isError) failed++;
@@ -947,7 +1031,7 @@ export async function handlePipeline(
         step.tool,
         mergedArgs,
         step.server,
-        callContext
+        contextWithSafeRetry(cache, step.tool, step.server, callContext)
       );
 
       if (!cached) {
@@ -1014,6 +1098,7 @@ export async function handleDryRun(
   let estimatedResolvedArgumentBytes = 0;
   let cacheHitCandidates = 0;
   let invalidCalls = 0;
+  let warningCount = 0;
 
   for (const call of parsed.calls) {
     const prepare = await upstream.prepareToolCall(
@@ -1046,6 +1131,10 @@ export async function handleDryRun(
       ? Buffer.byteLength(JSON.stringify(resolvedArguments), "utf8")
       : 0;
     estimatedResolvedArgumentBytes += resolvedArgumentBytes;
+    const warnings = resolvedArguments
+      ? collectArgumentWarnings(resolvedArguments)
+      : [];
+    warningCount += warnings.length;
 
     items.push({
       source: call.source,
@@ -1059,6 +1148,7 @@ export async function handleDryRun(
         qualifiedTool: `${prepare.server}__${prepare.actualName}`,
       },
       ...(resolvedArguments ? { resolvedArguments } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
       resolvedArgumentBytes,
       cacheHitCandidate: cacheHit,
       ...(call.source.mode === "pipeline" && call.source.hasInputMapping
@@ -1079,6 +1169,7 @@ export async function handleDryRun(
       invalidCalls,
       cacheHitCandidates,
       estimatedResolvedArgumentBytes,
+      warningCount,
     },
   });
 }
@@ -1140,9 +1231,8 @@ export async function handleCall(
   if (cached) return cached;
 
   const result = await upstream.callTool(tool, parsedArgs, server, {
-    ...callContext,
+    ...contextWithSafeRetry(cache, tool, server, callContext),
     forceReconnect,
-    retryOnReconnect: cache.isSafeToRetry(tool, server),
   });
   cache.set(tool, parsedArgs, result, server, cacheScope);
   return result;

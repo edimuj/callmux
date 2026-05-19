@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createConnection } from "node:net";
 import { createSign, generateKeyPairSync } from "node:crypto";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -2701,6 +2702,105 @@ test("handleCall retries safe tools once after reconnect but not mutating tools"
   );
 });
 
+test("fan-out meta-tools retry safe child calls once after reconnect", async () => {
+  async function run(
+    mode: "parallel" | "batch" | "pipeline"
+  ): Promise<{ result: CallToolResult; connectCount: number }> {
+    const upstream = new UpstreamManager();
+    const cache = new CallCache(0);
+    let connectCount = 0;
+    const harness = upstream as unknown as {
+      connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+    };
+    harness.connectOne = async (name: string, config: ServerConfig) => {
+      connectCount++;
+      const currentConnect = connectCount;
+      const tool = mockTool("get_issue");
+      return {
+        name,
+        config,
+        client: {
+          async callTool() {
+            if (currentConnect === 1) {
+              throw new Error("transport send error: broken pipe");
+            }
+            return textResult(`client-${currentConnect}`);
+          },
+          async close() {},
+        },
+        transport: { async close() {} },
+        resolvedTransport: "stdio",
+        allTools: [tool],
+        tools: [tool],
+        connectDurationMs: 1,
+      };
+    };
+
+    await upstream.connect({ github: { command: "github-mcp" } });
+    try {
+      if (mode === "parallel") {
+        const result = await handleParallel(
+          upstream,
+          cache,
+          { calls: [{ server: "github", tool: "get_issue", arguments: {} }] },
+          4
+        );
+        return { result, connectCount };
+      }
+
+      if (mode === "batch") {
+        const result = await handleBatch(
+          upstream,
+          cache,
+          {
+            server: "github",
+            tool: "get_issue",
+            items: [{ arguments: {} }],
+          },
+          4
+        );
+        return { result, connectCount };
+      }
+
+      const result = await handlePipeline(
+        upstream,
+        cache,
+        { steps: [{ server: "github", tool: "get_issue", arguments: {} }] }
+      );
+      return { result, connectCount };
+    } finally {
+      await upstream.close();
+    }
+  }
+
+  const parallel = await run("parallel");
+  assert.equal(parallel.connectCount, 2);
+  assert.equal(
+    (parallel.result.structuredContent as {
+      results: Array<{ result: string }>;
+    }).results[0].result,
+    "client-2"
+  );
+
+  const batch = await run("batch");
+  assert.equal(batch.connectCount, 2);
+  assert.equal(
+    (batch.result.structuredContent as {
+      results: Array<{ result: string }>;
+    }).results[0].result,
+    "client-2"
+  );
+
+  const pipeline = await run("pipeline");
+  assert.equal(pipeline.connectCount, 2);
+  assert.equal(
+    (pipeline.result.structuredContent as {
+      steps: Array<{ result: string }>;
+    }).steps[0].result,
+    "client-2"
+  );
+});
+
 test("UpstreamManager close falls back to transport close when client close hangs", async () => {
   const upstream = new UpstreamManager();
   let transportClosed = false;
@@ -3864,6 +3964,85 @@ test("handleDryRun validates mode and shape", async () => {
     (result.structuredContent as { error: { message: string } }).error.message,
     /mode/
   );
+});
+
+test("handleDryRun warns about literal $json downstream arguments", async () => {
+  const upstream = {
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      return {
+        toolName: tool,
+        server: server ?? "github",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+  };
+
+  const result = await handleDryRun(upstream as never, new CallCache(0), {
+    tool: "create_issue",
+    arguments: {
+      title: "Bug",
+      body: "$json",
+      labels: ["P1", "$json.labels"],
+    },
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    items: Array<{ warnings?: Array<{ code: string; path: string }> }>;
+    summary: { warningCount: number };
+  };
+  assert.equal(content.summary.warningCount, 2);
+  assert.deepEqual(
+    content.items[0].warnings?.map((warning) => [warning.code, warning.path]),
+    [
+      ["literal_json_mapping", "arguments.body"],
+      ["literal_json_mapping", "arguments.labels[1]"],
+    ]
+  );
+});
+
+test("handleDryRun warns when text fields resolve to structured values", async () => {
+  const upstream = {
+    async prepareToolCall(tool: string) {
+      return {
+        toolName: tool,
+        server: "github",
+        actualName: tool,
+        resolvedArguments: {
+          title: "Bug",
+          body: { summary: "wrong shape" },
+          metadata: { ok: true },
+        },
+      };
+    },
+  };
+
+  const result = await handleDryRun(upstream as never, new CallCache(0), {
+    tool: "create_issue",
+    arguments: {
+      body: { $jsonFile: "/tmp/body.json" },
+    },
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    items: Array<{ warnings?: Array<{ code: string; path: string }> }>;
+    summary: { warningCount: number };
+  };
+  assert.equal(content.summary.warningCount, 1);
+  assert.deepEqual(content.items[0].warnings?.[0], {
+    code: "structured_text_field",
+    path: "arguments.body",
+    message:
+      'Argument field "body" resolved to an object, but this field usually expects a string.',
+    recommendation:
+      "Use `$file` or `$text` for markdown/text bodies. Reserve `$jsonFile`/`$yamlFile` for structured payload fields.",
+  });
 });
 
 test("handleRecipeRun expands params and delegates to configured mode", async () => {
@@ -6695,7 +6874,7 @@ test("unwrap preserves error info from upstream", async () => {
 
 // ─── Listener tests ─────────────────────────────────────────────
 
-import { CallmuxListener } from "./listener.js";
+import { CallmuxListener, readBody } from "./listener.js";
 
 function listenerPort(listener: CallmuxListener): number {
   const address = (listener as any).httpServer?.address();
@@ -6704,6 +6883,78 @@ function listenerPort(listener: CallmuxListener): number {
   }
   return address.port;
 }
+
+test("readBody rejects and removes listeners when request aborts mid-body", async () => {
+  for (const eventName of ["aborted", "close"] as const) {
+    const req = new EventEmitter() as IncomingMessage & EventEmitter & { complete: boolean };
+    req.complete = false;
+
+    const body = readBody(req);
+    req.emit("data", Buffer.from("partial"));
+    req.emit(eventName);
+
+    await assert.rejects(body, { name: "RequestBodyAbortedError" });
+    assert.equal(req.listenerCount("data"), 0);
+    assert.equal(req.listenerCount("end"), 0);
+    assert.equal(req.listenerCount("error"), 0);
+    assert.equal(req.listenerCount("aborted"), 0);
+    assert.equal(req.listenerCount("close"), 0);
+  }
+});
+
+test("listener settles aborted /mcp body reads from real HTTP clients", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  await listener.start();
+  try {
+    const port = listenerPort(listener);
+    await new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ host: "127.0.0.1", port }, () => {
+        socket.write(
+          "POST /mcp HTTP/1.1\r\n" +
+          `Host: 127.0.0.1:${port}\r\n` +
+          "Content-Type: application/json\r\n" +
+          "Accept: application/json, text/event-stream\r\n" +
+          "Content-Length: 1000\r\n" +
+          "\r\n" +
+          "{\"jsonrpc\":\"2.0\""
+        );
+        setTimeout(() => socket.destroy(), 10);
+      });
+      socket.once("close", () => resolve());
+      socket.once("error", reject);
+    });
+
+    await waitFor(async () => {
+      const events = (listener as any).runtimeEvents.list() as Array<{
+        type: string;
+        path?: string;
+        status?: number;
+      }>;
+      return events.some((event) =>
+        event.type === "http_request" &&
+        event.path === "/mcp" &&
+        event.status === 499
+      );
+    }, 1000, 10);
+
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(res.status, 200);
+  } finally {
+    await listener.close();
+  }
+});
 
 test("listener applyRuntimeConfig updates runtime security settings", async () => {
   const upstream = new UpstreamManager();

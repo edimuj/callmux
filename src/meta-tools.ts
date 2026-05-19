@@ -271,7 +271,7 @@ export const META_TOOLS: Tool[] = [
     description:
       "Validate and preview callmux calls without executing downstream tools. " +
       "Resolves server routing and argument references ($file/$jsonFile/$yamlFile/$text), " +
-      "returns planned calls, cache-hit candidates, and per-call errors.",
+      "returns planned calls, cache-hit candidates, warnings for suspicious argument shapes, and per-call errors.",
     inputSchema: {
       type: "object" as const,
       properties: {

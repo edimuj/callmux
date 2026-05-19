@@ -518,6 +518,9 @@ export class CallmuxListener {
         });
         return;
       }
+      if (error instanceof RequestBodyAbortedError) {
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(
         `[callmux] HTTP error (${context.requestId}): ${message}\n`
@@ -2230,6 +2233,13 @@ class InvalidRequestBodyOverrideError extends Error {
   }
 }
 
+class RequestBodyAbortedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestBodyAbortedError";
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -2302,28 +2312,59 @@ function isLoopbackHost(host: string): boolean {
   );
 }
 
-function readBody(
+export function readBody(
   req: IncomingMessage,
   maxBytes?: number
 ): Promise<{ body: string; bytes: number }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
-    let exceeded = false;
-    req.on("data", (chunk: Buffer) => {
-      if (exceeded) return;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("aborted", onAborted);
+      req.off("close", onClose);
+    };
+
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+
+    const onData = (chunk: Buffer) => {
+      if (settled) return;
       totalBytes += chunk.length;
       if (maxBytes !== undefined && totalBytes > maxBytes) {
-        exceeded = true;
-        reject(new PayloadTooLargeError(maxBytes));
+        settle(() => reject(new PayloadTooLargeError(maxBytes)));
         return;
       }
       chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (exceeded) return;
-      resolve({ body: Buffer.concat(chunks).toString("utf-8"), bytes: totalBytes });
-    });
-    req.on("error", reject);
+    };
+    const onEnd = () => {
+      settle(() => {
+        resolve({ body: Buffer.concat(chunks).toString("utf-8"), bytes: totalBytes });
+      });
+    };
+    const onError = (error: Error) => {
+      settle(() => reject(error));
+    };
+    const onAborted = () => {
+      settle(() => reject(new RequestBodyAbortedError("request body aborted")));
+    };
+    const onClose = () => {
+      if (req.complete) return;
+      settle(() => reject(new RequestBodyAbortedError("request body closed before end")));
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("aborted", onAborted);
+    req.on("close", onClose);
   });
 }

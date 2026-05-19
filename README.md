@@ -196,7 +196,7 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 | `callmux_cache_clear` | Invalidate cached results by tool, server, or everything |
 | `callmux_status` | Introspect servers, tools, cache state, and [session diagnostics](docs/shared-server.md) |
 
-All argument objects support [file references](docs/config-reference.md#file-references) (`$file`, `$jsonFile`, `$yamlFile`, `$text`) for long content that doesn't belong in JSON strings.
+All argument objects support [file references](docs/config-reference.md#file-references) (`$file`, `$jsonFile`, `$yamlFile`, `$text`) for long content that doesn't belong in JSON strings. Use `$file`/`$text` for markdown or plain string fields such as GitHub issue bodies; use `$jsonFile`/`$yamlFile` only when the downstream field expects structured data. `$json` is pipeline `inputMapping` syntax, not a file reference.
 
 Fan-out and chained meta-tools are recoverable by design:
 

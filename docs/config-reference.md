@@ -251,6 +251,16 @@ When auth is configured, dashboard requests use the same listener authentication
 
 Any argument object can use file references. callmux reads the file and replaces the reference with file content before forwarding to the downstream MCP tool.
 
+Use the reference that matches the downstream field shape:
+
+| Need | Use | Do not use |
+| --- | --- | --- |
+| Markdown or plain string fields such as GitHub issue `body`, `description`, `comment`, `text`, or `content` | `$file` or `$text` | `$jsonFile` unless the JSON file contains a JSON string |
+| Full structured argument objects, arrays, or nested payload fields | `$jsonFile` or `$yamlFile` | `$file` if the downstream tool expects an object/array |
+| Previous pipeline step output | `inputMapping` with `$text`, `$json`, or `$json.path` | Literal `"$json"` inside downstream `arguments` |
+
+`$json` is not a file reference. It is valid only in `callmux_pipeline` `inputMapping`, where it means "parse the previous step's text as JSON". If you put `"$json"` directly under downstream `arguments`, callmux treats it as a suspicious literal and `callmux_dry_run` reports a warning.
+
 ### `$file` - Raw file content
 
 ```json
@@ -280,6 +290,38 @@ Optional `maxBytes` override per reference:
 ```
 
 Both support optional `maxBytes` like `$file`.
+
+`$jsonFile` and `$yamlFile` forward the parsed value as-is. That is right for structured fields:
+
+```json
+{
+  "metadata": { "$jsonFile": "/tmp/metadata.json" }
+}
+```
+
+For string fields, use `$file` or `$text` instead:
+
+```json
+{
+  "tool": "github__create_issue",
+  "arguments": {
+    "title": "Bug report",
+    "body": { "$file": "/tmp/issue-body.md" }
+  }
+}
+```
+
+Avoid this unless `/tmp/issue-body.json` contains a JSON string:
+
+```json
+{
+  "tool": "github__create_issue",
+  "arguments": {
+    "title": "Bug report",
+    "body": { "$jsonFile": "/tmp/issue-body.json" }
+  }
+}
+```
 
 ### `$text` - Inline text composition
 
