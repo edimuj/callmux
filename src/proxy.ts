@@ -289,15 +289,35 @@ export class CallmuxProxy {
         );
     }
 
-    // Proxied tool — check cache first
-    const cached = this.cache.get(name, args);
     const target = this.responseShieldTarget(name, args);
+    const maybePrepare = this.upstream as UpstreamManager & {
+      prepareToolCall?: (
+        toolName: string,
+        args?: Record<string, unknown>,
+        serverHint?: string
+      ) => ReturnType<UpstreamManager["prepareToolCall"]>;
+    };
+    const prepared = typeof maybePrepare.prepareToolCall === "function"
+      ? await maybePrepare.prepareToolCall(name, args)
+      : undefined;
+    if (prepared && "error" in prepared) return prepared.error;
+    const cacheArgs = prepared?.resolvedArguments ?? args;
+    const cacheServer = prepared?.server;
+
+    // Proxied tool — check cache after resolving file references
+    const maybeScoped = this.upstream as UpstreamManager & {
+      cacheScopeForCall?: UpstreamManager["cacheScopeForCall"];
+    };
+    const cacheScope = typeof maybeScoped.cacheScopeForCall === "function"
+      ? maybeScoped.cacheScopeForCall(name, cacheServer)
+      : undefined;
+    const cached = this.cache.get(name, cacheArgs, cacheServer, cacheScope);
     if (cached) return this.shieldResult(target, cached);
 
-    const result = await this.upstream.callTool(name, args, undefined, {
-      retryOnReconnect: this.cache.isSafeToRetry(name),
+    const result = await this.upstream.callTool(name, cacheArgs, cacheServer, {
+      retryOnReconnect: this.cache.isSafeToRetry(name, cacheServer),
     });
-    this.cache.set(name, args, result);
+    this.cache.set(name, cacheArgs, result, cacheServer, cacheScope);
     return this.shieldResult(target, result);
   }
 

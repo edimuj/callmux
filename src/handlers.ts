@@ -191,6 +191,31 @@ function contextWithSafeRetry(
   };
 }
 
+async function prepareResolvedCacheKey(
+  upstream: UpstreamManager,
+  tool: string,
+  args: Record<string, unknown> | undefined,
+  server: string | undefined
+): Promise<{ args: Record<string, unknown> | undefined; server: string | undefined } | CallToolResult> {
+  const maybePrepare = upstream as UpstreamManager & {
+    prepareToolCall?: (
+      toolName: string,
+      args?: Record<string, unknown>,
+      serverHint?: string
+    ) => ReturnType<UpstreamManager["prepareToolCall"]>;
+  };
+  if (typeof maybePrepare.prepareToolCall !== "function") {
+    return { args, server };
+  }
+
+  const prepared = await maybePrepare.prepareToolCall(tool, args, server);
+  if ("error" in prepared) return prepared.error;
+  return {
+    args: prepared.resolvedArguments,
+    server: prepared.server,
+  };
+}
+
 const TEXT_ARGUMENT_FIELDS = new Set([
   "body",
   "description",
@@ -845,19 +870,28 @@ export async function handleParallel(
         timeoutMs: call.timeoutMs,
         cwd: call.cwd,
       });
-      const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, callContext);
-      const cached = cache.get(call.tool, call.arguments, call.server, cacheScope);
+      const prepared = await prepareResolvedCacheKey(
+        upstream,
+        call.tool,
+        call.arguments,
+        call.server
+      );
+      if (isToolErrorResult(prepared)) {
+        return { call, result: unwrapResult(prepared), durationMs: Date.now() - callStart };
+      }
+      const cacheScope = cacheScopeForCall(upstream, call.tool, prepared.server, callContext);
+      const cached = cache.get(call.tool, prepared.args, prepared.server, cacheScope);
       if (cached) {
         return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
       const result = await upstream.callTool(
         call.tool,
-        call.arguments,
-        call.server,
-        contextWithSafeRetry(cache, call.tool, call.server, callContext)
+        prepared.args,
+        prepared.server,
+        contextWithSafeRetry(cache, call.tool, prepared.server, callContext)
       );
-      cache.set(call.tool, call.arguments, result, call.server, cacheScope);
+      cache.set(call.tool, prepared.args, result, prepared.server, cacheScope);
       return { call, result: unwrapResult(result), durationMs: Date.now() - callStart };
     } catch (err) {
       return {
@@ -926,8 +960,18 @@ export async function handleBatch(
         timeoutMs: item.timeoutMs ?? timeoutMs,
         cwd: item.cwd ?? cwd,
       });
-      const cacheScope = cacheScopeForCall(upstream, tool, server, callContext);
-      const cached = cache.get(tool, item.arguments, server, cacheScope);
+      const prepared = await prepareResolvedCacheKey(
+        upstream,
+        tool,
+        item.arguments,
+        server
+      );
+      if (isToolErrorResult(prepared)) {
+        failed++;
+        return { index, result: unwrapResult(prepared), durationMs: Date.now() - callStart };
+      }
+      const cacheScope = cacheScopeForCall(upstream, tool, prepared.server, callContext);
+      const cached = cache.get(tool, prepared.args, prepared.server, cacheScope);
       if (cached) {
         succeeded++;
         return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
@@ -935,11 +979,11 @@ export async function handleBatch(
 
       const result = await upstream.callTool(
         tool,
-        item.arguments,
-        server,
-        contextWithSafeRetry(cache, tool, server, callContext)
+        prepared.args,
+        prepared.server,
+        contextWithSafeRetry(cache, tool, prepared.server, callContext)
       );
-      cache.set(tool, item.arguments, result, server, cacheScope);
+      cache.set(tool, prepared.args, result, prepared.server, cacheScope);
       if (result.isError) failed++;
       else succeeded++;
       return { index, result: unwrapResult(result), durationMs: Date.now() - callStart };
@@ -1025,17 +1069,40 @@ export async function handlePipeline(
         timeoutMs: step.timeoutMs,
         cwd: step.cwd,
       });
-      const cacheScope = cacheScopeForCall(upstream, step.tool, step.server, callContext);
-      const cached = cache.get(step.tool, mergedArgs, step.server, cacheScope);
-      const result = cached ?? await upstream.callTool(
+      const prepared = await prepareResolvedCacheKey(
+        upstream,
         step.tool,
         mergedArgs,
-        step.server,
-        contextWithSafeRetry(cache, step.tool, step.server, callContext)
+        step.server
+      );
+      if (isToolErrorResult(prepared)) {
+        stepResults.push({
+          step: i,
+          tool: step.tool,
+          ...(Object.keys(mappedArguments).length > 0 ? { mappedArguments } : {}),
+          ...(skippedMappings.length > 0 ? { skippedMappings } : {}),
+          result: unwrapResult(prepared),
+          durationMs: Date.now() - callStart,
+        });
+
+        return successResult({
+          status: "failed",
+          failedStep: i,
+          steps: stepResults,
+          totalDurationMs: Date.now() - startTime,
+        });
+      }
+      const cacheScope = cacheScopeForCall(upstream, step.tool, prepared.server, callContext);
+      const cached = cache.get(step.tool, prepared.args, prepared.server, cacheScope);
+      const result = cached ?? await upstream.callTool(
+        step.tool,
+        prepared.args,
+        prepared.server,
+        contextWithSafeRetry(cache, step.tool, prepared.server, callContext)
       );
 
       if (!cached) {
-        cache.set(step.tool, mergedArgs, result, step.server, cacheScope);
+        cache.set(step.tool, prepared.args, result, prepared.server, cacheScope);
       }
 
       const durationMs = Date.now() - callStart;
@@ -1122,8 +1189,13 @@ export async function handleDryRun(
       timeoutMs: call.timeoutMs,
       cwd: call.cwd,
     });
-    const cacheScope = cacheScopeForCall(upstream, call.tool, call.server, callContext);
-    const cacheHit = cache.get(call.tool, call.arguments, call.server, cacheScope) !== null;
+    const cacheScope = cacheScopeForCall(upstream, call.tool, prepare.server, callContext);
+    const cacheHit = cache.get(
+      call.tool,
+      prepare.resolvedArguments,
+      prepare.server,
+      cacheScope
+    ) !== null;
     if (cacheHit) cacheHitCandidates++;
 
     const resolvedArguments = prepare.resolvedArguments;
@@ -1226,15 +1298,17 @@ export async function handleCall(
     ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
     ...(typeof cwd === "string" ? { cwd } : {}),
   });
-  const cacheScope = cacheScopeForCall(upstream, tool, server, callContext);
-  const cached = cache.get(tool, parsedArgs, server, cacheScope);
+  const prepared = await prepareResolvedCacheKey(upstream, tool, parsedArgs, server);
+  if (isToolErrorResult(prepared)) return prepared;
+  const cacheScope = cacheScopeForCall(upstream, tool, prepared.server, callContext);
+  const cached = cache.get(tool, prepared.args, prepared.server, cacheScope);
   if (cached) return cached;
 
-  const result = await upstream.callTool(tool, parsedArgs, server, {
-    ...contextWithSafeRetry(cache, tool, server, callContext),
+  const result = await upstream.callTool(tool, prepared.args, prepared.server, {
+    ...contextWithSafeRetry(cache, tool, prepared.server, callContext),
     forceReconnect,
   });
-  cache.set(tool, parsedArgs, result, server, cacheScope);
+  cache.set(tool, prepared.args, result, prepared.server, cacheScope);
   return result;
 }
 

@@ -1132,18 +1132,23 @@ export class CallmuxListener {
           );
           break;
         default: {
-          const cacheScope = upstream.cacheScopeForCall(name, undefined, toolContext);
-          const cached = cache.get(name, args, undefined, cacheScope);
           target = this.responseShieldTarget(upstream, name, args);
+          const prepared = await upstream.prepareToolCall(name, args);
+          if ("error" in prepared) {
+            result = prepared.error;
+            break;
+          }
+          const cacheScope = upstream.cacheScopeForCall(name, prepared.server, toolContext);
+          const cached = cache.get(name, prepared.resolvedArguments, prepared.server, cacheScope);
           if (cached) {
             cacheHit = true;
             result = this.shieldResult(target, cached);
           } else {
-            const upstreamResult = await upstream.callTool(name, args, undefined, {
+            const upstreamResult = await upstream.callTool(name, prepared.resolvedArguments, prepared.server, {
               ...toolContext,
-              retryOnReconnect: cache.isSafeToRetry(name, undefined),
+              retryOnReconnect: cache.isSafeToRetry(name, prepared.server),
             });
-            cache.set(name, args, upstreamResult, undefined, cacheScope);
+            cache.set(name, prepared.resolvedArguments, upstreamResult, prepared.server, cacheScope);
             result = this.shieldResult(target, upstreamResult);
           }
           break;
@@ -1234,7 +1239,7 @@ export class CallmuxListener {
 
     if (tool === "callmux_parallel") {
       if (!isRecord(args) || !Array.isArray(args.calls)) return undefined;
-      return maxDefined(
+      return sumDefined(
         ...args.calls
           .filter(isRecord)
           .map((call) => downstreamTimeout(call.tool, call.server, call.timeoutMs))
@@ -2248,15 +2253,6 @@ function positiveTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
-}
-
-function maxDefined(...values: Array<number | undefined>): number | undefined {
-  let max: number | undefined;
-  for (const value of values) {
-    if (value === undefined) continue;
-    max = max === undefined ? value : Math.max(max, value);
-  }
-  return max;
 }
 
 function sumDefined(...values: Array<number | undefined>): number | undefined {

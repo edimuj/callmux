@@ -258,7 +258,7 @@ function derivedMetaToolRequestTimeoutMs(
     const childTimeouts = args.calls
       .filter(isRecord)
       .map((call) => positiveTimeoutMs(call.timeoutMs) ?? defaultChildTimeoutMs);
-    return addTimeoutOverhead(maxDefined(...childTimeouts));
+    return addTimeoutOverhead(sumDefined(...childTimeouts));
   }
 
   if (toolName === "callmux_batch" && Array.isArray(args.items)) {
@@ -300,6 +300,15 @@ function maxDefined(...values: Array<number | undefined>): number | undefined {
     max = max === undefined ? value : Math.max(max, value);
   }
   return max;
+}
+
+function sumDefined(...values: Array<number | undefined>): number | undefined {
+  let total: number | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    total = Math.min(Number.MAX_SAFE_INTEGER, (total ?? 0) + value);
+  }
+  return total;
 }
 
 function addTimeoutOverhead(timeoutMs: number | undefined): number | undefined {

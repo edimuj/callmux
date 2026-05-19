@@ -2801,6 +2801,110 @@ test("fan-out meta-tools retry safe child calls once after reconnect", async () 
   );
 });
 
+test("cached file-reference calls key on resolved file content", async () => {
+  async function run(
+    mode: "call" | "parallel" | "batch" | "pipeline" | "proxy"
+  ): Promise<{ first: string; second: string; downstreamCalls: number }> {
+    const dir = await mkdtemp(join(tmpdir(), `callmux-file-ref-cache-${mode}-`));
+    const queryPath = join(dir, "query.txt");
+    const upstream = new UpstreamManager();
+    const cache = new CallCache(60);
+    let downstreamCalls = 0;
+    const harness = upstream as unknown as {
+      connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+    };
+    harness.connectOne = async (name: string, config: ServerConfig) => {
+      const tool = mockTool("get_issue");
+      return {
+        name,
+        config,
+        client: {
+          async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+            downstreamCalls++;
+            return textResult(String(params.arguments?.query));
+          },
+          async close() {},
+        },
+        transport: { async close() {} },
+        resolvedTransport: "stdio",
+        allTools: [tool],
+        tools: [tool],
+        connectDurationMs: 1,
+      };
+    };
+
+    const args = { query: { $file: queryPath } };
+    const proxy = mode === "proxy"
+      ? new CallmuxProxy({
+        servers: {},
+        cacheTtlSeconds: 60,
+      })
+      : undefined;
+    if (proxy) {
+      (proxy as unknown as { upstream: UpstreamManager }).upstream = upstream;
+    }
+
+    const invoke = async (): Promise<string> => {
+      let result: CallToolResult;
+      if (mode === "call") {
+        result = await handleCall(upstream, cache, {
+          server: "github",
+          tool: "get_issue",
+          arguments: args,
+        });
+      } else if (mode === "parallel") {
+        result = await handleParallel(upstream, cache, {
+          calls: [{ server: "github", tool: "get_issue", arguments: args }],
+        }, 4);
+        return ((result.structuredContent as {
+          results: Array<{ result: string }>;
+        }).results[0].result);
+      } else if (mode === "batch") {
+        result = await handleBatch(upstream, cache, {
+          server: "github",
+          tool: "get_issue",
+          items: [{ arguments: args }],
+        }, 4);
+        return ((result.structuredContent as {
+          results: Array<{ result: string }>;
+        }).results[0].result);
+      } else if (mode === "pipeline") {
+        result = await handlePipeline(upstream, cache, {
+          steps: [{ server: "github", tool: "get_issue", arguments: args }],
+        });
+        return ((result.structuredContent as {
+          steps: Array<{ result: string }>;
+        }).steps[0].result);
+      } else {
+        result = await (proxy as unknown as {
+          handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+        }).handleToolCall("get_issue", args);
+        return result.content[0].type === "text" ? result.content[0].text : "";
+      }
+      return result.content[0].type === "text" ? result.content[0].text : "";
+    };
+
+    await upstream.connect({ github: { command: "github-mcp" } });
+    try {
+      await writeFile(queryPath, "first", "utf8");
+      const first = await invoke();
+      await writeFile(queryPath, "second", "utf8");
+      const second = await invoke();
+      return { first, second, downstreamCalls };
+    } finally {
+      await upstream.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  for (const mode of ["call", "parallel", "batch", "pipeline", "proxy"] as const) {
+    const result = await run(mode);
+    assert.equal(result.first, "first", mode);
+    assert.equal(result.second, "second", mode);
+    assert.equal(result.downstreamCalls, 2, mode);
+  }
+});
+
 test("UpstreamManager close falls back to transport close when client close hangs", async () => {
   const upstream = new UpstreamManager();
   let transportClosed = false;
@@ -5800,7 +5904,7 @@ test("stdio bridge derives meta-call request timeout from child timeouts", () =>
       },
       180_000
     ),
-    { timeout: 305_000 }
+    { timeout: 306_000 }
   );
 
   assert.deepEqual(
@@ -5837,6 +5941,35 @@ test("stdio bridge derives meta-call request timeout from child timeouts", () =>
     deriveBridgeCallOptions("get_issue", { id: 1 }, 180_000),
     { timeout: 180_000 }
   );
+});
+
+test("listener derives parallel timeout budget from queued child waves", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      callTimeoutMs: 180_000,
+      servers: { github: { command: "ignored" } },
+    },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 1,
+  });
+
+  const budget = (listener as unknown as {
+    toolCallTimeoutBudgetMs: (tool: string, args: unknown) => number | undefined;
+  }).toolCallTimeoutBudgetMs("callmux_parallel", {
+    calls: [
+      { server: "github", tool: "get_issue", timeoutMs: 1_000 },
+      { server: "github", tool: "get_issue", timeoutMs: 300_000 },
+    ],
+  });
+
+  assert.equal(budget, 301_000);
 });
 
 // ─── Pipeline error mid-chain tests ──────────────────────────
