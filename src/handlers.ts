@@ -62,28 +62,38 @@ function cacheScopeForCall(
 }
 
 function resolveMapping(text: string, expr: string): unknown {
-  if (expr === "$text") return text;
+  const resolved = resolveMappingWithDiagnostics(text, expr);
+  return resolved.matched ? resolved.value : undefined;
+}
+
+function resolveMappingWithDiagnostics(
+  text: string,
+  expr: string
+): { matched: true; value: unknown } | { matched: false; reason: string } {
+  if (expr === "$text") return { matched: true, value: text };
 
   if (expr === "$json" || expr.startsWith("$json.")) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      return undefined;
+      return { matched: false, reason: "previous_result_not_json" };
     }
 
-    if (expr === "$json") return parsed;
+    if (expr === "$json") return { matched: true, value: parsed };
 
     const path = expr.slice(6).split(".");
     let current: unknown = parsed;
     for (const key of path) {
-      if (current == null || typeof current !== "object") return undefined;
+      if (current == null || typeof current !== "object" || !(key in current)) {
+        return { matched: false, reason: "path_not_found" };
+      }
       current = (current as Record<string, unknown>)[key];
     }
-    return current;
+    return { matched: true, value: current };
   }
 
-  return expr;
+  return { matched: true, value: expr };
 }
 
 function validateConcurrency(maxConcurrency: number): CallToolResult | null {
@@ -778,9 +788,20 @@ export async function handleParallel(
   });
 
   const results = await Promise.all(promises);
+  const failedIndexes = results.flatMap((result, index) => {
+    if (result.error || (isRecord(result.result) && result.result.isError === true)) {
+      return [index];
+    }
+    return [];
+  });
+  const failed = failedIndexes.length;
   const output = {
+    status: failed === 0 ? "completed" : "partial",
     results,
     totalDurationMs: Date.now() - startTime,
+    succeeded: results.length - failed,
+    failed,
+    failedIndexes,
   };
 
   return successResult(output as unknown as Record<string, unknown>);
@@ -851,11 +872,19 @@ export async function handleBatch(
   });
 
   const results = await Promise.all(promises);
+  const failedIndexes = results.flatMap((result) => {
+    if (result.error || (isRecord(result.result) && result.result.isError === true)) {
+      return [result.index];
+    }
+    return [];
+  });
   const output = {
+    status: failed === 0 ? "completed" : "partial",
     results,
     totalDurationMs: Date.now() - startTime,
     succeeded,
     failed,
+    failedIndexes,
   };
 
   return successResult(output as unknown as Record<string, unknown>);
@@ -872,7 +901,15 @@ export async function handlePipeline(
 
   const startTime = Date.now();
   const { steps } = parsedArgs;
-  const stepResults: Array<{ step: number; tool: string; result?: unknown; error?: string; durationMs: number }> = [];
+  const stepResults: Array<{
+    step: number;
+    tool: string;
+    mappedArguments?: Record<string, unknown>;
+    skippedMappings?: Array<{ argument: string; expression: string; reason: string }>;
+    result?: unknown;
+    error?: string;
+    durationMs: number;
+  }> = [];
   let previousText = "";
 
   for (let i = 0; i < steps.length; i++) {
@@ -880,12 +917,21 @@ export async function handlePipeline(
     const callStart = Date.now();
 
     const mergedArgs: Record<string, unknown> = { ...(step.arguments ?? {}) };
+    const mappedArguments: Record<string, unknown> = {};
+    const skippedMappings: Array<{ argument: string; expression: string; reason: string }> = [];
 
     if (step.inputMapping && i > 0) {
       for (const [argName, expr] of Object.entries(step.inputMapping)) {
-        const value = resolveMapping(previousText, expr);
-        if (value !== undefined) {
-          mergedArgs[argName] = value;
+        const resolved = resolveMappingWithDiagnostics(previousText, expr);
+        if (resolved.matched) {
+          mergedArgs[argName] = resolved.value;
+          mappedArguments[argName] = resolved.value;
+        } else {
+          skippedMappings.push({
+            argument: argName,
+            expression: expr,
+            reason: resolved.reason,
+          });
         }
       }
     }
@@ -909,10 +955,19 @@ export async function handlePipeline(
       }
 
       const durationMs = Date.now() - callStart;
-      stepResults.push({ step: i, tool: step.tool, result: unwrapResult(result), durationMs });
+      stepResults.push({
+        step: i,
+        tool: step.tool,
+        ...(Object.keys(mappedArguments).length > 0 ? { mappedArguments } : {}),
+        ...(skippedMappings.length > 0 ? { skippedMappings } : {}),
+        result: unwrapResult(result),
+        durationMs,
+      });
 
       if (result.isError) {
         return successResult({
+          status: "failed",
+          failedStep: i,
           steps: stepResults,
           totalDurationMs: Date.now() - startTime,
         });
@@ -923,11 +978,15 @@ export async function handlePipeline(
       stepResults.push({
         step: i,
         tool: step.tool,
+        ...(Object.keys(mappedArguments).length > 0 ? { mappedArguments } : {}),
+        ...(skippedMappings.length > 0 ? { skippedMappings } : {}),
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - callStart,
       });
 
       return successResult({
+        status: "failed",
+        failedStep: i,
         steps: stepResults,
         totalDurationMs: Date.now() - startTime,
       });
@@ -935,6 +994,7 @@ export async function handlePipeline(
   }
 
   return successResult({
+    status: "completed",
     steps: stepResults,
     finalResult: stepResults[stepResults.length - 1]?.result,
     totalDurationMs: Date.now() - startTime,

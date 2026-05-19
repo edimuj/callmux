@@ -107,6 +107,8 @@ Each step feeds into the next via `inputMapping`:
 }
 ```
 
+Pipeline failures are intentionally recoverable. A failed or thrown step stops the chain and returns `status: "failed"`, `failedStep`, and all completed step outputs up to the failing step. Steps with `inputMapping` also report `mappedArguments` for values that were sent and `skippedMappings` for expressions that could not be resolved, such as non-JSON previous output or a missing `$json.field.path`.
+
 ---
 
 ## Recipe Modes
@@ -119,6 +121,8 @@ Each step feeds into the next via `inputMapping`:
 | `pipeline` | `callmux_pipeline` | Chained steps with `inputMapping` |
 
 Recipes may include `timeoutMs` and absolute `cwd` overrides at the recipe level, on individual `calls`, `items`, or `steps`. Per-call values win over the recipe-level value.
+
+Recipe results inherit the wrapped meta-tool's recovery shape. Parallel and batch recipes return per-call or per-item results with `status`, `succeeded`, `failed`, and `failedIndexes`; pipeline recipes return completed step outputs, `failedStep` on failure, and mapping diagnostics.
 
 ---
 

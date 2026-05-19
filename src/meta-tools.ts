@@ -8,7 +8,8 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_parallel",
     description:
       "Execute multiple tool calls in parallel. Returns all results at once. " +
-      "Use when you need to make several independent calls that don't depend on each other.",
+      "Use when you need to make several independent calls that don't depend on each other. " +
+      "Returns status, succeeded/failed counts, failedIndexes, and per-call results so partial failures are recoverable.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -52,7 +53,8 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_batch",
     description:
       "Apply the same tool call across multiple items. Like parallel() but for " +
-      "the common case of calling one tool many times with different arguments.",
+      "the common case of calling one tool many times with different arguments. " +
+      "Returns status, succeeded/failed counts, failedIndexes, and per-item results so partial failures are recoverable.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -107,7 +109,8 @@ export const META_TOOLS: Tool[] = [
     name: "callmux_pipeline",
     description:
       "Chain tool calls where each step can use output from the previous step. " +
-      "Use inputMapping to extract values from the previous result's text content.",
+      "Use inputMapping to extract values from the previous result's text content. " +
+      "If a step fails, execution stops and the result includes completed step outputs, status=\"failed\", failedStep, and mapping diagnostics for recovery.",
     inputSchema: {
       type: "object" as const,
       properties: {

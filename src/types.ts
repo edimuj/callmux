@@ -351,7 +351,11 @@ interface ParallelResult {
     error?: string;
     durationMs: number;
   }>;
+  status: "completed" | "partial";
   totalDurationMs: number;
+  succeeded: number;
+  failed: number;
+  failedIndexes: number[];
 }
 
 export interface BatchItem {
@@ -369,9 +373,11 @@ interface BatchResult {
     error?: string;
     durationMs: number;
   }>;
+  status: "completed" | "partial";
   totalDurationMs: number;
   succeeded: number;
   failed: number;
+  failedIndexes: number[];
 }
 
 export interface PipelineStep {
@@ -405,11 +411,18 @@ interface PipelineResult {
   steps: Array<{
     step: number;
     tool: string;
+    /** Arguments populated by inputMapping for this step */
+    mappedArguments?: Record<string, unknown>;
+    /** inputMapping entries that could not be resolved from the previous step */
+    skippedMappings?: Array<{ argument: string; expression: string; reason: string }>;
     /** Unwrapped payload from the upstream tool (JSON-parsed if possible, else raw text) */
     result?: unknown;
     error?: string;
     durationMs: number;
   }>;
+  status: "completed" | "failed";
+  /** Zero-based step index that returned an error or threw */
+  failedStep?: number;
   /** Unwrapped result of the last step */
   finalResult?: unknown;
   totalDurationMs: number;

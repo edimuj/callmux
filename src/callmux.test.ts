@@ -5301,7 +5301,7 @@ test("pipeline $text mapping passes full text from previous step", async () => {
     },
   };
 
-  await handlePipeline(upstream as never, new CallCache(0), {
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
     steps: [
       { tool: "step1" },
       { tool: "step2", inputMapping: { body: "$text" } },
@@ -5321,7 +5321,7 @@ test("pipeline $json mapping parses JSON from previous step", async () => {
     },
   };
 
-  await handlePipeline(upstream as never, new CallCache(0), {
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
     steps: [
       { tool: "step1" },
       { tool: "step2", inputMapping: { data: "$json" } },
@@ -5343,7 +5343,7 @@ test("pipeline $json.field.path extracts nested values", async () => {
     },
   };
 
-  await handlePipeline(upstream as never, new CallCache(0), {
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
     steps: [
       { tool: "step1" },
       { tool: "step2", inputMapping: { city: "$json.user.address.city" } },
@@ -5363,7 +5363,7 @@ test("pipeline $json.path returns undefined for missing nested fields", async ()
     },
   };
 
-  await handlePipeline(upstream as never, new CallCache(0), {
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
     steps: [
       { tool: "step1" },
       { tool: "step2", arguments: { fallback: "default" }, inputMapping: { missing: "$json.user.address.city" } },
@@ -5372,6 +5372,19 @@ test("pipeline $json.path returns undefined for missing nested fields", async ()
 
   assert.equal(capturedArgs.missing, undefined);
   assert.equal(capturedArgs.fallback, "default");
+
+  const content = result.structuredContent as {
+    steps: Array<{
+      skippedMappings?: Array<{ argument: string; expression: string; reason: string }>;
+    }>;
+  };
+  assert.deepEqual(content.steps[1].skippedMappings, [
+    {
+      argument: "missing",
+      expression: "$json.user.address.city",
+      reason: "path_not_found",
+    },
+  ]);
 });
 
 test("pipeline $json returns undefined for non-JSON text", async () => {
@@ -5384,7 +5397,7 @@ test("pipeline $json returns undefined for non-JSON text", async () => {
     },
   };
 
-  await handlePipeline(upstream as never, new CallCache(0), {
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
     steps: [
       { tool: "step1" },
       { tool: "step2", arguments: { keep: "this" }, inputMapping: { data: "$json" } },
@@ -5393,6 +5406,19 @@ test("pipeline $json returns undefined for non-JSON text", async () => {
 
   assert.equal(capturedArgs.data, undefined);
   assert.equal(capturedArgs.keep, "this");
+
+  const content = result.structuredContent as {
+    steps: Array<{
+      skippedMappings?: Array<{ argument: string; expression: string; reason: string }>;
+    }>;
+  };
+  assert.deepEqual(content.steps[1].skippedMappings, [
+    {
+      argument: "data",
+      expression: "$json",
+      reason: "previous_result_not_json",
+    },
+  ]);
 });
 
 test("pipeline literal string mapping passes expression as-is", async () => {
@@ -5655,8 +5681,12 @@ test("pipeline stops on step error and returns partial results", async () => {
   const content = result.structuredContent as {
     steps: Array<{ step: number; tool: string; result?: CallToolResult; error?: string }>;
     finalResult?: CallToolResult;
+    status: string;
+    failedStep: number;
   };
 
+  assert.equal(content.status, "failed");
+  assert.equal(content.failedStep, 1);
   assert.equal(content.steps.length, 2);
   assert.equal(content.steps[0].tool, "step1");
   assert.equal(content.steps[1].tool, "step2");
@@ -5683,10 +5713,57 @@ test("pipeline stops on step exception and returns partial results", async () =>
 
   const content = result.structuredContent as {
     steps: Array<{ step: number; tool: string; error?: string }>;
+    status: string;
+    failedStep: number;
   };
 
+  assert.equal(content.status, "failed");
+  assert.equal(content.failedStep, 1);
   assert.equal(content.steps.length, 2);
   assert.equal(content.steps[1].error, "connection refused");
+});
+
+test("pipeline failure includes mapped arguments for recovery", async () => {
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      if (tool === "step1") {
+        return textResult(JSON.stringify({ issue: { number: 42 } }));
+      }
+      if (tool === "step2") {
+        assert.deepEqual(args, { owner: "edimuj", issue_number: 42 });
+        return { content: [{ type: "text" as const, text: "missing repo" }], isError: true };
+      }
+      return textResult("should not reach");
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      {
+        tool: "step2",
+        arguments: { owner: "edimuj" },
+        inputMapping: { issue_number: "$json.issue.number" },
+      },
+      { tool: "step3" },
+    ],
+  });
+
+  const content = result.structuredContent as {
+    status: string;
+    failedStep: number;
+    steps: Array<{
+      tool: string;
+      mappedArguments?: Record<string, unknown>;
+      result?: { isError?: boolean };
+    }>;
+  };
+
+  assert.equal(content.status, "failed");
+  assert.equal(content.failedStep, 1);
+  assert.equal(content.steps.length, 2);
+  assert.deepEqual(content.steps[1].mappedArguments, { issue_number: 42 });
+  assert.equal(content.steps[1].result?.isError, true);
 });
 
 test("pipeline returns finalResult on full success", async () => {
@@ -5706,10 +5783,81 @@ test("pipeline returns finalResult on full success", async () => {
   const content = result.structuredContent as {
     steps: Array<{ step: number; tool: string }>;
     finalResult: CallToolResult;
+    status: string;
   };
 
+  assert.equal(content.status, "completed");
   assert.equal(content.steps.length, 2);
   assert.ok(content.finalResult);
+});
+
+// ─── Parallel mixed results tests ────────────────────────────
+
+test("parallel reports partial status, counts, and failed indexes", async () => {
+  const upstream = {
+    async callTool(tool: string) {
+      if (tool === "bad_result") {
+        return { content: [{ type: "text" as const, text: "downstream error" }], isError: true };
+      }
+      if (tool === "bad_throw") {
+        throw new Error("connection refused");
+      }
+      return textResult(`ok-${tool}`);
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    calls: [
+      { tool: "good_one" },
+      { tool: "bad_result" },
+      { tool: "good_two" },
+      { tool: "bad_throw" },
+    ],
+  }, 4);
+
+  const content = result.structuredContent as {
+    status: string;
+    succeeded: number;
+    failed: number;
+    failedIndexes: number[];
+    results: Array<{ result?: { isError?: boolean }; error?: string }>;
+  };
+
+  assert.equal(content.status, "partial");
+  assert.equal(content.succeeded, 2);
+  assert.equal(content.failed, 2);
+  assert.deepEqual(content.failedIndexes, [1, 3]);
+  assert.equal(content.results[1].result?.isError, true);
+  assert.equal(content.results[3].error, "connection refused");
+});
+
+test("parallel with all calls succeeding reports completed status", async () => {
+  const upstream = {
+    async callTool(tool: string) {
+      return textResult(`done-${tool}`);
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    calls: [
+      { tool: "one" },
+      { tool: "two" },
+    ],
+  }, 4);
+
+  const content = result.structuredContent as {
+    status: string;
+    succeeded: number;
+    failed: number;
+    failedIndexes: number[];
+  };
+
+  assert.equal(content.status, "completed");
+  assert.equal(content.succeeded, 2);
+  assert.equal(content.failed, 0);
+  assert.deepEqual(content.failedIndexes, []);
 });
 
 // ─── Batch mixed results tests ───────────────────────────────
@@ -5738,13 +5886,17 @@ test("batch reports correct succeeded and failed counts", async () => {
   }, 1);
 
   const content = result.structuredContent as {
+    status: string;
     succeeded: number;
     failed: number;
+    failedIndexes: number[];
     results: Array<{ index: number; result?: CallToolResult; error?: string }>;
   };
 
+  assert.equal(content.status, "partial");
   assert.equal(content.succeeded, 3);
   assert.equal(content.failed, 2);
+  assert.deepEqual(content.failedIndexes, [1, 3]);
   assert.equal(content.results.length, 5);
 
   assert.ok(content.results[1].result?.isError);
@@ -5767,9 +5919,16 @@ test("batch with all items succeeding reports zero failures", async () => {
     ],
   }, 4);
 
-  const content = result.structuredContent as { succeeded: number; failed: number };
+  const content = result.structuredContent as {
+    status: string;
+    succeeded: number;
+    failed: number;
+    failedIndexes: number[];
+  };
+  assert.equal(content.status, "completed");
   assert.equal(content.succeeded, 2);
   assert.equal(content.failed, 0);
+  assert.deepEqual(content.failedIndexes, []);
 });
 
 // ─── handleCall with server hints and qualified names ─────────
