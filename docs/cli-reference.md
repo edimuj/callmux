@@ -22,6 +22,7 @@
 | `callmux client attach <client> --url <url> --bridge [--yes]` | Write stdio bridge config for a shared listener |
 | `callmux client detach <client> [--yes]` | Remove callmux from client config |
 | `callmux client print <client> [--url <url>] [--bridge]` | Output ready-to-paste snippet |
+| `callmux instructions [--profile codex\|claude] [--mode meta-only]` | Print compact agent instructions |
 | `callmux daemon install [--start] [--enable] [--dry-run]` | Install a background shared-listener daemon |
 | `callmux daemon status\|logs\|start\|stop\|restart` | Inspect or control the daemon |
 | `callmux daemon enable\|disable` | Enable or disable launch at login/boot |
@@ -128,6 +129,19 @@ callmux daemon restart
 ```
 
 `daemon install` picks the safest supported backend automatically: Linux user systemd units by default, Linux system units with `--system`, and macOS user LaunchAgents. Use `--dry-run` to inspect the generated unit/plist and commands before making changes.
+
+---
+
+## Agent Instructions
+
+```bash
+callmux instructions
+callmux instructions --profile codex --mode meta-only
+```
+
+The command prints a concise markdown block for `AGENTS.md`, `CLAUDE.md`, or similar agent instruction files. It stays generic and public: no local paths, private config, or user-specific workflow text.
+
+The output covers meta-tool recovery fields, `callmux_dry_run`, response-shield retrieval via `_callmux.retrieval`, cwd overrides, file-reference choices, and the `$json`/`$jsonFile` footgun.
 
 ---
 

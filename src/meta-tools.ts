@@ -141,6 +141,12 @@ export const META_TOOLS: Tool[] = [
                   'Use "$text" for the full text content, "$json" to parse as JSON, or "$json.field.path" for nested fields.',
                 additionalProperties: { type: "string" },
               },
+              onMappingMissing: {
+                type: "string",
+                description:
+                  'Behavior when inputMapping entries cannot be resolved. Default "continue" preserves recoverable behavior; "fail" stops before executing the step.',
+                enum: ["continue", "fail"],
+              },
             },
             required: ["tool"],
             additionalProperties: false,
@@ -335,6 +341,10 @@ export const META_TOOLS: Tool[] = [
               inputMapping: {
                 type: "object",
                 additionalProperties: { type: "string" },
+              },
+              onMappingMissing: {
+                type: "string",
+                enum: ["continue", "fail"],
               },
             },
             required: ["tool"],

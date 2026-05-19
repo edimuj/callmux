@@ -65,6 +65,8 @@ import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
 import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
 import { CallmuxBridge, deriveBridgeCallOptions } from "./bridge.js";
+import { renderAgentInstructions } from "./instructions.js";
+import { shutdownAfterFatalListenerError } from "./fatal.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -1430,6 +1432,72 @@ test("shared listener setup helpers derive client URLs and start command", () =>
     renderSharedListenerStartCommand("http://0.0.0.0:4860", "/tmp/callmux.json"),
     "callmux --listen 4860 --host 0.0.0.0 --config /tmp/callmux.json"
   );
+});
+
+test("renderAgentInstructions includes compact safety guidance without local paths", () => {
+  const output = renderAgentInstructions({ profile: "codex", mode: "meta-only" });
+
+  assert.match(output, /callmux Agent Instructions/);
+  assert.match(output, /callmux_dry_run/);
+  assert.match(output, /onMappingMissing: "fail"/);
+  assert.match(output, /failedIndexes/);
+  assert.match(output, /failedStep/);
+  assert.match(output, /\$file/);
+  assert.match(output, /\$jsonFile/);
+  assert.match(output, /\$json` and `\$json\.path` are pipeline `inputMapping` expressions only/);
+  assert.match(output, /_callmux\.retrieval/);
+  assert.match(output, /meta-only mode/);
+  assert.doesNotMatch(output, /\/home\/edimuj|Tailscale|Exelerus|Stockholm/);
+  assert.ok(output.split("\n").length < 40);
+});
+
+test("shutdownAfterFatalListenerError closes resources and exits non-zero", async () => {
+  const logs: string[] = [];
+  let closed = false;
+  let exitCode: number | undefined;
+
+  await shutdownAfterFatalListenerError(
+    "uncaughtException",
+    new Error("boom"),
+    {
+      close: async () => {
+        closed = true;
+      },
+      log: (message) => logs.push(message),
+      exit: (code) => {
+        exitCode = code;
+      },
+      timeoutMs: 100,
+    }
+  );
+
+  assert.equal(closed, true);
+  assert.equal(exitCode, 1);
+  assert.match(logs.join(""), /uncaughtException/);
+  assert.match(logs.join(""), /Fatal listener error/);
+});
+
+test("shutdownAfterFatalListenerError exits after bounded cleanup timeout", async () => {
+  const logs: string[] = [];
+  let exitCode: number | undefined;
+
+  await shutdownAfterFatalListenerError(
+    "unhandledRejection",
+    "stuck",
+    {
+      close: async () => {
+        await new Promise(() => {});
+      },
+      log: (message) => logs.push(message),
+      exit: (code) => {
+        exitCode = code;
+      },
+      timeoutMs: 5,
+    }
+  );
+
+  assert.equal(exitCode, 1);
+  assert.match(logs.join(""), /cleanup timed out/);
 });
 
 test("daemon plan renders user systemd install safely by default", () => {
@@ -3861,6 +3929,17 @@ test("loadConfig parses reusable recipes from file", async () => {
               labels: ["bug"],
             },
           },
+          analyze_issue: {
+            mode: "pipeline",
+            steps: [
+              { tool: "search_issues", arguments: { query: "bug" } },
+              {
+                tool: "get_issue",
+                inputMapping: { issue_number: "$json.items.0.number" },
+                onMappingMissing: "fail",
+              },
+            ],
+          },
         },
       })
     );
@@ -3870,6 +3949,7 @@ test("loadConfig parses reusable recipes from file", async () => {
     assert.equal(config.recipes?.open_bug.tool, "create_issue");
     assert.equal(config.recipes?.open_bug.cwd, "/tmp/callmux-recipe");
     assert.deepEqual(config.recipes?.open_bug.arguments?.labels, ["bug"]);
+    assert.equal(config.recipes?.analyze_issue.steps?.[1].onMappingMissing, "fail");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -4141,11 +4221,55 @@ test("handleDryRun warns when text fields resolve to structured values", async (
   assert.equal(content.summary.warningCount, 1);
   assert.deepEqual(content.items[0].warnings?.[0], {
     code: "structured_text_field",
+    canonicalCode: "structured_value_for_likely_text_field",
     path: "arguments.body",
     message:
       'Argument field "body" resolved to an object, but this field usually expects a string.',
     recommendation:
       "Use `$file` or `$text` for markdown/text bodies. Reserve `$jsonFile`/`$yamlFile` for structured payload fields.",
+  });
+});
+
+test("handleDryRun warns that pipeline inputMapping is not evaluated", async () => {
+  const upstream = {
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      return {
+        toolName: tool,
+        server: server ?? "github",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+  };
+
+  const result = await handleDryRun(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "search", arguments: { q: "bug" } },
+      {
+        tool: "read",
+        inputMapping: { issue_number: "$json.items.0.number" },
+        onMappingMissing: "fail",
+      },
+    ],
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    items: Array<{ warnings?: Array<{ code: string; path: string; recommendation: string }> }>;
+    summary: { warningCount: number };
+  };
+  assert.equal(content.summary.warningCount, 1);
+  assert.deepEqual(content.items[1].warnings?.[0], {
+    code: "pipeline_mapping_not_evaluated_in_dry_run",
+    path: "steps[1].inputMapping",
+    message:
+      "Pipeline inputMapping depends on the previous step output and is not evaluated in dry run.",
+    recommendation:
+      "Live execution will stop before this step if a mapping is missing.",
   });
 });
 
@@ -5701,6 +5825,48 @@ test("pipeline $json returns undefined for non-JSON text", async () => {
       argument: "data",
       expression: "$json",
       reason: "previous_result_not_json",
+    },
+  ]);
+});
+
+test("pipeline onMappingMissing fail stops before executing step", async () => {
+  const calledTools: string[] = [];
+  const upstream = {
+    async callTool(tool: string) {
+      calledTools.push(tool);
+      if (tool === "step1") return textResult(JSON.stringify({ user: { name: "Edin" } }));
+      return textResult("should not run");
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "step1" },
+      {
+        tool: "step2",
+        inputMapping: { issue_number: "$json.issue.number" },
+        onMappingMissing: "fail",
+      },
+    ],
+  });
+
+  assert.deepEqual(calledTools, ["step1"]);
+  const content = result.structuredContent as {
+    status: string;
+    failedStep?: number;
+    steps: Array<{
+      error?: string;
+      skippedMappings?: Array<{ argument: string; expression: string; reason: string }>;
+    }>;
+  };
+  assert.equal(content.status, "failed");
+  assert.equal(content.failedStep, 1);
+  assert.equal(content.steps[1].error, "required inputMapping failed");
+  assert.deepEqual(content.steps[1].skippedMappings, [
+    {
+      argument: "issue_number",
+      expression: "$json.issue.number",
+      reason: "path_not_found",
     },
   ]);
 });

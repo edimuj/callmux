@@ -389,6 +389,8 @@ export interface PipelineStep {
   cwd?: string;
   /** jq-style path to extract from previous result and merge into arguments */
   inputMapping?: Record<string, string>;
+  /** Behavior when an inputMapping entry cannot be resolved */
+  onMappingMissing?: "continue" | "fail";
 }
 
 export type RecipeMode = "call" | "parallel" | "batch" | "pipeline";

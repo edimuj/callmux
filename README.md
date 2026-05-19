@@ -198,10 +198,16 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 
 All argument objects support [file references](docs/config-reference.md#file-references) (`$file`, `$jsonFile`, `$yamlFile`, `$text`) for long content that doesn't belong in JSON strings. Use `$file`/`$text` for markdown or plain string fields such as GitHub issue bodies; use `$jsonFile`/`$yamlFile` only when the downstream field expects structured data. `$json` is pipeline `inputMapping` syntax, not a file reference.
 
+Print compact, version-aligned agent guidance with:
+
+```bash
+callmux instructions --profile codex --mode meta-only
+```
+
 Fan-out and chained meta-tools are recoverable by design:
 
 - `callmux_parallel` and `callmux_batch` always return every per-call or per-item result, plus `status`, `succeeded`, `failed`, and `failedIndexes`. If one branch fails, successful siblings are still visible and failed indexes can be retried directly.
-- `callmux_pipeline` returns `status: "completed"`, every step result, and `finalResult` on success. If step N fails or throws, execution stops and returns `status: "failed"`, `failedStep`, and the outputs from steps `0..N`; mapped steps also include `mappedArguments` and `skippedMappings`, so agents can see which `inputMapping` values were actually sent or not resolved before retrying.
+- `callmux_pipeline` returns `status: "completed"`, every step result, and `finalResult` on success. If step N fails or throws, execution stops and returns `status: "failed"`, `failedStep`, and the outputs from steps `0..N`; mapped steps also include `mappedArguments` and `skippedMappings`, so agents can see which `inputMapping` values were actually sent or not resolved before retrying. Set `onMappingMissing: "fail"` on steps where missing mapped IDs or mutation targets must stop before side effects.
 
 ---
 

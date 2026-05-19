@@ -246,6 +246,7 @@ function collectArgumentWarnings(
       if (suspiciousJsonMappingLiteral(current)) {
         warnings.push({
           code: "literal_json_mapping",
+          canonicalCode: "literal_mapping_expression_in_arguments",
           path: currentPath,
           message:
             "`$json` is a pipeline inputMapping expression, not a downstream argument file reference.",
@@ -264,6 +265,7 @@ function collectArgumentWarnings(
     ) {
       warnings.push({
         code: "structured_text_field",
+        canonicalCode: "structured_value_for_likely_text_field",
         path: currentPath,
         message:
           `Argument field "${fieldName}" resolved to ${Array.isArray(current) ? "an array" : "an object"}, but this field usually expects a string.`,
@@ -478,6 +480,18 @@ function validatePipelineArgs(
       inputMapping = Object.fromEntries(entries) as Record<string, string>;
     }
 
+    let onMappingMissing: "continue" | "fail" | undefined;
+    if (step.onMappingMissing !== undefined) {
+      if (step.onMappingMissing !== "continue" && step.onMappingMissing !== "fail") {
+        return errorResult(
+          "invalid_arguments",
+          `steps[${index}].onMappingMissing must be "continue" or "fail"`,
+          { field: `steps[${index}].onMappingMissing` }
+        );
+      }
+      onMappingMissing = step.onMappingMissing;
+    }
+
     steps.push({
       tool,
       ...(typeof server === "string" ? { server } : {}),
@@ -485,6 +499,7 @@ function validatePipelineArgs(
       ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
       ...(typeof cwd === "string" ? { cwd } : {}),
       ...(inputMapping ? { inputMapping } : {}),
+      ...(onMappingMissing ? { onMappingMissing } : {}),
     });
   }
 
@@ -567,7 +582,12 @@ interface DryRunCall {
     | { mode: "call" }
     | { mode: "parallel"; index: number }
     | { mode: "batch"; index: number }
-    | { mode: "pipeline"; step: number; hasInputMapping: boolean };
+    | {
+      mode: "pipeline";
+      step: number;
+      hasInputMapping: boolean;
+      onMappingMissing: "continue" | "fail";
+    };
 }
 
 function validateDryRunArgs(
@@ -690,6 +710,7 @@ function validateDryRunArgs(
         mode: "pipeline",
         step: stepIndex,
         hasInputMapping: !!step.inputMapping,
+        onMappingMissing: step.onMappingMissing ?? "continue",
       },
     })),
   };
@@ -1064,6 +1085,24 @@ export async function handlePipeline(
       }
     }
 
+    if (skippedMappings.length > 0 && step.onMappingMissing === "fail") {
+      stepResults.push({
+        step: i,
+        tool: step.tool,
+        ...(Object.keys(mappedArguments).length > 0 ? { mappedArguments } : {}),
+        skippedMappings,
+        error: "required inputMapping failed",
+        durationMs: Date.now() - callStart,
+      });
+
+      return successResult({
+        status: "failed",
+        failedStep: i,
+        steps: stepResults,
+        totalDurationMs: Date.now() - startTime,
+      });
+    }
+
     try {
       const callContext = contextWithCallOverrides(context, {
         timeoutMs: step.timeoutMs,
@@ -1206,6 +1245,18 @@ export async function handleDryRun(
     const warnings = resolvedArguments
       ? collectArgumentWarnings(resolvedArguments)
       : [];
+    if (call.source.mode === "pipeline" && call.source.hasInputMapping) {
+      warnings.push({
+        code: "pipeline_mapping_not_evaluated_in_dry_run",
+        path: `steps[${call.source.step}].inputMapping`,
+        message:
+          "Pipeline inputMapping depends on the previous step output and is not evaluated in dry run.",
+        recommendation:
+          call.source.onMappingMissing === "fail"
+            ? 'Live execution will stop before this step if a mapping is missing.'
+            : 'Use onMappingMissing: "fail" when missing mapped values must stop before side effects.',
+      });
+    }
     warningCount += warnings.length;
 
     items.push({

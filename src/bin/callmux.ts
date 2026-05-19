@@ -57,6 +57,12 @@ import {
   type DaemonScope,
 } from "../daemon.js";
 import { runSetup } from "../setup.js";
+import {
+  renderAgentInstructions,
+  type AgentInstructionsMode,
+  type AgentInstructionsProfile,
+} from "../instructions.js";
+import { shutdownAfterFatalListenerError } from "../fatal.js";
 import * as p from "@clack/prompts";
 import { UpstreamManager } from "../upstream.js";
 import type { CallmuxConfig, ServerConfig } from "../types.js";
@@ -90,6 +96,7 @@ Usage:
   callmux client detach <claude|codex> [--name <id>] [--file <path>] [--dry-run] [--yes] [--json]
   callmux client status [claude|codex] [--config <path>] [--name <id>] [--url <listener-url>] [--bridge] [--file <path>] [--json]
   callmux daemon <install|uninstall|start|stop|restart|enable|disable|status|logs> [options]
+  callmux instructions [--profile generic|codex|claude] [--mode standard|meta-only]
 
 Options:
   --config <path>       Path to callmux config or .mcp.json file
@@ -111,6 +118,11 @@ Options:
                          Config files are watched and hot-reloaded in listener mode
   --help, -h            Show this help
   --version, -v         Show version
+
+Instructions Options:
+  --profile <name>      Instruction profile: generic, codex, or claude (default: generic)
+  --format markdown     Output format (only markdown is currently supported)
+  --mode <mode>         Runtime mode guidance: standard or meta-only (default: standard)
 
 Bridge Options:
   --url <listener-url>  Shared Streamable HTTP MCP endpoint (for example http://localhost:4860/mcp)
@@ -865,6 +877,38 @@ async function handleBridgeCommand(args: string[]): Promise<void> {
   await bridge.start(transport);
 }
 
+function handleInstructionsCommand(args: string[]): void {
+  let profile: AgentInstructionsProfile = "generic";
+  let mode: AgentInstructionsMode = "standard";
+  let format = "markdown";
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--profile" && i + 1 < args.length) {
+      const value = args[++i];
+      if (value !== "generic" && value !== "codex" && value !== "claude") {
+        throw new Error("--profile must be one of: generic, codex, claude");
+      }
+      profile = value;
+    } else if (arg === "--mode" && i + 1 < args.length) {
+      const value = args[++i];
+      if (value !== "standard" && value !== "meta-only") {
+        throw new Error("--mode must be one of: standard, meta-only");
+      }
+      mode = value;
+    } else if (arg === "--format" && i + 1 < args.length) {
+      format = args[++i];
+      if (format !== "markdown") {
+        throw new Error("--format currently supports only markdown");
+      }
+    } else {
+      throw new Error(`Unknown instructions option "${arg}"`);
+    }
+  }
+
+  process.stdout.write(renderAgentInstructions({ profile, mode }));
+}
+
 function parseDaemonAction(value: string | undefined): DaemonAction {
   const actions = new Set<DaemonAction>([
     "install",
@@ -1061,6 +1105,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args[0] === "instructions") {
+    handleInstructionsCommand(args.slice(1));
+    return;
+  }
+
   if (args[0] === "client") {
     await handleClientCommand(args.slice(1), configPath);
     return;
@@ -1205,20 +1254,8 @@ async function main(): Promise<void> {
       reloadTimer.unref?.();
     };
 
-    process.on("uncaughtException", (err) => {
-      process.stderr.write(`[callmux] Uncaught exception: ${err.stack ?? err.message}\n`);
-    });
-
-    process.on("unhandledRejection", (reason) => {
-      const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
-      process.stderr.write(`[callmux] Unhandled rejection: ${msg}\n`);
-    });
-
     let shuttingDown = false;
-    const shutdown = async (signal: string) => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      process.stderr.write(`[callmux] ${signal} received, shutting down\n`);
+    const closeListenerResources = async () => {
       clearInterval(keepalive);
       if (reloadTimer) clearTimeout(reloadTimer);
       configWatcher?.close();
@@ -1226,6 +1263,31 @@ async function main(): Promise<void> {
         listener.close(),
         proxy.close(),
       ]);
+    };
+
+    let fatalShutdownInProgress = false;
+    const fatalShutdown = (kind: "uncaughtException" | "unhandledRejection", reason: unknown) => {
+      if (fatalShutdownInProgress) return;
+      fatalShutdownInProgress = true;
+      shuttingDown = true;
+      void shutdownAfterFatalListenerError(kind, reason, {
+        close: closeListenerResources,
+      });
+    };
+
+    process.on("uncaughtException", (err) => {
+      fatalShutdown("uncaughtException", err);
+    });
+
+    process.on("unhandledRejection", (reason) => {
+      fatalShutdown("unhandledRejection", reason);
+    });
+
+    const shutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      process.stderr.write(`[callmux] ${signal} received, shutting down\n`);
+      await closeListenerResources();
       process.exit(0);
     };
 

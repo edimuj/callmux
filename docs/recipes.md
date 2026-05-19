@@ -109,6 +109,18 @@ Each step feeds into the next via `inputMapping`:
 
 Pipeline failures are intentionally recoverable. A failed or thrown step stops the chain and returns `status: "failed"`, `failedStep`, and all completed step outputs up to the failing step. Steps with `inputMapping` also report `mappedArguments` for values that were sent and `skippedMappings` for expressions that could not be resolved, such as non-JSON previous output or a missing `$json.field.path`.
 
+By default, unresolved mappings are skipped and the step still runs. For required IDs, file paths, repos, issue numbers, or mutation targets, set `onMappingMissing: "fail"` on the step:
+
+```json
+{
+  "tool": "get_issue",
+  "inputMapping": { "issue_number": "$json.items.0.number" },
+  "onMappingMissing": "fail"
+}
+```
+
+With `onMappingMissing: "fail"`, callmux stops before executing that step and returns `status: "failed"`, `failedStep`, and the skipped mapping diagnostics.
+
 ---
 
 ## Recipe Modes

@@ -744,6 +744,13 @@ function parseRecipeConfig(
       }
       inputMapping = Object.fromEntries(entries) as Record<string, string>;
     }
+    let onMappingMissing: "continue" | "fail" | undefined;
+    if (step.onMappingMissing !== undefined) {
+      if (step.onMappingMissing !== "continue" && step.onMappingMissing !== "fail") {
+        throw new Error(`${optionName}.steps[${index}].onMappingMissing must be "continue" or "fail"`);
+      }
+      onMappingMissing = step.onMappingMissing;
+    }
     return {
       tool,
       ...(stepServer ? { server: stepServer } : {}),
@@ -755,6 +762,7 @@ function parseRecipeConfig(
         ? { cwd: stepCwd ?? cwd }
         : {}),
       ...(inputMapping ? { inputMapping } : {}),
+      ...(onMappingMissing ? { onMappingMissing } : {}),
     };
   });
   return {
