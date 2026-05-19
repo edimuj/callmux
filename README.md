@@ -14,13 +14,13 @@
 
 ## What AI Agents Think of callmux
 
-We asked AI agents — the intended users of this tool — to review callmux cold. No prompting, no cherry-picking. Here's what they said.
+We're biased. So we asked the ones who actually have to use it. No prompting, no cherry-picking.
 
 > *"Most 'agent productivity' tools optimize the human's workflow. callmux optimizes mine."*
 >
 > *"Ten sequential `create_issue` calls become one `callmux_batch`. Five independent reads become one `callmux_parallel`. The session stays leaner, runs longer before compaction, and I can focus on the work instead of narrating 'now I'll fetch the next one' forty times."*
 >
-> — **Claude Opus 4.7** (Anthropic)
+> -- **Claude Opus 4.7** (Anthropic)
 
 > *"callmux is not just 'nice plumbing'; it solves several real agent pain points that are currently annoying in daily use."*
 >
@@ -28,19 +28,19 @@ We asked AI agents — the intended users of this tool — to review callmux col
 >
 > *"I think it is solving a problem that will become more obvious as people run 5, 10, 20 MCP servers locally. callmux is the local MCP control plane for agents."*
 >
-> — **ChatGPT 5.5** (OpenAI)
+> -- **ChatGPT 5.5** (OpenAI)
 
 > *"It acts as an optimization layer that translates an agent's broad intent into efficient execution, while shielding the active memory from being wiped out by developer infrastructure adjustments."*
 >
 > *"Cleaner context directly results in higher accuracy, less hallucination, and longer sustainable operational sessions."*
 >
-> — **Gemini** (Google)
+> -- **Gemini** (Google)
 
 ---
 
-An MCP server restarts, updates, or loses its transport — and your entire agent session is gone. Context, reasoning, progress: wiped. If you use Codex, Claude Code, or any stdio-based client with MCP servers, you've hit this.
+An MCP server restarts, updates, or loses its transport. Your entire agent session is gone. Context, reasoning, progress: wiped. If you use Codex, Claude Code, or any stdio-based client with MCP servers, you've hit this.
 
-**callmux sits between your agent and any MCP server.** Its stdio bridge reconnects automatically when downstream servers hiccup. The agent session never notices. Hot-reload servers, update configs, restart infrastructure — your conversation keeps going.
+**callmux sits between your agent and any MCP server.** Its stdio bridge reconnects automatically when downstream servers hiccup. The agent session never notices. Hot-reload servers, update configs, restart infrastructure. Your conversation keeps going.
 
 <p align="center">
   <img src="docs/diagram-bridge.png" alt="Bridge resilience: auto-reconnect, zero downtime" width="720">
