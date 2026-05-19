@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallCache } from "./cache.js";
 import {
   configFromArgs,
@@ -62,7 +63,7 @@ import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js"
 import { createResponseStore } from "./response-store.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
 import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
-import { deriveBridgeCallOptions } from "./bridge.js";
+import { CallmuxBridge, deriveBridgeCallOptions } from "./bridge.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -8562,6 +8563,59 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     await listener?.close();
     await upstream.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stdio bridge emits tool list changed notification when refreshed tools differ", async () => {
+  const bridge = new CallmuxBridge({
+    url: "http://127.0.0.1:1/mcp",
+    cwd: process.cwd(),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  let tools = [mockTool("old_tool")];
+  const notifications: Array<{ error: Error | null; tools: Tool[] | null }> = [];
+  const bridgeClient = new Client(
+    { name: "bridge-list-changed-test", version: "1.0" },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 0,
+          onChanged(error, changedTools) {
+            notifications.push({ error, tools: changedTools });
+          },
+        },
+      },
+    }
+  );
+
+  (bridge as any).client = {
+    async listTools() {
+      return { tools };
+    },
+    async close() {},
+  };
+
+  try {
+    await (bridge as any).server.connect(serverTransport);
+    await bridgeClient.connect(clientTransport);
+
+    assert.equal(bridgeClient.getServerCapabilities()?.tools?.listChanged, true);
+    const first = await bridgeClient.listTools();
+    assert.deepEqual(first.tools.map((tool) => tool.name), ["old_tool"]);
+    assert.equal(notifications.length, 0);
+
+    tools = [mockTool("new_tool")];
+    const second = await bridgeClient.listTools();
+    assert.deepEqual(second.tools.map((tool) => tool.name), ["new_tool"]);
+
+    await waitFor(async () => notifications.length === 1);
+    assert.equal(notifications[0].error, null);
+    assert.equal(notifications[0].tools, null);
+  } finally {
+    await bridgeClient.close().catch(() => undefined);
+    await bridge.close();
   }
 });
 

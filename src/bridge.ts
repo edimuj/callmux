@@ -28,6 +28,38 @@ function bridgeHeaders(options: BridgeOptions): Record<string, string> {
   };
 }
 
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableValue(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, stableValue(nested)])
+    );
+  }
+
+  return value;
+}
+
+function toolListFingerprint(tools: Tool[]): string {
+  const normalized = tools
+    .map((tool) => stableValue(tool) as Record<string, unknown>)
+    .sort((left, right) => {
+      const leftName = typeof left.name === "string" ? left.name : "";
+      const rightName = typeof right.name === "string" ? right.name : "";
+      return leftName.localeCompare(rightName) ||
+        JSON.stringify(left).localeCompare(JSON.stringify(right));
+    });
+  return JSON.stringify(normalized);
+}
+
+function sameToolList(left: Tool[], right: Tool[]): boolean {
+  return toolListFingerprint(left) === toolListFingerprint(right);
+}
+
 export class CallmuxBridge {
   private server: Server;
   private client: Client | undefined;
@@ -36,22 +68,29 @@ export class CallmuxBridge {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempts = 0;
   private cachedTools: Tool[] = [];
+  private hasReturnedTools = false;
   private lastConnectError: string | undefined;
   private closed = false;
 
   constructor(private options: BridgeOptions) {
     this.server = new Server(
       { name: "callmux-bridge", version: "0.1.0" },
-      { capabilities: { tools: {} } }
+      { capabilities: { tools: { listChanged: true } } }
     );
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       try {
         const result = await this.withReconnect((client) => client.listTools());
+        const changed = this.hasReturnedTools && !sameToolList(result.tools, this.cachedTools);
         this.cachedTools = result.tools;
+        this.hasReturnedTools = true;
+        if (changed) {
+          await this.server.sendToolListChanged().catch(() => undefined);
+        }
         return result;
       } catch {
         this.scheduleReconnect();
+        this.hasReturnedTools = true;
         return { tools: this.cachedTools };
       }
     });
