@@ -1,7 +1,7 @@
 <div align="center">
   <h1>callmux</h1>
   <p>
-    <strong>MCP multiplexer: parallel execution, batching, caching, pipelining, and shared infrastructure for any AI agent.</strong>
+    <strong>Hot-reload MCP servers without restarting your agent. Then make it faster: parallel execution, batching, caching, and pipelining for any AI agent.</strong>
   </p>
   <p>
     <a href="https://www.npmjs.com/package/callmux"><img src="https://img.shields.io/npm/v/callmux?color=blue&label=npm" alt="npm version"></a>
@@ -12,19 +12,51 @@
 
 ---
 
-AI agents make tool calls one at a time. Creating 10 GitHub issues? That's 10 sequential round-trips. Fetching data from 3 different servers? 3 serial waits.
+## What AI Agents Think of callmux
 
-**callmux sits between your agent and any MCP server**, adding capabilities the original doesn't have:
+We asked AI agents — the intended users of this tool — to review callmux cold. No prompting, no cherry-picking. Here's what they said.
+
+> *"Most 'agent productivity' tools optimize the human's workflow. callmux optimizes mine."*
+>
+> *"Ten sequential `create_issue` calls become one `callmux_batch`. Five independent reads become one `callmux_parallel`. The session stays leaner, runs longer before compaction, and I can focus on the work instead of narrating 'now I'll fetch the next one' forty times."*
+>
+> — **Claude Opus 4.7** (Anthropic)
+
+> *"callmux is not just 'nice plumbing'; it solves several real agent pain points that are currently annoying in daily use."*
+>
+> *"The bridge feature is genuinely compelling. Avoiding 'restart session because MCP changed' is a killer quality-of-life improvement."*
+>
+> *"I think it is solving a problem that will become more obvious as people run 5, 10, 20 MCP servers locally. callmux is the local MCP control plane for agents."*
+>
+> — **ChatGPT 5.5** (OpenAI)
+
+> *"It acts as an optimization layer that translates an agent's broad intent into efficient execution, while shielding the active memory from being wiped out by developer infrastructure adjustments."*
+>
+> *"Cleaner context directly results in higher accuracy, less hallucination, and longer sustainable operational sessions."*
+>
+> — **Gemini** (Google)
+
+---
+
+An MCP server restarts, updates, or loses its transport — and your entire agent session is gone. Context, reasoning, progress: wiped. If you use Codex, Claude Code, or any stdio-based client with MCP servers, you've hit this.
+
+**callmux sits between your agent and any MCP server.** Its stdio bridge reconnects automatically when downstream servers hiccup. The agent session never notices. Hot-reload servers, update configs, restart infrastructure — your conversation keeps going.
+
+<p align="center">
+  <img src="docs/diagram-bridge.png" alt="Bridge resilience: auto-reconnect, zero downtime" width="720">
+</p>
+
+Then it makes everything faster:
 
 | Without callmux | With callmux |
 |:---|:---|
+| MCP restart kills the agent session | [Stdio bridge](docs/shared-server.md#codex-with-stdio-bridge-recommended) reconnects automatically |
+| 6 sessions × 5 servers = 30 processes | 1 [shared callmux](docs/shared-server.md) + 5 servers |
 | 10 sequential `create_issue` calls | 1 `callmux_batch` call |
 | 5 independent reads, one after another | 1 `callmux_parallel` call |
 | Read > transform > write chain | 1 `callmux_pipeline` call |
 | Same data fetched 3 times per session | Cached after first call |
 | 40+ tools bloating the system prompt | 11 meta-tools via [meta-only mode](docs/meta-only-mode.md) |
-| 6 sessions × 5 servers = 30 processes | 1 [shared callmux](docs/shared-server.md) + 5 servers |
-| MCP restart kills the agent session | [Stdio bridge](docs/shared-server.md#codex-with-stdio-bridge-recommended) reconnects automatically |
 
 <p align="center">
   <img src="docs/diagram-overview.png" alt="How callmux works: 1 call in, N concurrent calls out, 1 result back" width="720">
@@ -85,6 +117,18 @@ Works with **any MCP client**: [Codex](docs/shared-server.md#codex-streamable-ht
 
 ## Key Features
 
+### Resilient Bridge: Sessions That Survive Restarts
+
+Codex users know the pain: when an MCP server restarts or loses its transport, the entire Codex session needs to restart to reconnect. callmux's stdio bridge sits between Codex and the shared listener. If the listener hiccups, the bridge reconnects and retries on the next tool call. The agent session never notices.
+
+```toml
+[mcp_servers.callmux]
+command = "callmux"
+args = ["bridge", "--url", "http://localhost:4860/mcp"]
+```
+
+[Full guide ->](docs/shared-server.md#codex-with-stdio-bridge-recommended)
+
 ### Shared Server: 60 Processes Down to 6
 
 Run callmux once, connect all sessions. One set of downstream servers, shared cache, no orphaned processes. On a machine with 6 agent sessions and 5 MCP servers, that's ~60 processes and 4+ GB RAM collapsed to ~6 processes and ~500 MB.
@@ -99,22 +143,6 @@ callmux daemon install --start --enable
 ```
 
 [Full guide ->](docs/shared-server.md)
-
-### Resilient Bridge: Sessions That Survive Restarts
-
-Codex users know the pain: when an MCP server restarts or loses its transport, the entire Codex session needs to restart to reconnect. callmux's stdio bridge sits between Codex and the shared listener. If the listener hiccups, the bridge reconnects and retries on the next tool call. The agent session never notices.
-
-<p align="center">
-  <img src="docs/diagram-bridge.png" alt="Bridge resilience: auto-reconnect, zero downtime" width="720">
-</p>
-
-```toml
-[mcp_servers.callmux]
-command = "callmux"
-args = ["bridge", "--url", "http://localhost:4860/mcp"]
-```
-
-[Full guide ->](docs/shared-server.md#codex-with-stdio-bridge-recommended)
 
 ### Meta-Only Mode: Fixed System Prompt Size
 
