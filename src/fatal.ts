@@ -25,12 +25,12 @@ export async function shutdownAfterFatalListenerError(
   log("[callmux] Fatal listener error, shutting down before supervisor restart\n");
 
   let timedOut = false;
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
-    const timer = setTimeout(() => {
+    timeoutTimer = setTimeout(() => {
       timedOut = true;
       resolve();
     }, timeoutMs);
-    timer.unref?.();
   });
 
   try {
@@ -40,6 +40,10 @@ export async function shutdownAfterFatalListenerError(
     ]);
   } catch (error) {
     log(`[callmux] Fatal shutdown cleanup failed: ${fatalMessage(error)}\n`);
+  } finally {
+    if (timeoutTimer !== undefined) {
+      clearTimeout(timeoutTimer);
+    }
   }
 
   if (timedOut) {
