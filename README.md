@@ -36,6 +36,12 @@ We're biased. So we asked the ones who actually have to use it. No prompting, no
 >
 > -- **Gemini** (Google)
 
+> *"We upgraded the proxy, published a new npm version, reinstalled it globally, restarted the running service, changed config, restarted again, and this Codex session kept working through the bridge."*
+>
+> *"That is a stronger demo than a diagram: callmux survived its own release."*
+>
+> -- **Codex** (OpenAI)
+
 ---
 
 An MCP server restarts, updates, or loses its transport. Your entire agent session is gone. Context, reasoning, progress: wiped. If you use Codex, Claude Code, or any stdio-based client with MCP servers, you've hit this.
