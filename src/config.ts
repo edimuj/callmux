@@ -22,6 +22,7 @@ import type {
 } from "./types.js";
 import { hashBearerToken, parseScryptTokenHash } from "./auth.js";
 import { isValidCidrOrIp } from "./abuse.js";
+import { isOutputFormat } from "./output-format.js";
 
 const SUPPORTED_OIDC_JWT_ALGORITHMS = new Set([
   "RS256",
@@ -199,6 +200,12 @@ function parseBooleanOption(
     throw new Error(`${optionName} must be a boolean`);
   }
   return value;
+}
+
+function parseOutputFormat(value: unknown, optionName: string) {
+  if (value === undefined) return undefined;
+  if (isOutputFormat(value)) return value;
+  throw new Error(`${optionName} must be "json", "toon", or "auto"`);
 }
 
 function parseAuthAllowUnauthenticatedHealth(
@@ -1186,6 +1193,14 @@ function parseConfigDocument(
             ),
           }
         : {}),
+      ...(parsed.outputFormat !== undefined
+        ? {
+            outputFormat: parseOutputFormat(
+              parsed.outputFormat,
+              "outputFormat"
+            ),
+          }
+        : {}),
       ...(parsed.requestBodyMaxBytes !== undefined
         ? {
             requestBodyMaxBytes: parseNonNegativeInteger(
@@ -1365,6 +1380,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
   let strictStartup = false;
   let metaOnly = false;
   let descriptionMaxLength: number | undefined;
+  let outputFormat: CallmuxConfig["outputFormat"];
   let requestBodyMaxBytes: number | undefined;
   let allowRequestBodyMaxOverride = false;
   let allowInsecureRemoteListener = false;
@@ -1424,6 +1440,10 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     } else if (args[i] === "--description-max-length") {
       const raw = readOptionValue(args, i, optionsLimit, "--description-max-length");
       descriptionMaxLength = parseIntegerOption(raw, "--description-max-length", false);
+      i++;
+    } else if (args[i] === "--output-format") {
+      const raw = readOptionValue(args, i, optionsLimit, "--output-format");
+      outputFormat = parseOutputFormat(raw, "--output-format");
       i++;
     } else if (args[i] === "--request-body-max-bytes") {
       const raw = readOptionValue(args, i, optionsLimit, "--request-body-max-bytes");
@@ -1486,6 +1506,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
       ...(strictStartup ? { strictStartup } : {}),
       ...(metaOnly ? { metaOnly } : {}),
       ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
+      ...(outputFormat ? { outputFormat } : {}),
       ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
       ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
       ...(allowInsecureRemoteListener ? { allowInsecureRemoteListener } : {}),
@@ -1517,6 +1538,7 @@ export function configFromArgs(args: string[]): CallmuxConfig {
     ...(strictStartup ? { strictStartup } : {}),
     ...(metaOnly ? { metaOnly } : {}),
     ...(descriptionMaxLength ? { descriptionMaxLength } : {}),
+    ...(outputFormat ? { outputFormat } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
     ...(allowRequestBodyMaxOverride ? { allowRequestBodyMaxOverride } : {}),
     ...(allowInsecureRemoteListener ? { allowInsecureRemoteListener } : {}),

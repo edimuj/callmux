@@ -6,6 +6,7 @@ import type {
   ResponseShieldConfig,
   ServerConfig,
 } from "./types.js";
+import { isOutputFormat, type OutputFormat } from "./output-format.js";
 
 const DEFAULT_MAX_RESULT_BYTES = 64 * 1024;
 const DEFAULT_MAX_STRING_CHARS = 8192;
@@ -32,6 +33,7 @@ interface ResponseShieldOptions {
   maxArrayItems?: number;
   allowTools?: string[];
   denyTools?: string[];
+  outputFormat?: OutputFormat;
 }
 
 export interface ResponseShieldTarget {
@@ -51,6 +53,7 @@ interface ResultQueryArgs {
   limit?: number;
   fields?: string[];
   search?: string;
+  outputFormat?: OutputFormat;
 }
 
 function byteLength(value: unknown): number {
@@ -449,6 +452,13 @@ function validateResultQueryArgs(args: unknown): ResultQueryArgs | CallToolResul
       field: "search",
     });
   }
+  if (args.outputFormat !== undefined && !isOutputFormat(args.outputFormat)) {
+    return errorResult(
+      "invalid_arguments",
+      'outputFormat must be "json", "toon", or "auto"',
+      { field: "outputFormat" }
+    );
+  }
 
   return {
     ref: args.ref,
@@ -457,6 +467,7 @@ function validateResultQueryArgs(args: unknown): ResultQueryArgs | CallToolResul
     ...(typeof limit === "number" ? { limit } : {}),
     ...(Array.isArray(args.fields) ? { fields: args.fields } : {}),
     ...(typeof args.search === "string" ? { search: args.search } : {}),
+    ...(isOutputFormat(args.outputFormat) ? { outputFormat: args.outputFormat } : {}),
   };
 }
 
@@ -511,9 +522,10 @@ export class ResponseStore {
     }
   }
 
-  query(args: unknown): CallToolResult {
+  query(args: unknown, defaultOutputFormat?: OutputFormat): CallToolResult {
     const parsed = validateResultQueryArgs(args);
     if (isCallToolResult(parsed)) return parsed;
+    const outputFormat = parsed.outputFormat ?? defaultOutputFormat;
 
     const entry = this.entries.get(parsed.ref);
     if (!entry) {
@@ -553,7 +565,7 @@ export class ResponseStore {
         count: page.length,
         hasMore: offset + page.length < items.length,
         data: page,
-      });
+      }, { outputFormat });
     }
 
     if (typeof data === "string") {
@@ -573,7 +585,7 @@ export class ResponseStore {
         count: chunk.length,
         hasMore: offset + chunk.length < source.length,
         data: chunk,
-      });
+      }, { outputFormat });
     }
 
     return jsonResult({
@@ -585,7 +597,7 @@ export class ResponseStore {
       count: 1,
       hasMore: false,
       data: parsed.fields ? projectFields(data, parsed.fields) : data,
-    });
+    }, { outputFormat });
   }
 }
 
@@ -643,5 +655,5 @@ export function shieldToolResult(
         `Use the _callmux.retrieval.arguments object for the first page; if that tool is deferred, call callmux_call with _callmux.retrieval.viaCallmuxCall.arguments.`,
     },
     preview,
-  });
+  }, { outputFormat: options.outputFormat });
 }

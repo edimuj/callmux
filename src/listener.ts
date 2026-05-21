@@ -32,6 +32,7 @@ import {
 import type { CallmuxConfig } from "./types.js";
 import type { ToolCallContext } from "./types.js";
 import type { ListenerRuntimeDiagnostics } from "./types.js";
+import { isOutputFormat, type OutputFormat } from "./output-format.js";
 import { authenticateBearerToken } from "./auth.js";
 import { OidcJwtVerifier } from "./oidc.js";
 import {
@@ -1052,47 +1053,92 @@ export class CallmuxListener {
           target = { tool: name };
           result = this.shieldResult(
             target,
-            await handleParallel(upstream, cache, args, maxConcurrency, toolContext)
+            await handleParallel(
+              upstream,
+              cache,
+              args,
+              maxConcurrency,
+              toolContext,
+              config.outputFormat
+            ),
+            this.outputFormatFor(args)
           );
           break;
         case "callmux_batch":
           target = { tool: name };
           result = this.shieldResult(
             target,
-            await handleBatch(upstream, cache, args, maxConcurrency, toolContext)
+            await handleBatch(
+              upstream,
+              cache,
+              args,
+              maxConcurrency,
+              toolContext,
+              config.outputFormat
+            ),
+            this.outputFormatFor(args)
           );
           break;
         case "callmux_pipeline":
           target = { tool: name };
           result = this.shieldResult(
             target,
-            await handlePipeline(upstream, cache, args, toolContext)
+            await handlePipeline(
+              upstream,
+              cache,
+              args,
+              toolContext,
+              config.outputFormat
+            ),
+            this.outputFormatFor(args)
           );
           break;
         case "callmux_call":
           if (isCallmuxGetResultCall(args)) {
             target = { tool: "callmux_get_result" };
-            result = handleGetResult(this.responseStore, args.arguments);
+            result = handleGetResult(
+              this.responseStore,
+              args.arguments,
+              this.outputFormatFor(args)
+            );
           } else {
             target = this.responseShieldTarget(upstream, name, args);
             result = this.shieldResult(
               target,
-              await handleCall(upstream, cache, args, toolContext)
+              await handleCall(
+                upstream,
+                cache,
+                args,
+                toolContext,
+                config.outputFormat
+              ),
+              this.outputFormatFor(args)
             );
           }
           break;
         case "callmux_search_tools":
-          result = handleSearchTools(upstream, config.descriptionMaxLength, args);
+          result = handleSearchTools(
+            upstream,
+            config.descriptionMaxLength,
+            args,
+            config.outputFormat
+          );
           break;
         case "callmux_get_result":
           target = { tool: name };
-          result = handleGetResult(this.responseStore, args);
+          result = handleGetResult(this.responseStore, args, config.outputFormat);
           break;
         case "callmux_cache_clear":
           result = handleCacheClear(cache, args);
           break;
         case "callmux_dry_run":
-          result = await handleDryRun(upstream, cache, args, toolContext);
+          result = await handleDryRun(
+            upstream,
+            cache,
+            args,
+            toolContext,
+            config.outputFormat
+          );
           break;
         case "callmux_recipe_run":
           target = { tool: name };
@@ -1104,8 +1150,10 @@ export class CallmuxListener {
               config.recipes,
               args,
               maxConcurrency,
-              toolContext
-            )
+              toolContext,
+              config.outputFormat
+            ),
+            this.outputFormatFor(args)
           );
           break;
         case "callmux_recipe_dry_run":
@@ -1114,7 +1162,8 @@ export class CallmuxListener {
             cache,
             config.recipes,
             args,
-            toolContext
+            toolContext,
+            config.outputFormat
           );
           break;
         case "callmux_status":
@@ -1128,7 +1177,8 @@ export class CallmuxListener {
             args,
             this.getRuntimeDiagnostics(),
             config.recipes,
-            this.responseStore
+            this.responseStore,
+            config.outputFormat
           );
           break;
         default: {
@@ -1206,14 +1256,24 @@ export class CallmuxListener {
 
   private shieldResult(
     target: ResponseShieldTarget,
-    result: CallToolResult
+    result: CallToolResult,
+    outputFormat?: OutputFormat
   ): CallToolResult {
     return shieldToolResult(
       this.responseStore,
       target,
       result,
-      resolveResponseShieldOptions(this.options.config, target)
+      {
+        ...resolveResponseShieldOptions(this.options.config, target),
+        outputFormat: outputFormat ?? this.options.config.outputFormat,
+      }
     );
+  }
+
+  private outputFormatFor(args: unknown): OutputFormat | undefined {
+    return isRecord(args) && isOutputFormat(args.outputFormat)
+      ? args.outputFormat
+      : this.options.config.outputFormat;
   }
 
   private toolCallTimeoutBudgetMs(tool: string, args: unknown): number | undefined {

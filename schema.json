@@ -87,6 +87,12 @@
       "minimum": 1,
       "description": "Default max chars for tool descriptions in callmux_status (omit = no limit)"
     },
+    "outputFormat": {
+      "type": "string",
+      "enum": ["json", "toon", "auto"],
+      "default": "json",
+      "description": "Model-facing text format for callmux-owned structured results. structuredContent remains JSON."
+    },
     "responseShield": { "$ref": "#/$defs/globalResponseShield" },
     "requestBodyMaxBytes": {
       "type": "integer",

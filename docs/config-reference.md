@@ -49,10 +49,13 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |
 | `descriptionMaxLength` | integer | - | Default max chars for tool descriptions in `callmux_status` |
+| `outputFormat` | `"json"`, `"toon"`, or `"auto"` | `"json"` | Model-facing text format for callmux-owned structured results |
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
 
 Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
 Session-cwd precedence is: explicit meta-tool `cwd`, request `_meta` cwd, existing session cwd/header, then MCP roots when no session cwd exists.
+
+`outputFormat` changes only the visible text in `content[].text` for callmux-owned structured results. `structuredContent`, cache keys, stored results, dashboard state, and pipeline `$json` mapping stay JSON-native. Use `"toon"` for explicit TOON rendering, or `"auto"` to choose TOON only for larger tabular payloads where it is materially smaller than pretty JSON.
 
 ---
 
@@ -213,7 +216,8 @@ Retrieve a stored result:
   "offset": 0,
   "limit": 50,
   "fields": ["id", "name"],
-  "search": "failed"
+  "search": "failed",
+  "outputFormat": "auto"
 }
 ```
 
@@ -414,6 +418,7 @@ The `server` field in meta-tool calls lets you target specific servers:
   "strictStartup": false,
   "metaOnly": false,
   "descriptionMaxLength": 80,
+  "outputFormat": "json",
   "responseShield": {
     "maxResultBytes": 65536,
     "maxStoredResults": 100,

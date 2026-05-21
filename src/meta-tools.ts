@@ -1,5 +1,12 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
+const OUTPUT_FORMAT_PROPERTY = {
+  type: "string",
+  enum: ["json", "toon", "auto"],
+  description:
+    "Optional model-facing text output format. structuredContent remains JSON.",
+} as const;
+
 /**
  * Meta-tool definitions that callmux exposes alongside proxied tools.
  */
@@ -44,6 +51,7 @@ export const META_TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["calls"],
       additionalProperties: false,
@@ -100,6 +108,7 @@ export const META_TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["tool", "items"],
       additionalProperties: false,
@@ -152,6 +161,7 @@ export const META_TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["steps"],
       additionalProperties: false,
@@ -185,6 +195,7 @@ export const META_TOOLS: Tool[] = [
           description:
             "Max chars per tool description. 0 disables truncation for this call; omit uses the config default.",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       additionalProperties: false,
     },
@@ -225,6 +236,7 @@ export const META_TOOLS: Tool[] = [
           type: "string",
           description: "Optional case-insensitive text search before pagination.",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["ref"],
       additionalProperties: false,
@@ -267,6 +279,7 @@ export const META_TOOLS: Tool[] = [
           description:
             "Force an immediate reconnect attempt when the target server is in reconnect backoff.",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["tool"],
       additionalProperties: false,
@@ -351,6 +364,7 @@ export const META_TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       additionalProperties: false,
     },
@@ -371,6 +385,7 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           description: "Runtime values for { \"$param\": \"name\" } placeholders in the recipe",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["recipe"],
       additionalProperties: false,
@@ -392,6 +407,7 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           description: "Runtime values for { \"$param\": \"name\" } placeholders in the recipe",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["recipe"],
       additionalProperties: false,
@@ -447,6 +463,7 @@ export const META_TOOLS: Tool[] = [
           description:
             "Include listener session cwd diagnostics and scoped stdio client state when running in shared listener mode (default false).",
         },
+        outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       additionalProperties: false,
     },

@@ -1,4 +1,5 @@
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { OutputFormat } from "./output-format.js";
 
 // ─── Downstream server configuration ───────────────────────────
 
@@ -235,6 +236,8 @@ export interface CallmuxConfig {
   metaOnly?: boolean;
   /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
   descriptionMaxLength?: number;
+  /** Model-facing text output format for callmux-owned structured results */
+  outputFormat?: OutputFormat;
   /** Response shielding and stored-result configuration */
   responseShield?: ResponseShieldConfig & {
     /** Maximum stored full results before oldest refs are evicted */

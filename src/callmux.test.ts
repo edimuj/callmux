@@ -57,6 +57,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
 import { errorResult } from "./results.js";
+import { formatToolText } from "./output-format.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
@@ -1446,6 +1447,7 @@ test("renderAgentInstructions includes compact safety guidance without local pat
   assert.match(output, /\$jsonFile/);
   assert.match(output, /\$json` and `\$json\.path` are pipeline `inputMapping` expressions only/);
   assert.match(output, /_callmux\.retrieval/);
+  assert.match(output, /outputFormat: "toon"/);
   assert.match(output, /meta-only mode/);
   assert.doesNotMatch(output, /\/home\/edimuj|Tailscale|Exelerus|Stockholm/);
   assert.ok(output.split("\n").length < 40);
@@ -4974,12 +4976,24 @@ test("configFromArgs parses --description-max-length", () => {
   assert.equal(config.descriptionMaxLength, 100);
 });
 
+test("configFromArgs parses --output-format", () => {
+  const config = configFromArgs(["--output-format", "toon", "--", "node", "server.js"]);
+  assert.equal(config.outputFormat, "toon");
+});
+
+test("configFromArgs rejects invalid --output-format", () => {
+  assert.throws(
+    () => configFromArgs(["--output-format", "yaml", "--", "node", "server.js"]),
+    /--output-format must be "json", "toon", or "auto"/
+  );
+});
+
 test("configFromArgs omits metaOnly when not specified", () => {
   const config = configFromArgs(["--", "node", "server.js"]);
   assert.equal(config.metaOnly, undefined);
 });
 
-test("loadConfig parses metaOnly and descriptionMaxLength from file", async () => {
+test("loadConfig parses metaOnly, descriptionMaxLength, and outputFormat from file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-meta-"));
   const configPath = join(dir, "config.json");
 
@@ -4992,12 +5006,14 @@ test("loadConfig parses metaOnly and descriptionMaxLength from file", async () =
         },
         metaOnly: true,
         descriptionMaxLength: 80,
+        outputFormat: "auto",
       })
     );
 
     const config = await loadConfig(configPath);
     assert.equal(config.metaOnly, true);
     assert.equal(config.descriptionMaxLength, 80);
+    assert.equal(config.outputFormat, "auto");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -6585,6 +6601,34 @@ test("proxy routes callmux_batch to handleBatch", async () => {
   assert.equal(content.succeeded, 1);
 });
 
+test("proxy applies configured outputFormat to meta-tool text", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+    outputFormat: "toon",
+  });
+
+  (proxy as unknown as { upstream: {
+    callTool: () => Promise<CallToolResult>;
+    getServerConcurrency: () => number | undefined;
+  } }).upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ id: 1, title: "issue" }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_parallel", {
+    calls: [{ tool: "get_issue", arguments: { id: 1 } }],
+  });
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.match(text, /results\[1\]/);
+  assert.equal((result.structuredContent as { succeeded: number }).succeeded, 1);
+});
+
 test("proxy routes callmux_dry_run to handleDryRun", async () => {
   const proxy = new CallmuxProxy({
     servers: { default: { command: "ignored" } },
@@ -6752,6 +6796,19 @@ test("proxy shields large proxied results and pages stored refs", async () => {
   assert.equal(pageContent.count, 3);
   assert.equal(pageContent.hasMore, true);
   assert.deepEqual(pageContent.data, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+
+  const toonPage = await harness.handleToolCall("callmux_get_result", {
+    ref: shieldedContent._callmux.ref,
+    limit: 3,
+    fields: ["id"],
+    outputFormat: "toon",
+  });
+  const toonPageText = toonPage.content[0].type === "text" ? toonPage.content[0].text : "";
+  assert.match(toonPageText, /data\[3\]\{id\}:/);
+  assert.deepEqual(
+    (toonPage.structuredContent as { data: Array<{ id: number }> }).data,
+    [{ id: 1 }, { id: 2 }, { id: 3 }]
+  );
 
   const fallbackPage = await harness.handleToolCall("callmux_call", {
     tool: "callmux_get_result",
@@ -7094,6 +7151,78 @@ test("batch unwraps JSON content from upstream results", async () => {
   assert.deepEqual(content.results[0].result, { nodes: ["a", "b"], count: 2 });
 });
 
+test("JSON remains the default model-facing output format", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ nodes: ["a", "b"], count: 2 }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "ms_list",
+    items: [{ arguments: { story: "test" } }],
+  }, 4);
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.doesNotThrow(() => JSON.parse(text));
+});
+
+test("parallel can render TOON text while preserving JSON structuredContent", async () => {
+  const upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ id: 42, title: "test" }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    outputFormat: "toon",
+    calls: [{ tool: "ms_get", arguments: { nodeId: "ch1_001" } }],
+  }, 4);
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.throws(() => JSON.parse(text));
+  assert.match(text, /results\[1\]/);
+  const content = result.structuredContent as {
+    results: Array<{ result: { id: number; title: string } }>;
+  };
+  assert.deepEqual(content.results[0].result, { id: 42, title: "test" });
+});
+
+test("callmux_call formats raw downstream JSON text as TOON when requested", async () => {
+  const upstream = {
+    resolveServer() {
+      return { server: "github", actualName: "list_issues" };
+    },
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      return { toolName: tool, actualName: tool, server: server ?? "github", resolvedArguments: args };
+    },
+    cacheScopeForCall() { return undefined; },
+    getServerTools() { return ["list_issues"]; },
+    getServerNames() { return ["github"]; },
+    async callTool() {
+      return textResult(JSON.stringify([
+        { id: 1, title: "first" },
+        { id: 2, title: "second" },
+      ]));
+    },
+  };
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "list_issues",
+    outputFormat: "toon",
+  });
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.match(text, /\[2\]\{id,title\}:/);
+  assert.equal(result.structuredContent, undefined);
+});
+
 test("parallel unwraps JSON content from upstream results", async () => {
   const upstream = {
     async callTool() {
@@ -7129,6 +7258,88 @@ test("pipeline unwraps JSON content in steps and finalResult", async () => {
   };
   assert.deepEqual(content.steps[0].result, { value: "done" });
   assert.deepEqual(content.finalResult, { value: "done" });
+});
+
+test("pipeline JSON mapping still works when final text is TOON", async () => {
+  const calls: Array<Record<string, unknown> | undefined> = [];
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      calls.push(args);
+      if (tool === "first") return textResult(JSON.stringify({ id: 42 }));
+      return textResult(JSON.stringify({ received: args?.issueId }));
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    outputFormat: "toon",
+    steps: [
+      { tool: "first" },
+      {
+        tool: "second",
+        inputMapping: { issueId: "$json.id" },
+        onMappingMissing: "fail",
+      },
+    ],
+  });
+
+  assert.deepEqual(calls[1], { issueId: 42 });
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.throws(() => JSON.parse(text));
+  const content = result.structuredContent as { finalResult: { received: number } };
+  assert.deepEqual(content.finalResult, { received: 42 });
+});
+
+test("auto output format stays JSON for small or non-tabular payloads", () => {
+  const text = formatToolText(
+    { issue: { id: 1, title: "nested", labels: [{ name: "bug" }] } },
+    { format: "auto" }
+  );
+
+  assert.doesNotThrow(() => JSON.parse(text));
+});
+
+test("auto output format uses TOON for large uniform tabular payloads", () => {
+  const payload = {
+    data: Array.from({ length: 40 }, (_, index) => ({
+      id: index + 1,
+      title: `issue-${index + 1}`,
+      state: "open",
+    })),
+  };
+  const text = formatToolText(payload, { format: "auto" });
+
+  assert.match(text, /data\[40\]\{id,title,state\}:/);
+  assert.throws(() => JSON.parse(text));
+});
+
+test("TOON encoder failures fall back to JSON text", () => {
+  const payload = { data: [{ id: 1, title: "issue" }] };
+  const text = formatToolText(payload, {
+    format: "toon",
+    encoder: () => {
+      throw new Error("encoder unavailable");
+    },
+  });
+
+  assert.deepEqual(JSON.parse(text), payload);
+});
+
+test("errors stay JSON even when outputFormat requests TOON", async () => {
+  const result = await handleBatch(
+    {
+      async callTool() {
+        return textResult("ok");
+      },
+      getServerConcurrency() { return undefined; },
+    } as never,
+    new CallCache(0),
+    { tool: "get_issue", items: [], outputFormat: "yaml" },
+    4
+  );
+
+  assert.equal(result.isError, true);
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.doesNotThrow(() => JSON.parse(text));
 });
 
 test("unwrap keeps plain text when content is not JSON", async () => {

@@ -109,6 +109,7 @@ Options:
   --concurrency <n>     Max parallel calls (default: 20)
   --connect-timeout <ms> Timeout for downstream startup connect/list-tools (default: 30000)
   --call-timeout <ms>   Timeout for downstream tool calls (default: 180000)
+  --output-format <fmt> Model-facing structured output text: json, toon, or auto
   --request-body-max-bytes <n> Max inbound request payload bytes (0 = unlimited, default: 1048576)
   --allow-request-body-override Allow per-request x-callmux-max-body-bytes override header
   --allow-insecure-remote-listener Allow remote --listen without auth (unsafe)
@@ -189,6 +190,7 @@ Config file format:
     },
     "cacheTtlSeconds": 60,
     "cachePolicy": { "denyTools": ["create_*"] },
+    "outputFormat": "json",
     "maxConcurrency": 20,
     "maxCacheEntries": 1000,
     "connectTimeoutMs": 30000,

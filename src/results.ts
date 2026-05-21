@@ -1,4 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { formatToolText, type OutputFormat } from "./output-format.js";
 
 interface ToolErrorDetails {
   [key: string]: unknown;
@@ -12,13 +13,18 @@ interface ToolErrorPayload {
   };
 }
 
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
+interface ResultFormatOptions {
+  outputFormat?: OutputFormat;
 }
 
-export function jsonResult(payload: Record<string, unknown>): CallToolResult {
+export function jsonResult(
+  payload: Record<string, unknown>,
+  options: ResultFormatOptions = {}
+): CallToolResult {
   return {
-    content: [{ type: "text", text: formatJson(payload) }],
+    content: [
+      { type: "text", text: formatToolText(payload, { format: options.outputFormat }) },
+    ],
     structuredContent: payload,
   };
 }
@@ -37,7 +43,7 @@ export function errorResult(
   };
 
   return {
-    content: [{ type: "text", text: formatJson(payload) }],
+    content: [{ type: "text", text: formatToolText(payload) }],
     structuredContent: payload as unknown as Record<string, unknown>,
     isError: true,
   };

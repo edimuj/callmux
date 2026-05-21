@@ -13,6 +13,11 @@ import type {
   ToolCallContext,
   ListenerRuntimeDiagnostics,
 } from "./types.js";
+import {
+  formatToolText,
+  isOutputFormat,
+  type OutputFormat,
+} from "./output-format.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -22,8 +27,11 @@ function isToolErrorResult(value: unknown): value is CallToolResult {
   return isRecord(value) && Array.isArray(value.content);
 }
 
-function successResult(payload: Record<string, unknown>): CallToolResult {
-  return jsonResult(payload);
+function successResult(
+  payload: Record<string, unknown>,
+  outputFormat?: OutputFormat
+): CallToolResult {
+  return jsonResult(payload, { outputFormat });
 }
 
 function extractText(result: CallToolResult): string {
@@ -40,6 +48,39 @@ function unwrapResult(result: CallToolResult): unknown {
     return JSON.parse(text);
   } catch {
     return text;
+  }
+}
+
+function formatResultIfStructured(
+  result: CallToolResult,
+  outputFormat?: OutputFormat
+): CallToolResult {
+  if (result.isError || outputFormat === undefined || outputFormat === "json") {
+    return result;
+  }
+
+  if (result.structuredContent !== undefined) {
+    return {
+      ...result,
+      content: [
+        {
+          type: "text",
+          text: formatToolText(result.structuredContent, { format: outputFormat }),
+        },
+      ],
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(extractText(result));
+    return {
+      ...result,
+      content: [
+        { type: "text", text: formatToolText(parsed, { format: outputFormat }) },
+      ],
+    };
+  } catch {
+    return result;
   }
 }
 
@@ -165,6 +206,19 @@ function validateCwd(
     });
   }
   return cwd;
+}
+
+function resolveOutputFormat(
+  args: unknown,
+  defaultOutputFormat?: OutputFormat
+): OutputFormat | undefined | CallToolResult {
+  if (!isRecord(args) || args.outputFormat === undefined) return defaultOutputFormat;
+  if (isOutputFormat(args.outputFormat)) return args.outputFormat;
+  return errorResult(
+    "invalid_arguments",
+    'outputFormat must be "json", "toon", or "auto"',
+    { field: "outputFormat" }
+  );
 }
 
 function contextWithCallOverrides(
@@ -852,10 +906,13 @@ export async function handleParallel(
   cache: CallCache,
   args: unknown,
   maxConcurrency: number,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
 
   const parsedArgs = validateParallelArgs(args);
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
@@ -943,7 +1000,7 @@ export async function handleParallel(
     failedIndexes,
   };
 
-  return successResult(output as unknown as Record<string, unknown>);
+  return successResult(output as unknown as Record<string, unknown>, outputFormat);
 }
 
 export async function handleBatch(
@@ -951,10 +1008,13 @@ export async function handleBatch(
   cache: CallCache,
   args: unknown,
   maxConcurrency: number,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
 
   const parsedArgs = validateBatchArgs(args);
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
@@ -1036,15 +1096,18 @@ export async function handleBatch(
     failedIndexes,
   };
 
-  return successResult(output as unknown as Record<string, unknown>);
+  return successResult(output as unknown as Record<string, unknown>, outputFormat);
 }
 
 export async function handlePipeline(
   upstream: UpstreamManager,
   cache: CallCache,
   args: unknown,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
   const parsedArgs = validatePipelineArgs(args);
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
@@ -1100,7 +1163,7 @@ export async function handlePipeline(
         failedStep: i,
         steps: stepResults,
         totalDurationMs: Date.now() - startTime,
-      });
+      }, outputFormat);
     }
 
     try {
@@ -1129,7 +1192,7 @@ export async function handlePipeline(
           failedStep: i,
           steps: stepResults,
           totalDurationMs: Date.now() - startTime,
-        });
+        }, outputFormat);
       }
       const cacheScope = cacheScopeForCall(upstream, step.tool, prepared.server, callContext);
       const cached = cache.get(step.tool, prepared.args, prepared.server, cacheScope);
@@ -1160,7 +1223,7 @@ export async function handlePipeline(
           failedStep: i,
           steps: stepResults,
           totalDurationMs: Date.now() - startTime,
-        });
+        }, outputFormat);
       }
 
       previousText = extractText(result);
@@ -1179,7 +1242,7 @@ export async function handlePipeline(
         failedStep: i,
         steps: stepResults,
         totalDurationMs: Date.now() - startTime,
-      });
+      }, outputFormat);
     }
   }
 
@@ -1188,15 +1251,18 @@ export async function handlePipeline(
     steps: stepResults,
     finalResult: stepResults[stepResults.length - 1]?.result,
     totalDurationMs: Date.now() - startTime,
-  });
+  }, outputFormat);
 }
 
 export async function handleDryRun(
   upstream: UpstreamManager,
   cache: CallCache,
   args: unknown,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
   const parsed = validateDryRunArgs(args);
   if (isToolErrorResult(parsed)) return parsed;
 
@@ -1294,20 +1360,23 @@ export async function handleDryRun(
       estimatedResolvedArgumentBytes,
       warningCount,
     },
-  });
+  }, outputFormat);
 }
 
 export async function handleCall(
   upstream: UpstreamManager,
   cache: CallCache,
   args: unknown,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
   if (!isRecord(args)) {
     return errorResult("invalid_arguments", '"tool" must be a non-empty string', {
       field: "tool",
     });
   }
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
 
   const tool = validateToolName(args.tool, "tool");
   if (typeof tool !== "string") return tool;
@@ -1353,14 +1422,14 @@ export async function handleCall(
   if (isToolErrorResult(prepared)) return prepared;
   const cacheScope = cacheScopeForCall(upstream, tool, prepared.server, callContext);
   const cached = cache.get(tool, prepared.args, prepared.server, cacheScope);
-  if (cached) return cached;
+  if (cached) return formatResultIfStructured(cached, outputFormat);
 
   const result = await upstream.callTool(tool, prepared.args, prepared.server, {
     ...contextWithSafeRetry(cache, tool, prepared.server, callContext),
     forceReconnect,
   });
   cache.set(tool, prepared.args, result, prepared.server, cacheScope);
-  return result;
+  return formatResultIfStructured(result, outputFormat);
 }
 
 interface SearchableTool {
@@ -1464,7 +1533,8 @@ function scoreToolSearchResult(tool: SearchableTool, query: string): number {
 export function handleSearchTools(
   upstream: UpstreamManager,
   defaultDescriptionMaxLength: number | undefined,
-  args: unknown
+  args: unknown,
+  defaultOutputFormat?: OutputFormat
 ): CallToolResult {
   if (args !== undefined && !isRecord(args)) {
     return errorResult("invalid_arguments", "arguments must be an object", {
@@ -1473,6 +1543,8 @@ export function handleSearchTools(
   }
 
   const parsed = isRecord(args) ? args : {};
+  const outputFormat = resolveOutputFormat(parsed, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
   if (parsed.query !== undefined && typeof parsed.query !== "string") {
     return errorResult("invalid_arguments", "query must be a string", {
       field: "query",
@@ -1554,14 +1626,15 @@ export function handleSearchTools(
         : {}),
       ...(tool.inputFields.length > 0 ? { inputFields: tool.inputFields } : {}),
     })),
-  });
+  }, { outputFormat });
 }
 
 export function handleGetResult(
   responseStore: ResponseStore,
-  args: unknown
+  args: unknown,
+  defaultOutputFormat?: OutputFormat
 ): CallToolResult {
-  return responseStore.query(args);
+  return responseStore.query(args, defaultOutputFormat);
 }
 
 export async function handleRecipeRun(
@@ -1570,20 +1643,37 @@ export async function handleRecipeRun(
   recipes: Record<string, RecipeConfig> | undefined,
   args: unknown,
   maxConcurrency: number,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
   const expanded = expandRecipeInvocation(recipes, args);
   if (isToolErrorResult(expanded)) return expanded;
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
 
   switch (expanded.recipe.mode) {
     case "call":
-      return handleCall(upstream, cache, expanded.args, context);
+      return handleCall(upstream, cache, expanded.args, context, outputFormat);
     case "parallel":
-      return handleParallel(upstream, cache, expanded.args, maxConcurrency, context);
+      return handleParallel(
+        upstream,
+        cache,
+        expanded.args,
+        maxConcurrency,
+        context,
+        outputFormat
+      );
     case "batch":
-      return handleBatch(upstream, cache, expanded.args, maxConcurrency, context);
+      return handleBatch(
+        upstream,
+        cache,
+        expanded.args,
+        maxConcurrency,
+        context,
+        outputFormat
+      );
     case "pipeline":
-      return handlePipeline(upstream, cache, expanded.args, context);
+      return handlePipeline(upstream, cache, expanded.args, context, outputFormat);
   }
 }
 
@@ -1592,18 +1682,27 @@ export async function handleRecipeDryRun(
   cache: CallCache,
   recipes: Record<string, RecipeConfig> | undefined,
   args: unknown,
-  context?: ToolCallContext
+  context?: ToolCallContext,
+  defaultOutputFormat?: OutputFormat
 ): Promise<CallToolResult> {
   const expanded = expandRecipeInvocation(recipes, args);
   if (isToolErrorResult(expanded)) return expanded;
+  const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
 
-  const result = await handleDryRun(upstream, cache, expanded.args, context);
+  const result = await handleDryRun(
+    upstream,
+    cache,
+    expanded.args,
+    context,
+    outputFormat
+  );
   if (result.isError || !isRecord(result.structuredContent)) return result;
 
   return jsonResult({
     recipe: expanded.recipeName,
     ...result.structuredContent,
-  });
+  }, { outputFormat });
 }
 
 export function handleCacheClear(
@@ -1659,9 +1758,12 @@ export function handleStatus(
   args: unknown,
   listenerDiagnostics?: ListenerRuntimeDiagnostics,
   recipes?: Record<string, RecipeConfig>,
-  responseStore?: ResponseStore
+  responseStore?: ResponseStore,
+  defaultOutputFormat?: OutputFormat
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
+  const outputFormat = resolveOutputFormat(parsed, defaultOutputFormat);
+  if (isToolErrorResult(outputFormat)) return outputFormat;
   const serverFilter = typeof parsed.server === "string" ? parsed.server : undefined;
   const includeDescriptions = parsed.descriptions === true;
   const includeRecommendations = parsed.recommendations !== false;
@@ -1860,7 +1962,7 @@ export function handleStatus(
       : {}),
     ...(includeSessions && listenerDiagnostics ? { listener: listenerDiagnostics } : {}),
     ...(includeRecommendations ? { recommendations } : {}),
-  });
+  }, { outputFormat });
 }
 
 // ─── Simple concurrency limiter ────────────────────────────────

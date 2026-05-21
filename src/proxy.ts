@@ -23,6 +23,7 @@ import {
   handleStatus,
 } from "./handlers.js";
 import type { CallmuxConfig, InstanceIdentity, ServerConfig } from "./types.js";
+import { isOutputFormat, type OutputFormat } from "./output-format.js";
 import {
   createResponseStore,
   ResponseStore,
@@ -187,8 +188,11 @@ export class CallmuxProxy {
             this.upstream,
             this.cache,
             args,
-            this.maxConcurrency
-          )
+            this.maxConcurrency,
+            undefined,
+            this.config.outputFormat
+          ),
+          this.outputFormatFor(args)
         );
 
       case "callmux_batch":
@@ -198,8 +202,11 @@ export class CallmuxProxy {
             this.upstream,
             this.cache,
             args,
-            this.maxConcurrency
-          )
+            this.maxConcurrency,
+            undefined,
+            this.config.outputFormat
+          ),
+          this.outputFormatFor(args)
         );
 
       case "callmux_pipeline":
@@ -208,15 +215,19 @@ export class CallmuxProxy {
           await handlePipeline(
             this.upstream,
             this.cache,
-            args
-          )
+            args,
+            undefined,
+            this.config.outputFormat
+          ),
+          this.outputFormatFor(args)
         );
 
       case "callmux_call":
         if (isCallmuxGetResultCall(args)) {
           return handleGetResult(
             this.responseStore,
-            args.arguments
+            args.arguments,
+            this.outputFormatFor(args)
           );
         }
         return this.shieldResult(
@@ -224,21 +235,26 @@ export class CallmuxProxy {
           await handleCall(
             this.upstream,
             this.cache,
-            args
-          )
+            args,
+            undefined,
+            this.config.outputFormat
+          ),
+          this.outputFormatFor(args)
         );
 
       case "callmux_search_tools":
         return handleSearchTools(
           this.upstream,
           this.config.descriptionMaxLength,
-          args
+          args,
+          this.config.outputFormat
         );
 
       case "callmux_get_result":
         return handleGetResult(
           this.responseStore,
-          args
+          args,
+          this.config.outputFormat
         );
 
       case "callmux_cache_clear":
@@ -251,7 +267,9 @@ export class CallmuxProxy {
         return handleDryRun(
           this.upstream,
           this.cache,
-          args
+          args,
+          undefined,
+          this.config.outputFormat
         );
 
       case "callmux_recipe_run":
@@ -262,8 +280,11 @@ export class CallmuxProxy {
             this.cache,
             this.config.recipes,
             args,
-            this.maxConcurrency
-          )
+            this.maxConcurrency,
+            undefined,
+            this.config.outputFormat
+          ),
+          this.outputFormatFor(args)
         );
 
       case "callmux_recipe_dry_run":
@@ -271,7 +292,9 @@ export class CallmuxProxy {
           this.upstream,
           this.cache,
           this.config.recipes,
-          args
+          args,
+          undefined,
+          this.config.outputFormat
         );
 
       case "callmux_status":
@@ -285,7 +308,8 @@ export class CallmuxProxy {
           args,
           undefined,
           this.config.recipes,
-          this.responseStore
+          this.responseStore,
+          this.config.outputFormat
         );
     }
 
@@ -359,14 +383,24 @@ export class CallmuxProxy {
 
   private shieldResult(
     target: ResponseShieldTarget,
-    result: CallToolResult
+    result: CallToolResult,
+    outputFormat?: OutputFormat
   ): CallToolResult {
     return shieldToolResult(
       this.responseStore,
       target,
       result,
-      resolveResponseShieldOptions(this.config, target)
+      {
+        ...resolveResponseShieldOptions(this.config, target),
+        outputFormat: outputFormat ?? this.config.outputFormat,
+      }
     );
+  }
+
+  private outputFormatFor(args: unknown): OutputFormat | undefined {
+    return isRecord(args) && isOutputFormat(args.outputFormat)
+      ? args.outputFormat
+      : this.config.outputFormat;
   }
 
   async close(): Promise<void> {
