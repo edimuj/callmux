@@ -649,8 +649,20 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       });
       const text = await res.text();
-      const payload = text ? JSON.parse(text) : {};
-      if (!res.ok) throw new Error(payload.error || ("HTTP " + res.status));
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = text || {};
+      }
+      if (!res.ok) {
+        const message = payload && typeof payload === "object" && typeof payload.error === "string"
+          ? payload.error
+          : typeof payload === "string" && payload
+            ? payload
+            : "HTTP " + res.status;
+        throw new Error(message);
+      }
       return payload;
     }
     function switchView(view) {

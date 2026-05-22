@@ -113,13 +113,28 @@ export class ManagementClient {
       signal: options.signal,
     });
     const text = await response.text();
-    const payload = text ? JSON.parse(text) : undefined;
+    const payload = parseResponseBody(text);
     if (!response.ok) {
-      const message = typeof payload?.error === "string"
+      const message = isRecord(payload) && typeof payload.error === "string"
         ? payload.error
+        : typeof payload === "string" && payload.length > 0
+          ? payload
         : `management request failed with HTTP ${response.status}`;
       throw new Error(message);
     }
     return payload as T;
   }
+}
+
+function parseResponseBody(text: string): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

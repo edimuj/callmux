@@ -8201,6 +8201,28 @@ test("listener management API requires management auth for mutations and persist
   }
 });
 
+test("ManagementClient reports plain-text HTTP errors without JSON parse noise", async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Unsupported method");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const client = new ManagementClient({
+      baseUrl: `http://127.0.0.1:${address.port}/management/v1`,
+      token: "secret",
+    });
+    await assert.rejects(
+      client.restartServer("scribe"),
+      /Unsupported method/
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("listener dashboard exposes tool suite change events", async () => {
   const upstream = new UpstreamManager();
   const cache = new CallCache(0, undefined, {}, 100);
