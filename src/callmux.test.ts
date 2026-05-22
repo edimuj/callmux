@@ -8197,6 +8197,16 @@ test("listener management API requires management auth for mutations and persist
     const effective = await client.effectiveConfig();
     assert.equal(effective.servers.alpha.disabled, true);
 
+    const disabledRestart = await fetch(`http://127.0.0.1:${port}/management/v1/servers/alpha/restart`, {
+      method: "POST",
+      headers: { Authorization: "Bearer mgmt-secret" },
+    });
+    assert.equal(disabledRestart.status, 409);
+    assert.match(
+      ((await disabledRestart.json()) as { error: string }).error,
+      /enable it before restarting/
+    );
+
     const overlay = await loadManagementOverlay(statePath);
     assert.equal(overlay.servers?.alpha.config?.disabled, true);
   } finally {
@@ -8472,6 +8482,8 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /return "disabled"/);
   assert.match(html, /function truncateText/);
   assert.match(html, /maxLength = 180/);
+  assert.match(html, /function setManagementMessage/);
+  assert.match(html, /Enable this server before restarting/);
   assert.match(html, /truncateText\(detailText\(event\)\)/);
   assert.match(html, /function clientRows/);
   assert.match(html, /STDIO Bridge/);

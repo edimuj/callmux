@@ -396,9 +396,13 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .button { background: #102033; border: 1px solid #102033; border-radius: 6px; color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; padding: 6px 9px; }
     .button.secondary { background: transparent; color: #102033; }
     .button.danger { background: #b42318; border-color: #b42318; }
+    .button:disabled { cursor: not-allowed; opacity: 0.45; }
     .inline-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .management-grid { display: grid; gap: 14px; }
     .management-form { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(180px, 1fr) auto; }
+    .notice { border: 1px solid #d9dee7; border-radius: 6px; margin-top: 10px; padding: 8px 10px; }
+    .notice.ok { background: rgba(22,116,71,0.08); border-color: rgba(22,116,71,0.25); color: #167447; }
+    .notice.bad { background: rgba(180,35,24,0.08); border-color: rgba(180,35,24,0.25); color: #b42318; }
     .tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .tool-chip { background: #eef5ff; border: 1px solid #c8def9; border-radius: 999px; color: #194b7d; font-size: 12px; padding: 3px 8px; }
     .suite-card { display: grid; gap: 10px; }
@@ -433,6 +437,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .server-row.selected { background: #17304a; }
       .filter-field input, .filter-field select { background: #101820; border-color: #303946; }
       .button.secondary { color: #e5edf5; border-color: #303946; }
+      .notice { border-color: #303946; }
       .tool-chip { background: #13283f; border-color: #26547d; color: #b9dcff; }
       .flow-node { background: #101820; border-color: #303946; }
       .bar-track { background: #263241; }
@@ -549,6 +554,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
                 <div class="filter-field"><label for="management-token">Management token</label><input id="management-token" type="password" autocomplete="off" placeholder="Bearer token for write actions"></div>
                 <button id="management-token-save" class="button" type="button">Save</button>
               </div>
+              <div id="management-status" class="notice muted">No management action yet.</div>
             </section>
             <section class="panel">
               <table><thead><tr><th>Server</th><th>State</th><th>Tools</th><th>Managed</th><th>Actions</th></tr></thead><tbody id="management-servers"></tbody></table>
@@ -605,6 +611,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let eventFilters = { type: "", status: "", server: "", search: "" };
     let currentView = loadView();
     let managementToken = loadManagementToken();
+    let managementMessage = { kind: "muted", text: "No management action yet." };
 
     function loadView() {
       try {
@@ -631,6 +638,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         if (value) localStorage.setItem("callmux-management-token", value);
         else localStorage.removeItem("callmux-management-token");
       } catch {}
+    }
+    function setManagementMessage(kind, text) {
+      managementMessage = { kind, text };
+      const target = document.getElementById("management-status");
+      if (target) {
+        target.className = "notice " + kind;
+        target.textContent = text;
+      }
     }
     function managementBasePath() {
       return snapshot?.management?.path || "/management/v1";
@@ -868,6 +883,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function renderManagement(servers) {
       const target = document.getElementById("management-servers");
+      setManagementMessage(managementMessage.kind, managementMessage.text);
       if (!snapshot?.management?.enabled) {
         target.innerHTML = '<tr><td colspan="5" class="muted">Management API is disabled.</td></tr>';
         return;
@@ -881,7 +897,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           cell(esc(tools)) +
           cell(esc(server.managed ? "overlay" : "base")) +
           '<td><div class="inline-actions">' +
-            '<button class="button secondary" data-management-action="restart" data-server="' + esc(server.name) + '">Restart</button>' +
+            '<button class="button secondary" data-management-action="restart" data-server="' + esc(server.name) + '"' + (disabled ? ' disabled title="Enable this server before restarting"' : '') + '>Restart</button>' +
             '<button class="button secondary" data-management-action="' + (disabled ? "enable" : "disable") + '" data-server="' + esc(server.name) + '">' + (disabled ? "Enable" : "Disable") + '</button>' +
             '<button class="button danger" data-management-action="delete" data-server="' + esc(server.name) + '">Remove</button>' +
           '</div></td>' +
@@ -896,9 +912,12 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
             if (action === "enable") await managementRequest("servers/" + encodeURIComponent(name), { method: "PATCH", body: { disabled: false } });
             if (action === "disable") await managementRequest("servers/" + encodeURIComponent(name), { method: "PATCH", body: { disabled: true } });
             if (action === "delete") await managementRequest("servers/" + encodeURIComponent(name), { method: "DELETE" });
+            setManagementMessage("ok", action.charAt(0).toUpperCase() + action.slice(1) + " completed for " + name + ".");
             await refresh();
           } catch (error) {
-            alert(error instanceof Error ? error.message : String(error));
+            const message = error instanceof Error ? error.message : String(error);
+            setManagementMessage("bad", message);
+            alert(message);
           }
         });
       });

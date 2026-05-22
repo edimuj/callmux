@@ -645,6 +645,17 @@ export class CallmuxListener {
           return;
         }
         if (method === "POST" && action === "restart") {
+          const server = this.options.config.servers[serverName];
+          if (!server) {
+            this.writeJson(res, 404, context, { error: `server "${serverName}" not found` });
+            return;
+          }
+          if (server.disabled) {
+            this.writeJson(res, 409, context, {
+              error: `server "${serverName}" is disabled; enable it before restarting`,
+            });
+            return;
+          }
           await this.applyManagedConfig(this.options.config, `management restart ${serverName}`);
           this.writeJson(res, 200, context, { action: "restarted", server: serverName });
           return;
