@@ -8484,6 +8484,7 @@ test("dashboard hides successful transport HTTP events by default", () => {
   assert.match(html, /maxLength = 180/);
   assert.match(html, /function setManagementMessage/);
   assert.match(html, /Enable this server before restarting/);
+  assert.match(html, /server\.managed \? "Override" : "base"/);
   assert.match(html, /const runtime = server\.runtime \|\| \{\}/);
   assert.match(html, /const disabled = config\.disabled === true \|\| state === "disabled"/);
   assert.match(html, /truncateText\(detailText\(event\)\)/);

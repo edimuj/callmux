@@ -898,7 +898,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           cell(esc(server.name)) +
           cell(esc(state), disabled ? "warn" : state === "connected" ? "ok" : "bad") +
           cell(esc(tools)) +
-          cell(esc(server.managed ? "overlay" : "base")) +
+          cell(esc(server.managed ? "Override" : "base")) +
           '<td><div class="inline-actions">' +
             '<button class="button secondary" data-management-action="restart" data-server="' + esc(server.name) + '"' + (disabled ? ' disabled title="Enable this server before restarting"' : '') + '>Restart</button>' +
             '<button class="button secondary" data-management-action="' + (disabled ? "enable" : "disable") + '" data-server="' + esc(server.name) + '">' + (disabled ? "Enable" : "Disable") + '</button>' +
