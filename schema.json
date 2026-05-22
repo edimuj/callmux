@@ -111,6 +111,7 @@
     "auditLog": { "$ref": "#/$defs/auditLogConfig" },
     "metrics": { "$ref": "#/$defs/metricsConfig" },
     "dashboard": { "$ref": "#/$defs/dashboardConfig" },
+    "management": { "$ref": "#/$defs/managementConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
       "default": false,
@@ -177,6 +178,12 @@
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         },
         "responseShield": { "$ref": "#/$defs/serverResponseShield" }
+        ,
+        "disabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Exclude this server from downstream connection and tool exposure"
+        }
       },
       "not": { "required": ["url"] },
       "additionalProperties": false
@@ -222,6 +229,12 @@
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         },
         "responseShield": { "$ref": "#/$defs/serverResponseShield" }
+        ,
+        "disabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Exclude this server from downstream connection and tool exposure"
+        }
       },
       "not": { "required": ["command"] },
       "additionalProperties": false
@@ -386,6 +399,36 @@
           "minimum": 1,
           "default": 500,
           "description": "Maximum runtime events kept in memory"
+        }
+      },
+      "additionalProperties": false
+    },
+    "managementConfig": {
+      "type": "object",
+      "description": "Standalone listener management API configuration. Disabled by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable management API endpoints"
+        },
+        "path": {
+          "type": "string",
+          "default": "/management/v1",
+          "description": "Management API base path"
+        },
+        "statePath": {
+          "type": "string",
+          "description": "Persistent managed overlay path. Defaults to <config>.management.json in listener mode."
+        },
+        "auth": {
+          "$ref": "#/$defs/bearerAuthConfig",
+          "description": "Bearer auth required for management mutations"
+        },
+        "allowUnauthenticatedRead": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow read-only management endpoints without management auth. Mutations still require auth."
         }
       },
       "additionalProperties": false

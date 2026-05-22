@@ -14,6 +14,7 @@ import type {
   ConfigFormat,
   MetricsConfig,
   DashboardConfig,
+  ManagementConfig,
   ReconnectPolicyConfig,
   RecipeConfig,
   RecipeMode,
@@ -495,6 +496,63 @@ function parseDashboardConfig(
     ...(enabled !== undefined ? { enabled } : {}),
     ...(path ? { path } : {}),
     ...(maxEvents !== undefined ? { maxEvents } : {}),
+  };
+}
+
+function parseManagementConfig(
+  value: unknown,
+  optionName: string,
+  configBaseDir?: string
+): ManagementConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const path =
+    value.path === undefined
+      ? undefined
+      : typeof value.path === "string" && value.path.trim().length > 0
+        ? value.path.startsWith("/")
+          ? value.path
+          : `/${value.path}`
+        : (() => {
+            throw new Error(`${optionName}.path must be a non-empty string`);
+          })();
+  const statePath =
+    value.statePath === undefined
+      ? undefined
+      : typeof value.statePath === "string" && value.statePath.trim().length > 0
+        ? value.statePath
+        : (() => {
+            throw new Error(`${optionName}.statePath must be a non-empty string`);
+          })();
+  const allowUnauthenticatedRead = parseBooleanOption(
+    value.allowUnauthenticatedRead,
+    `${optionName}.allowUnauthenticatedRead`
+  );
+  const auth = parseAuthConfig(value.auth, `${optionName}.auth`, configBaseDir);
+  if (auth && auth.mode !== "bearer") {
+    throw new Error(`${optionName}.auth only supports bearer mode`);
+  }
+
+  if (
+    enabled === undefined &&
+    path === undefined &&
+    statePath === undefined &&
+    allowUnauthenticatedRead === undefined &&
+    auth === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(path ? { path } : {}),
+    ...(statePath ? { statePath } : {}),
+    ...(auth ? { auth } : {}),
+    ...(allowUnauthenticatedRead !== undefined ? { allowUnauthenticatedRead } : {}),
   };
 }
 
@@ -1021,6 +1079,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
         `servers.${serverName}.requestBodyMaxBytes`
       )
     : undefined;
+  const disabled = parseBooleanOption(value.disabled, `servers.${serverName}.disabled`);
 
   const shared = {
     ...(tools ? { tools } : {}),
@@ -1029,6 +1088,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
     ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
+    ...(disabled !== undefined ? { disabled } : {}),
   };
 
   if (hasUrl) {
@@ -1120,6 +1180,11 @@ function parseConfigDocument(
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
     const dashboard = parseDashboardConfig(parsed.dashboard, "dashboard");
+    const management = parseManagementConfig(
+      parsed.management,
+      "management",
+      configBaseDir
+    );
     const reconnectPolicy = parseReconnectPolicyConfig(
       parsed.reconnectPolicy,
       "reconnectPolicy"
@@ -1225,6 +1290,7 @@ function parseConfigDocument(
       ...(auditLog ? { auditLog } : {}),
       ...(metrics ? { metrics } : {}),
       ...(dashboard ? { dashboard } : {}),
+      ...(management ? { management } : {}),
       ...(recipes ? { recipes } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined
         ? {

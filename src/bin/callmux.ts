@@ -63,6 +63,12 @@ import {
   type AgentInstructionsProfile,
 } from "../instructions.js";
 import { shutdownAfterFatalListenerError } from "../fatal.js";
+import {
+  applyManagementOverlay,
+  loadManagementOverlay,
+  normalizeManagementConfig,
+  type ManagementOverlay,
+} from "../management.js";
 import * as p from "@clack/prompts";
 import { UpstreamManager } from "../upstream.js";
 import type { CallmuxConfig, ServerConfig } from "../types.js";
@@ -1065,6 +1071,28 @@ async function discoverServerTools(
   }
 }
 
+interface RuntimeConfigState {
+  baseConfig: CallmuxConfig;
+  effectiveConfig: CallmuxConfig;
+  managementOverlay: ManagementOverlay;
+}
+
+async function loadRuntimeConfigState(
+  configPath: string,
+  baseConfig?: CallmuxConfig
+): Promise<RuntimeConfigState> {
+  const loadedBase = baseConfig ?? await loadConfig(configPath);
+  const management = normalizeManagementConfig(loadedBase.management, configPath);
+  const managementOverlay = management.enabled
+    ? await loadManagementOverlay(management.statePath)
+    : { version: 1 as const };
+  return {
+    baseConfig: loadedBase,
+    managementOverlay,
+    effectiveConfig: applyManagementOverlay(loadedBase, managementOverlay),
+  };
+}
+
 async function main(): Promise<void> {
   const extracted = extractConfigPath(process.argv.slice(2));
   const args = extracted.remainingArgs;
@@ -1141,18 +1169,27 @@ async function main(): Promise<void> {
   }
 
   let config: CallmuxConfig;
+  let baseConfig: CallmuxConfig;
+  let managementOverlay: ManagementOverlay = { version: 1 };
   let activeConfigPath: string | undefined;
 
   if (extracted.configPath) {
-    config = await loadConfig(extracted.configPath);
     activeConfigPath = resolve(extracted.configPath);
+    const runtimeState = await loadRuntimeConfigState(activeConfigPath);
+    baseConfig = runtimeState.baseConfig;
+    config = runtimeState.effectiveConfig;
+    managementOverlay = runtimeState.managementOverlay;
   } else if (filteredArgs.includes("--")) {
     config = configFromArgs(filteredArgs);
+    baseConfig = config;
   } else {
     const defaultPath = await findDefaultConfig();
     if (defaultPath) {
-      config = await loadConfig(defaultPath);
       activeConfigPath = resolve(defaultPath);
+      const runtimeState = await loadRuntimeConfigState(activeConfigPath);
+      baseConfig = runtimeState.baseConfig;
+      config = runtimeState.effectiveConfig;
+      managementOverlay = runtimeState.managementOverlay;
     } else {
       console.error("Error: specify --config <path> or -- <command> [args...]");
       console.error("Or create ~/.config/callmux/config.json");
@@ -1171,11 +1208,22 @@ async function main(): Promise<void> {
       port: listenPort,
       host: listenHost,
       config,
+      configPath: activeConfigPath,
+      managementBaseConfig: baseConfig,
+      managementOverlay,
       upstream: proxy.getUpstream(),
       cache: proxy.getCache(),
       responseStore: proxy.getResponseStore(),
       allTools: proxy.getTools(),
       maxConcurrency: proxy.getMaxConcurrency(),
+      onManagementConfigChange: async (nextConfig, trigger, nextOverlay) => {
+        await applyRuntimeConfig(
+          nextConfig,
+          trigger,
+          baseConfig,
+          nextOverlay ?? managementOverlay
+        );
+      },
     });
 
     await listener.start();
@@ -1199,17 +1247,14 @@ async function main(): Promise<void> {
       timer.unref?.();
     };
 
-    const reloadConfig = async (trigger: string): Promise<void> => {
-      if (!activeConfigPath) return;
-      if (reloadInProgress) {
-        reloadQueued = true;
-        return;
-      }
-
-      reloadInProgress = true;
+    const applyRuntimeConfig = async (
+      nextConfig: CallmuxConfig,
+      trigger: string,
+      nextBaseConfig = baseConfig,
+      nextManagementOverlay = managementOverlay
+    ): Promise<void> => {
       let nextProxy: CallmuxProxy | undefined;
       try {
-        const nextConfig = await loadConfig(activeConfigPath);
         nextProxy = new CallmuxProxy(nextConfig);
         await nextProxy.connectUpstreams();
 
@@ -1220,14 +1265,19 @@ async function main(): Promise<void> {
           cache: nextProxy.getCache(),
           allTools: nextProxy.getTools(),
           maxConcurrency: nextProxy.getMaxConcurrency(),
+          managementBaseConfig: nextBaseConfig,
+          managementOverlay: nextManagementOverlay,
         });
         listener.recordConfigReload({ ok: true });
         proxy = nextProxy;
         nextProxy = undefined;
         config = nextConfig;
+        baseConfig = nextBaseConfig;
+        managementOverlay = nextManagementOverlay;
         closeStaleProxyLater(previousProxy);
+        const source = activeConfigPath ?? "runtime";
         process.stderr.write(
-          `[callmux] Reloaded config from ${activeConfigPath} (${trigger})\n`
+          `[callmux] Reloaded config from ${source} (${trigger})\n`
         );
       } catch (error) {
         if (nextProxy) {
@@ -1235,9 +1285,40 @@ async function main(): Promise<void> {
         }
         const message = error instanceof Error ? error.message : String(error);
         listener.recordConfigReload({ ok: false, error: message });
+        const source = activeConfigPath ?? "runtime";
         process.stderr.write(
-          `[callmux] Config reload failed (${activeConfigPath}, ${trigger}): ${message}\n`
+          `[callmux] Config reload failed (${source}, ${trigger}): ${message}\n`
         );
+        throw error;
+      }
+    };
+
+    const reloadConfig = async (trigger: string): Promise<void> => {
+      if (!activeConfigPath) return;
+      if (reloadInProgress) {
+        reloadQueued = true;
+        return;
+      }
+
+      reloadInProgress = true;
+      let applyStarted = false;
+      try {
+        const runtimeState = await loadRuntimeConfigState(activeConfigPath);
+        applyStarted = true;
+        await applyRuntimeConfig(
+          runtimeState.effectiveConfig,
+          trigger,
+          runtimeState.baseConfig,
+          runtimeState.managementOverlay
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!applyStarted) {
+          listener.recordConfigReload({ ok: false, error: message });
+          process.stderr.write(
+            `[callmux] Config reload failed (${activeConfigPath}, ${trigger}): ${message}\n`
+          );
+        }
       } finally {
         reloadInProgress = false;
         if (reloadQueued) {

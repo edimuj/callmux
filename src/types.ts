@@ -22,6 +22,8 @@ export interface StdioServerConfig {
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
   responseShield?: ResponseShieldConfig;
+  /** Exclude this server from downstream connection and tool exposure */
+  disabled?: boolean;
 }
 
 export interface HttpServerConfig {
@@ -40,6 +42,8 @@ export interface HttpServerConfig {
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
   responseShield?: ResponseShieldConfig;
+  /** Exclude this server from downstream connection and tool exposure */
+  disabled?: boolean;
 }
 
 export type ServerConfig = StdioServerConfig | HttpServerConfig;
@@ -209,6 +213,19 @@ export interface DashboardConfig {
   maxEvents?: number;
 }
 
+export interface ManagementConfig {
+  /** Enable the standalone listener management API. Disabled by default. */
+  enabled?: boolean;
+  /** Management API base path (default: /management/v1) */
+  path?: string;
+  /** Persistent managed overlay path. Defaults to <config>.management.json in listener mode. */
+  statePath?: string;
+  /** Bearer auth for management endpoints. Mutations require this when configured. */
+  auth?: BearerAuthConfig;
+  /** Allow read-only management endpoints without management auth. Mutations still require auth. */
+  allowUnauthenticatedRead?: boolean;
+}
+
 export interface CallmuxConfig {
   /** Downstream MCP servers to proxy */
   servers: Record<string, ServerConfig>;
@@ -259,6 +276,8 @@ export interface CallmuxConfig {
   metrics?: MetricsConfig;
   /** Optional read-only dashboard configuration */
   dashboard?: DashboardConfig;
+  /** Optional standalone listener management API configuration */
+  management?: ManagementConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */
   allowInsecureRemoteListener?: boolean;
 }

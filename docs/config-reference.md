@@ -45,6 +45,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `auditLog` | object | - | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
 | `metrics` | object | - | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
 | `dashboard` | object | disabled | Read-only listener dashboard ([details](dashboard.md)) |
+| `management` | object | disabled | Standalone listener management API |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |
@@ -248,6 +249,47 @@ The dashboard is disabled by default. Enable it only for listener deployments wh
 `path` can be `/`, `/dashboard`, or a reverse-proxy prefix such as `/relay/`. Non-root trailing slashes are normalized, and the UI resolves `data` and `events` relative to the loaded page URL.
 
 When auth is configured, dashboard requests use the same listener authentication as `/mcp`.
+
+---
+
+## Management API
+
+The management API is disabled by default and only applies to standalone listener mode. It exposes versioned HTTP+JSON endpoints under `/management/v1` by default. Mutations require management bearer auth and persist to a callmux-owned overlay file, leaving the base config file untouched.
+
+```json
+{
+  "management": {
+    "enabled": true,
+    "path": "/management/v1",
+    "statePath": "/var/lib/callmux/managed-overlay.json",
+    "auth": {
+      "mode": "bearer",
+      "tokens": [{ "id": "admin", "tokenRef": "env:CALLMUX_MANAGEMENT_TOKEN" }]
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `enabled` | boolean | `false` | Serve management endpoints |
+| `path` | string | `"/management/v1"` | Management API base path |
+| `statePath` | string | `<config>.management.json` | Persistent managed overlay path |
+| `auth` | bearer auth object | - | Management bearer tokens. Required for mutations |
+| `allowUnauthenticatedRead` | boolean | `false` | Allow read-only management endpoints without management auth |
+
+Initial endpoints:
+
+| Endpoint | Purpose |
+|:---------|:--------|
+| `GET /management/v1/status` | Runtime status, management state, and servers |
+| `GET /management/v1/config/effective` | Redacted effective config |
+| `GET /management/v1/servers` | Redacted server config plus runtime state |
+| `POST /management/v1/servers` | Add or replace a managed server |
+| `PATCH /management/v1/servers/:id` | Update tools, disabled state, or full server config |
+| `DELETE /management/v1/servers/:id` | Remove a server via overlay |
+| `POST /management/v1/servers/:id/restart` | Reconnect using the current effective config |
+| `POST /management/v1/cache/clear` | Clear cache globally or by `server`/`tool` |
 
 ---
 

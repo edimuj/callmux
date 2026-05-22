@@ -364,6 +364,7 @@ export function applyServerMutation(
           : server.requestBodyMaxBytes !== undefined
             ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
             : {}),
+      ...(server.disabled !== undefined ? { disabled: server.disabled } : {}),
     };
   }
 
@@ -412,6 +413,7 @@ export function applyServerMutation(
         : server.requestBodyMaxBytes !== undefined
           ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
           : {}),
+    ...(server.disabled !== undefined ? { disabled: server.disabled } : {}),
   };
 }
 
@@ -428,6 +430,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
   cachePolicy?: CachePolicyConfig;
   requestBodyMaxBytes?: number;
   callTimeoutMs?: number;
+  disabled?: boolean;
 }> {
   return Object.entries(config.servers).map(([name, server]) => {
     if (isHttpServerConfig(server)) {
@@ -443,6 +446,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
         ...(server.requestBodyMaxBytes !== undefined
           ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
           : {}),
+        ...(server.disabled !== undefined ? { disabled: server.disabled } : {}),
       };
     }
     return {
@@ -460,6 +464,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
       ...(server.requestBodyMaxBytes !== undefined
         ? { requestBodyMaxBytes: server.requestBodyMaxBytes }
         : {}),
+      ...(server.disabled !== undefined ? { disabled: server.disabled } : {}),
     };
   });
 }
@@ -508,6 +513,7 @@ export function formatServerList(config: CallmuxConfig): string {
           }`
         );
       }
+      if (server.disabled) lines.push("  disabled: true");
 
       return lines.join("\n");
     })

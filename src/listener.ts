@@ -59,6 +59,20 @@ import {
   RuntimeEventStore,
   type DashboardSnapshot,
 } from "./dashboard.js";
+import {
+  applyManagementOverlay,
+  assertServerConfig,
+  assertStringArray,
+  deleteOverlayServer,
+  loadManagementOverlay,
+  normalizeManagementConfig,
+  redactConfig,
+  saveManagementOverlay,
+  setOverlayServer,
+  type ManagementOverlay,
+  type NormalizedManagementConfig,
+} from "./management.js";
+import type { ServerConfig } from "./types.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
@@ -161,11 +175,19 @@ export interface ListenerOptions {
   port: number;
   host?: string;
   config: CallmuxConfig;
+  configPath?: string;
+  managementBaseConfig?: CallmuxConfig;
+  managementOverlay?: ManagementOverlay;
   upstream: UpstreamManager;
   cache: CallCache;
   responseStore?: ResponseStore;
   allTools: Tool[];
   maxConcurrency: number;
+  onManagementConfigChange?: (
+    config: CallmuxConfig,
+    trigger: string,
+    overlay?: ManagementOverlay
+  ) => Promise<void>;
 }
 
 export class CallmuxListener {
@@ -184,6 +206,9 @@ export class CallmuxListener {
   private metrics: PrometheusMetrics;
   private responseStore: ResponseStore;
   private dashboardConfig: ReturnType<typeof normalizeDashboardConfig>;
+  private managementConfig: NormalizedManagementConfig;
+  private managementBaseConfig: CallmuxConfig;
+  private managementOverlay: ManagementOverlay;
   private runtimeEvents: RuntimeEventStore;
   private activeToolCalls = new Map<string, ActiveToolCallEntry>();
   private unsubscribeToolSuiteChanges: (() => void) | undefined;
@@ -207,6 +232,12 @@ export class CallmuxListener {
     this.auditLogger = new AuditLogger(options.config.auditLog);
     this.metrics = new PrometheusMetrics(options.config.metrics);
     this.dashboardConfig = normalizeDashboardConfig(options.config.dashboard);
+    this.managementConfig = normalizeManagementConfig(
+      options.config.management,
+      options.configPath
+    );
+    this.managementBaseConfig = options.managementBaseConfig ?? options.config;
+    this.managementOverlay = options.managementOverlay ?? { version: 1 };
     this.runtimeEvents = new RuntimeEventStore(this.dashboardConfig.maxEvents);
     this.subscribeToolSuiteChanges(options.upstream);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
@@ -229,6 +260,10 @@ export class CallmuxListener {
     const nextAuditLogger = new AuditLogger(config.auditLog);
     const nextMetrics = new PrometheusMetrics(config.metrics);
     const nextDashboardConfig = normalizeDashboardConfig(config.dashboard);
+    const nextManagementConfig = normalizeManagementConfig(
+      config.management,
+      this.options.configPath
+    );
 
     this.validateSecurityPosture(config, nextAuthConfig);
 
@@ -244,6 +279,7 @@ export class CallmuxListener {
     this.auditLogger = nextAuditLogger;
     this.metrics = nextMetrics;
     this.dashboardConfig = nextDashboardConfig;
+    this.managementConfig = nextManagementConfig;
     this.runtimeEvents.setMaxEvents(nextDashboardConfig.maxEvents);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
   }
@@ -254,6 +290,8 @@ export class CallmuxListener {
     cache: CallCache;
     allTools: Tool[];
     maxConcurrency: number;
+    managementBaseConfig?: CallmuxConfig;
+    managementOverlay?: ManagementOverlay;
   }): void {
     this.applyRuntimeConfig(next.config);
     this.responseStore.setMaxEntries(next.config.responseShield?.maxStoredResults);
@@ -267,6 +305,8 @@ export class CallmuxListener {
       allTools: next.allTools,
       maxConcurrency: next.maxConcurrency,
     };
+    this.managementBaseConfig = next.managementBaseConfig ?? next.config;
+    this.managementOverlay = next.managementOverlay ?? { version: 1 };
     this.subscribeToolSuiteChanges(next.upstream);
   }
 
@@ -344,7 +384,10 @@ export class CallmuxListener {
     process.stderr.write(
       `[callmux] Listening on http://${host}:${port}\n` +
       `[callmux]   Streamable HTTP: POST/GET/DELETE /mcp\n` +
-      `[callmux]   SSE (legacy):    GET /sse, POST /messages\n`
+      `[callmux]   SSE (legacy):    GET /sse, POST /messages\n` +
+      (this.managementConfig.enabled
+        ? `[callmux]   Management API: ${this.managementConfig.path}\n`
+        : "")
     );
   }
 
@@ -489,6 +532,8 @@ export class CallmuxListener {
             method === "GET"
           ) {
             this.handleMetrics(res, context);
+          } else if (this.isManagementPath(path)) {
+            await this.handleManagement(req, res, path, context);
           } else if (this.isDashboardPath(path)) {
             this.handleDashboard(req, res, path, context);
           } else if (path === "/sse" && req.method === "GET") {
@@ -540,6 +585,253 @@ export class CallmuxListener {
       path === this.dashboardChildPath(base, "data") ||
       path === this.dashboardChildPath(base, "events")
     );
+  }
+
+  private isManagementPath(path: string): boolean {
+    if (!this.managementConfig.enabled) return false;
+    const base = this.managementConfig.path;
+    return path === base || path.startsWith(`${base}/`);
+  }
+
+  private async handleManagement(
+    req: IncomingMessage,
+    res: ServerResponse,
+    path: string,
+    context: RequestContext
+  ): Promise<void> {
+    const method = (req.method ?? "GET").toUpperCase();
+    const write = method !== "GET";
+    if (!this.authenticateManagementRequest(req, context, write)) {
+      this.writeJson(res, write ? 401 : 403, context, {
+        error: write
+          ? "Management auth is required for mutations"
+          : "Management read access is not allowed",
+      });
+      return;
+    }
+
+    const route = this.managementRoute(path);
+    try {
+      if (method === "GET" && route === "status") {
+        this.writeJson(res, 200, context, this.createManagementStatus());
+        return;
+      }
+      if (method === "GET" && route === "config/effective") {
+        this.writeJson(res, 200, context, redactConfig(this.options.config));
+        return;
+      }
+      if (method === "GET" && route === "servers") {
+        this.writeJson(res, 200, context, { servers: this.managementServers() });
+        return;
+      }
+      if (method === "POST" && route === "servers") {
+        const body = await this.readManagementJson(req, context);
+        const result = await this.managementAddServer(body);
+        this.writeJson(res, result.dryRun ? 200 : 201, context, result);
+        return;
+      }
+      const serverRoute = route.match(/^servers\/([^/]+)(?:\/(restart))?$/);
+      if (serverRoute) {
+        const serverName = decodeURIComponent(serverRoute[1]);
+        const action = serverRoute[2];
+        if (method === "PATCH" && !action) {
+          const body = await this.readManagementJson(req, context);
+          this.writeJson(res, 200, context, await this.managementPatchServer(serverName, body));
+          return;
+        }
+        if (method === "DELETE" && !action) {
+          const dryRun = new URL(req.url ?? "/", "http://localhost").searchParams.get("dryRun") === "true";
+          this.writeJson(res, 200, context, await this.managementDeleteServer(serverName, dryRun));
+          return;
+        }
+        if (method === "POST" && action === "restart") {
+          await this.applyManagedConfig(this.options.config, `management restart ${serverName}`);
+          this.writeJson(res, 200, context, { action: "restarted", server: serverName });
+          return;
+        }
+      }
+      if (method === "POST" && route === "cache/clear") {
+        const body = await this.readManagementJson(req, context);
+        const parsed = isRecord(body) ? body : {};
+        const tool = typeof parsed.tool === "string" ? parsed.tool : undefined;
+        const server = typeof parsed.server === "string" ? parsed.server : undefined;
+        this.options.cache.invalidate(tool, server);
+        this.writeJson(res, 200, context, {
+          action: "cache_cleared",
+          ...(tool ? { tool } : {}),
+          ...(server ? { server } : {}),
+          cache: this.options.cache.stats(),
+        });
+        return;
+      }
+      this.writeJson(res, 404, context, { error: "Not found" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.writeJson(res, 400, context, { error: message });
+    }
+  }
+
+  private authenticateManagementRequest(
+    req: IncomingMessage,
+    context: RequestContext,
+    write: boolean
+  ): boolean {
+    const auth = this.managementConfig.auth;
+    if (auth) {
+      const token = this.extractManagementBearerToken(req);
+      if (token && authenticateBearerToken(token, auth)) return true;
+      return !write && this.managementConfig.allowUnauthenticatedRead;
+    }
+    if (write) return false;
+    return this.managementConfig.allowUnauthenticatedRead || Boolean(context.principal);
+  }
+
+  private extractManagementBearerToken(req: IncomingMessage): string | undefined {
+    const header = req.headers.authorization;
+    if (typeof header === "string") {
+      const match = /^Bearer\s+(.+)$/i.exec(header);
+      if (match) return match[1];
+    }
+    const explicit = req.headers["x-callmux-management-token"];
+    return typeof explicit === "string" ? explicit : undefined;
+  }
+
+  private managementRoute(path: string): string {
+    const base = this.managementConfig.path;
+    if (path === base) return "status";
+    return path.slice(base.length + 1).replace(/\/+$/, "");
+  }
+
+  private async readManagementJson(
+    req: IncomingMessage,
+    context: RequestContext
+  ): Promise<unknown> {
+    const { body } = await readBody(req, this.globalRequestBodyMaxBytes);
+    const parsed = this.parseJsonBody(body);
+    context.payload = parsed;
+    return parsed;
+  }
+
+  private createManagementStatus(): Record<string, unknown> {
+    return {
+      management: {
+        enabled: true,
+        path: this.managementConfig.path,
+        statePath: this.managementConfig.statePath,
+        persistent: Boolean(this.managementConfig.statePath),
+        overlayUpdatedAt: this.managementOverlay.updatedAt,
+        overlayServers: Object.keys(this.managementOverlay.servers ?? {}).sort(),
+      },
+      runtime: this.createDashboardSnapshot().status,
+      servers: this.managementServers(),
+    };
+  }
+
+  private managementServers(): Array<Record<string, unknown>> {
+    return Object.entries(this.options.config.servers)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, config]) => {
+        const info = this.options.upstream.getServerInfo(name);
+        return {
+          name,
+          config: redactConfig({ servers: { [name]: config } }).servers[name],
+          managed: this.managementOverlay.servers?.[name] !== undefined,
+          ...(info ? { runtime: info } : {}),
+          tools: this.options.upstream.getServerTools(name),
+        };
+      });
+  }
+
+  private async managementAddServer(body: unknown): Promise<Record<string, unknown>> {
+    if (!isRecord(body) || typeof body.name !== "string" || body.name.trim().length === 0) {
+      throw new Error("name is required");
+    }
+    assertServerConfig(body.config, "config");
+    const dryRun = body.dryRun === true;
+    const nextOverlay = setOverlayServer(this.managementOverlay, body.name, body.config);
+    const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
+    if (dryRun) {
+      return { dryRun: true, action: "add_server", server: body.name, config: redactConfig(nextConfig) };
+    }
+    await this.commitManagementOverlay(nextOverlay, nextConfig, `management add ${body.name}`);
+    return { action: "added", server: body.name };
+  }
+
+  private async managementPatchServer(
+    name: string,
+    body: unknown
+  ): Promise<Record<string, unknown>> {
+    const current = this.options.config.servers[name];
+    if (!current) throw new Error(`server "${name}" not found`);
+    if (!isRecord(body)) throw new Error("request body must be an object");
+    const dryRun = body.dryRun === true;
+    let nextServer: ServerConfig;
+    if (body.config !== undefined) {
+      assertServerConfig(body.config, "config");
+      nextServer = body.config;
+    } else {
+      nextServer = { ...current };
+      if (body.tools !== undefined) {
+        assertStringArray(body.tools, "tools");
+        nextServer.tools = body.tools.length > 0 ? body.tools : undefined;
+      }
+      if (body.addTools !== undefined) {
+        assertStringArray(body.addTools, "addTools");
+        nextServer.tools = Array.from(new Set([...(nextServer.tools ?? []), ...body.addTools]));
+      }
+      if (body.removeTools !== undefined) {
+        assertStringArray(body.removeTools, "removeTools");
+        const removals = new Set(body.removeTools);
+        nextServer.tools = (nextServer.tools ?? []).filter((tool) => !removals.has(tool));
+        if (nextServer.tools.length === 0) delete nextServer.tools;
+      }
+      if (body.disabled !== undefined) {
+        if (typeof body.disabled !== "boolean") throw new Error("disabled must be a boolean");
+        nextServer.disabled = body.disabled;
+      }
+    }
+    const nextOverlay = setOverlayServer(this.managementOverlay, name, nextServer);
+    const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
+    if (dryRun) {
+      return { dryRun: true, action: "patch_server", server: name, config: redactConfig(nextConfig) };
+    }
+    await this.commitManagementOverlay(nextOverlay, nextConfig, `management patch ${name}`);
+    return { action: "updated", server: name };
+  }
+
+  private async managementDeleteServer(
+    name: string,
+    dryRun: boolean
+  ): Promise<Record<string, unknown>> {
+    if (!this.options.config.servers[name]) throw new Error(`server "${name}" not found`);
+    const nextOverlay = deleteOverlayServer(this.managementOverlay, name);
+    const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
+    if (dryRun) {
+      return { dryRun: true, action: "delete_server", server: name, config: redactConfig(nextConfig) };
+    }
+    await this.commitManagementOverlay(nextOverlay, nextConfig, `management delete ${name}`);
+    return { action: "deleted", server: name };
+  }
+
+  private async commitManagementOverlay(
+    nextOverlay: ManagementOverlay,
+    nextConfig: CallmuxConfig,
+    trigger: string
+  ): Promise<void> {
+    await this.applyManagedConfig(nextConfig, trigger, nextOverlay);
+    await saveManagementOverlay(this.managementConfig.statePath, nextOverlay);
+    this.managementOverlay = await loadManagementOverlay(this.managementConfig.statePath);
+  }
+
+  private async applyManagedConfig(
+    config: CallmuxConfig,
+    trigger: string,
+    overlay?: ManagementOverlay
+  ): Promise<void> {
+    if (!this.options.onManagementConfigChange) {
+      throw new Error("management mutations require listener runtime apply support");
+    }
+    await this.options.onManagementConfigChange(config, trigger, overlay);
   }
 
   private handleDashboard(
@@ -601,6 +893,11 @@ export class CallmuxListener {
       generatedAt: new Date().toISOString(),
       summary: this.runtimeEvents.stats(),
       status,
+      management: {
+        enabled: this.managementConfig.enabled,
+        path: this.managementConfig.path,
+      },
+      managementServers: this.managementConfig.enabled ? this.managementServers() : [],
       events: this.runtimeEvents.list(),
     };
   }

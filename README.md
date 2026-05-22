@@ -168,6 +168,22 @@ Optional dashboard for shared listeners. Disabled by default, then enabled with 
 
 [Full guide ->](docs/dashboard.md)
 
+### Management API: Runtime Server Control
+
+Opt-in management endpoints for standalone shared listeners. Read status/config/server state directly, use the TypeScript SDK, or manage servers from the dashboard. Mutations require management bearer auth and persist to a callmux-owned overlay file instead of rewriting your base config.
+
+```json
+{
+  "management": {
+    "enabled": true,
+    "auth": {
+      "mode": "bearer",
+      "tokens": [{ "id": "admin", "tokenRef": "env:CALLMUX_MANAGEMENT_TOKEN" }]
+    }
+  }
+}
+```
+
 ### Recipes: Team Workflows as Callable Names
 
 Define multi-step operations once in config, call them by name from any agent session. Encode team conventions (bug issues always get the `bug` label), triage workflows (fetch two issues in parallel for comparison), or analysis pipelines (search then analyze). One name, consistent execution, works across all clients.

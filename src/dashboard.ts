@@ -151,6 +151,11 @@ export interface DashboardSnapshot {
   generatedAt: string;
   summary: DashboardRuntimeSummary;
   status: unknown;
+  management?: {
+    enabled: boolean;
+    path: string;
+  };
+  managementServers?: unknown[];
   events: RuntimeEvent[];
 }
 
@@ -388,6 +393,12 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .filter-field { display: grid; gap: 4px; }
     .filter-field label { color: #667085; font-size: 12px; font-weight: 600; }
     .filter-field input, .filter-field select { background: white; border: 1px solid #d9dee7; border-radius: 6px; color: inherit; font: inherit; padding: 7px 8px; }
+    .button { background: #102033; border: 1px solid #102033; border-radius: 6px; color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; padding: 6px 9px; }
+    .button.secondary { background: transparent; color: #102033; }
+    .button.danger { background: #b42318; border-color: #b42318; }
+    .inline-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .management-grid { display: grid; gap: 14px; }
+    .management-form { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(180px, 1fr) auto; }
     .tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .tool-chip { background: #eef5ff; border: 1px solid #c8def9; border-radius: 999px; color: #194b7d; font-size: 12px; padding: 3px 8px; }
     .suite-card { display: grid; gap: 10px; }
@@ -421,6 +432,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .server-row:hover { background: #1e2936; }
       .server-row.selected { background: #17304a; }
       .filter-field input, .filter-field select { background: #101820; border-color: #303946; }
+      .button.secondary { color: #e5edf5; border-color: #303946; }
       .tool-chip { background: #13283f; border-color: #26547d; color: #b9dcff; }
       .flow-node { background: #101820; border-color: #303946; }
       .bar-track { background: #263241; }
@@ -455,6 +467,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .detail-grid { grid-template-columns: 1fr; }
       .split { grid-template-columns: 1fr; }
       .filters { grid-template-columns: 1fr; }
+      .management-form { grid-template-columns: 1fr; }
       .search-field { grid-column: auto; }
       .flow { grid-template-columns: 1fr; }
       .flow-arrow { min-height: 10px; transform: rotate(90deg); }
@@ -476,6 +489,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       <nav class="nav" aria-label="Dashboard sections">
         <button class="nav-button active" data-view-button="overview"><span class="nav-icon">O</span>Overview</button>
         <button class="nav-button" data-view-button="servers"><span class="nav-icon">S</span>Servers</button>
+        <button class="nav-button" data-view-button="management"><span class="nav-icon">M</span>Management</button>
         <button class="nav-button" data-view-button="tools"><span class="nav-icon">T</span>Tool Suites</button>
         <button class="nav-button" data-view-button="diagrams"><span class="nav-icon">D</span>Diagrams</button>
         <button class="nav-button" data-view-button="events"><span class="nav-icon">E</span>Events</button>
@@ -490,6 +504,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       <div class="mobile-nav" aria-label="Dashboard sections">
         <button class="nav-button active" data-view-button="overview">Overview</button>
         <button class="nav-button" data-view-button="servers">Servers</button>
+        <button class="nav-button" data-view-button="management">Management</button>
         <button class="nav-button" data-view-button="tools">Tools</button>
         <button class="nav-button" data-view-button="diagrams">Diagrams</button>
         <button class="nav-button" data-view-button="events">Events</button>
@@ -525,6 +540,20 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <section id="view-tools" class="view">
           <div class="view-header"><h2>Tool Suites</h2></div>
           <section id="tool-suites"></section>
+        </section>
+        <section id="view-management" class="view">
+          <div class="view-header"><h2>Management</h2></div>
+          <section class="management-grid">
+            <section class="panel">
+              <div class="management-form">
+                <div class="filter-field"><label for="management-token">Management token</label><input id="management-token" type="password" autocomplete="off" placeholder="Bearer token for write actions"></div>
+                <button id="management-token-save" class="button" type="button">Save</button>
+              </div>
+            </section>
+            <section class="panel">
+              <table><thead><tr><th>Server</th><th>State</th><th>Tools</th><th>Managed</th><th>Actions</th></tr></thead><tbody id="management-servers"></tbody></table>
+            </section>
+          </section>
         </section>
         <section id="view-diagrams" class="view">
           <div class="view-header"><h2>Runtime Diagrams</h2></div>
@@ -566,7 +595,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     const dataUrl = dashboardEndpoint("data");
     const eventsUrl = dashboardEndpoint("events");
-    const viewTitles = { overview: "Overview", servers: "Servers", tools: "Tool Suites", diagrams: "Runtime Diagrams", events: "Recent Events", runtime: "Runtime" };
+    const viewTitles = { overview: "Overview", servers: "Servers", management: "Management", tools: "Tool Suites", diagrams: "Runtime Diagrams", events: "Recent Events", runtime: "Runtime" };
     let snapshot = null;
     let pendingSnapshot = null;
     let selectedEventKey = null;
@@ -575,6 +604,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let hideTransportHttp = true;
     let eventFilters = { type: "", status: "", server: "", search: "" };
     let currentView = loadView();
+    let managementToken = loadManagementToken();
 
     function loadView() {
       try {
@@ -587,6 +617,41 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       try {
         localStorage.setItem("callmux-dashboard-view", view);
       } catch {}
+    }
+    function loadManagementToken() {
+      try {
+        return localStorage.getItem("callmux-management-token") || "";
+      } catch {
+        return "";
+      }
+    }
+    function saveManagementToken(value) {
+      managementToken = value;
+      try {
+        if (value) localStorage.setItem("callmux-management-token", value);
+        else localStorage.removeItem("callmux-management-token");
+      } catch {}
+    }
+    function managementBasePath() {
+      return snapshot?.management?.path || "/management/v1";
+    }
+    function managementUrl(path) {
+      const base = managementBasePath().replace(/\\/+$/, "");
+      return base + (path ? "/" + path.replace(/^\\/+/, "") : "");
+    }
+    async function managementRequest(path, options = {}) {
+      const headers = { "Accept": "application/json", ...(options.headers || {}) };
+      if (managementToken) headers.Authorization = "Bearer " + managementToken;
+      if (options.body !== undefined) headers["Content-Type"] = "application/json";
+      const res = await fetch(managementUrl(path), {
+        method: options.method || "GET",
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      });
+      const text = await res.text();
+      const payload = text ? JSON.parse(text) : {};
+      if (!res.ok) throw new Error(payload.error || ("HTTP " + res.status));
+      return payload;
     }
     function switchView(view) {
       if (!viewTitles[view]) return;
@@ -775,6 +840,43 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         detailItem("Last error", server.lastError ?? server.error),
       ].join("") + '</div><h4 style="margin:14px 0 6px">Tools</h4>' + toolChips(server.tools);
     }
+    function renderManagement(servers) {
+      const target = document.getElementById("management-servers");
+      if (!snapshot?.management?.enabled) {
+        target.innerHTML = '<tr><td colspan="5" class="muted">Management API is disabled.</td></tr>';
+        return;
+      }
+      target.innerHTML = servers.map(server => {
+        const disabled = server.state === "disabled";
+        const tools = Array.isArray(server.tools) ? server.tools.length : (server.toolCount ?? 0);
+        return '<tr>' +
+          cell(esc(server.name)) +
+          cell(esc(server.state), disabled ? "warn" : server.state === "connected" ? "ok" : "bad") +
+          cell(esc(tools)) +
+          cell(esc(server.managed ? "overlay" : "base")) +
+          '<td><div class="inline-actions">' +
+            '<button class="button secondary" data-management-action="restart" data-server="' + esc(server.name) + '">Restart</button>' +
+            '<button class="button secondary" data-management-action="' + (disabled ? "enable" : "disable") + '" data-server="' + esc(server.name) + '">' + (disabled ? "Enable" : "Disable") + '</button>' +
+            '<button class="button danger" data-management-action="delete" data-server="' + esc(server.name) + '">Remove</button>' +
+          '</div></td>' +
+        '</tr>';
+      }).join("") || '<tr><td colspan="5" class="muted">No servers configured.</td></tr>';
+      document.querySelectorAll("[data-management-action]").forEach(button => {
+        button.addEventListener("click", async () => {
+          const name = button.dataset.server;
+          const action = button.dataset.managementAction;
+          try {
+            if (action === "restart") await managementRequest("servers/" + encodeURIComponent(name) + "/restart", { method: "POST" });
+            if (action === "enable") await managementRequest("servers/" + encodeURIComponent(name), { method: "PATCH", body: { disabled: false } });
+            if (action === "disable") await managementRequest("servers/" + encodeURIComponent(name), { method: "PATCH", body: { disabled: true } });
+            if (action === "delete") await managementRequest("servers/" + encodeURIComponent(name), { method: "DELETE" });
+            await refresh();
+          } catch (error) {
+            alert(error instanceof Error ? error.message : String(error));
+          }
+        });
+      });
+    }
     function renderToolSuites(status, servers, events) {
       const changes = events.filter(event => event.type === "tool_suite_changed").slice(-20).reverse();
       document.getElementById("tool-suites").innerHTML = servers.map(server => {
@@ -947,6 +1049,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         ? status.servers
         : Object.entries(status.servers || {}).map(([name, server]) => ({ name, ...server }));
       const allEvents = Array.isArray(data.events) ? data.events : [];
+      const managementServers = Array.isArray(data.managementServers) ? data.managementServers : servers;
       if (!selectedServerName && servers.length > 0) selectedServerName = servers[0].name;
       renderHealthStrip(status, servers);
       updateServerFilterOptions(servers);
@@ -979,6 +1082,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         });
       });
       renderServerDetail(servers.find(server => server.name === selectedServerName));
+      renderManagement(managementServers);
       renderToolSuites(status, servers, allEvents);
       renderRuntimeDiagrams(status, servers, data.summary, allEvents);
       document.getElementById("runtime-json").textContent = JSON.stringify(status, null, 2);
@@ -1044,6 +1148,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     document.getElementById("event-filter-search").addEventListener("input", event => {
       eventFilters.search = event.target.value;
       if (snapshot) render(snapshot);
+    });
+    document.getElementById("management-token").value = managementToken;
+    document.getElementById("management-token-save").addEventListener("click", () => {
+      saveManagementToken(document.getElementById("management-token").value.trim());
     });
     document.querySelectorAll("[data-view-button]").forEach(button => {
       button.addEventListener("click", () => switchView(button.dataset.viewButton));

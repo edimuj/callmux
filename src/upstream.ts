@@ -1243,6 +1243,7 @@ export class UpstreamManager {
     await this.resetConnectionState();
 
     const entries = Object.entries(servers);
+    const activeEntries = entries.filter(([, config]) => !config.disabled);
     this.serverConfigs = new Map(entries);
     const maxConcurrency = options.maxConcurrency ?? 20;
     const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -1255,6 +1256,19 @@ export class UpstreamManager {
 
     const startTimes = new Map<string, number>();
     for (const [name, config] of entries) {
+      if (config.disabled) {
+        this.serverInfoMap.set(name, {
+          transport: this.resolvedTransportFor(config),
+          state: "disabled",
+          connectDurationMs: 0,
+          totalTools: 0,
+          exposedTools: 0,
+          ...(config.tools ? { toolFilter: config.tools } : {}),
+          ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
+          toolSuiteGeneration: this.toolSuiteGeneration,
+        });
+        continue;
+      }
       this.serverInfoMap.set(name, {
         transport: this.resolvedTransportFor(config),
         state: "starting",
@@ -1266,7 +1280,7 @@ export class UpstreamManager {
         toolSuiteGeneration: this.toolSuiteGeneration,
       });
     }
-    const results = await mapBounded(entries, maxConcurrency, async ([name, config]) => {
+    const results = await mapBounded(activeEntries, maxConcurrency, async ([name, config]) => {
       startTimes.set(name, performance.now());
       try {
         return {

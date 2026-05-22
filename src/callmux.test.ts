@@ -68,6 +68,12 @@ import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } f
 import { CallmuxBridge, deriveBridgeCallOptions } from "./bridge.js";
 import { renderAgentInstructions } from "./instructions.js";
 import { shutdownAfterFatalListenerError } from "./fatal.js";
+import {
+  applyManagementOverlay,
+  loadManagementOverlay,
+  saveManagementOverlay,
+} from "./management.js";
+import { ManagementClient } from "./management-client.js";
 
 function textResult(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
@@ -8083,6 +8089,115 @@ test("listener dashboard supports root mount", async () => {
     await events.body?.cancel();
   } finally {
     await listener.close();
+  }
+});
+
+test("management overlay applies server additions and deletions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-management-overlay-"));
+  const statePath = join(dir, "overlay.json");
+  try {
+    const base = {
+      servers: {
+        base: fakeMcpServer("base"),
+      },
+      management: { enabled: true, statePath },
+    };
+    const overlay = {
+      version: 1 as const,
+      servers: {
+        added: { config: { command: "node", args: ["server.js"], tools: ["ping"] } },
+        base: { deleted: true },
+      },
+    };
+
+    await saveManagementOverlay(statePath, overlay);
+    const loaded = await loadManagementOverlay(statePath);
+    const effective = applyManagementOverlay(base, loaded);
+
+    assert.deepEqual(Object.keys(effective.servers).sort(), ["added"]);
+    assert.deepEqual(effective.servers.added, {
+      command: "node",
+      args: ["server.js"],
+      tools: ["ping"],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener management API requires management auth for mutations and persists overlay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-management-api-"));
+  const statePath = join(dir, "overlay.json");
+  const baseConfig = {
+    servers: {
+      alpha: { command: "node", args: ["alpha.js"] },
+    },
+    management: {
+      enabled: true,
+      statePath,
+      auth: {
+        mode: "bearer" as const,
+        tokens: [{ id: "admin", token: "mgmt-secret" }],
+      },
+      allowUnauthenticatedRead: true,
+    },
+  };
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: baseConfig,
+      configPath: join(dir, "config.json"),
+      managementBaseConfig: baseConfig,
+      managementOverlay: { version: 1 },
+      upstream,
+      cache,
+      allTools: [],
+      maxConcurrency: 20,
+      onManagementConfigChange: async (nextConfig, _trigger, overlay) => {
+        listener!.applyReloadedState({
+          config: nextConfig,
+          upstream,
+          cache,
+          allTools: [],
+          maxConcurrency: 20,
+          managementBaseConfig: baseConfig,
+          managementOverlay: overlay ?? { version: 1 },
+        });
+      },
+    });
+    await listener.start();
+    const port = listenerPort(listener);
+
+    const read = await fetch(`http://127.0.0.1:${port}/management/v1/config/effective`);
+    assert.equal(read.status, 200);
+    assert.deepEqual(Object.keys(((await read.json()) as { servers: Record<string, unknown> }).servers), ["alpha"]);
+
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/management/v1/servers/alpha`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disabled: true }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const client = new ManagementClient({
+      baseUrl: `http://127.0.0.1:${port}/management/v1`,
+      token: "mgmt-secret",
+    });
+    await client.updateServer("alpha", { disabled: true });
+
+    const effective = await client.effectiveConfig();
+    assert.equal(effective.servers.alpha.disabled, true);
+
+    const overlay = await loadManagementOverlay(statePath);
+    assert.equal(overlay.servers?.alpha.config?.disabled, true);
+  } finally {
+    await listener?.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
