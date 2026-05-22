@@ -889,11 +889,14 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         return;
       }
       target.innerHTML = servers.map(server => {
-        const disabled = server.state === "disabled";
+        const runtime = server.runtime || {};
+        const config = server.config || {};
+        const state = runtime.state || server.state || (config.disabled ? "disabled" : "unknown");
+        const disabled = config.disabled === true || state === "disabled";
         const tools = Array.isArray(server.tools) ? server.tools.length : (server.toolCount ?? 0);
         return '<tr>' +
           cell(esc(server.name)) +
-          cell(esc(server.state), disabled ? "warn" : server.state === "connected" ? "ok" : "bad") +
+          cell(esc(state), disabled ? "warn" : state === "connected" ? "ok" : "bad") +
           cell(esc(tools)) +
           cell(esc(server.managed ? "overlay" : "base")) +
           '<td><div class="inline-actions">' +
