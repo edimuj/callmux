@@ -637,14 +637,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function managementUrl(path) {
       const base = managementBasePath().replace(/\\/+$/, "");
-      return base + (path ? "/" + path.replace(/^\\/+/, "") : "");
+      const normalized = base + (path ? "/" + path.replace(/^\\/+/, "") : "");
+      return new URL(normalized, window.location.origin).toString();
     }
     async function managementRequest(path, options = {}) {
+      const url = managementUrl(path);
+      const method = options.method || "GET";
       const headers = { "Accept": "application/json", ...(options.headers || {}) };
       if (managementToken) headers.Authorization = "Bearer " + managementToken;
       if (options.body !== undefined) headers["Content-Type"] = "application/json";
-      const res = await fetch(managementUrl(path), {
-        method: options.method || "GET",
+      const res = await fetch(url, {
+        method,
         headers,
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       });
@@ -661,7 +664,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           : typeof payload === "string" && payload
             ? payload
             : "HTTP " + res.status;
-        throw new Error(message);
+        throw new Error(method + " " + url + " -> HTTP " + res.status + ": " + message);
       }
       return payload;
     }
