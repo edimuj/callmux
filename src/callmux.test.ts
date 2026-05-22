@@ -8083,6 +8083,7 @@ test("listener dashboard supports root mount", async () => {
     assert.ok(htmlText.includes('const configuredPath = "/"'));
     assert.match(htmlText, /function externalMountPrefix/);
     assert.match(htmlText, /prefix \+ base/);
+    assert.doesNotMatch(htmlText, /replace\(\/\/\+\$/);
 
     const data = await fetch(`http://127.0.0.1:${port}/data`);
     assert.equal(data.status, 200);
