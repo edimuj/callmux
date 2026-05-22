@@ -8079,7 +8079,10 @@ test("listener dashboard supports root mount", async () => {
     const port = listenerPort(listener);
     const html = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(html.status, 200);
-    assert.ok((await html.text()).includes('const configuredPath = "/"'));
+    const htmlText = await html.text();
+    assert.ok(htmlText.includes('const configuredPath = "/"'));
+    assert.match(htmlText, /function externalMountPrefix/);
+    assert.match(htmlText, /prefix \+ base/);
 
     const data = await fetch(`http://127.0.0.1:${port}/data`);
     assert.equal(data.status, 200);

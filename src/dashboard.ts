@@ -635,9 +635,20 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     function managementBasePath() {
       return snapshot?.management?.path || "/management/v1";
     }
+    function externalMountPrefix() {
+      const pagePath = (window.location.pathname || configuredPath || "/").replace(/\/+$/, "") || "/";
+      const dashboardPath = (configuredPath || "/").replace(/\/+$/, "") || "/";
+      if (dashboardPath === "/") {
+        return pagePath === "/" ? "" : pagePath;
+      }
+      return pagePath.endsWith(dashboardPath)
+        ? pagePath.slice(0, -dashboardPath.length).replace(/\/+$/, "")
+        : "";
+    }
     function managementUrl(path) {
       const base = managementBasePath().replace(/\\/+$/, "");
-      const normalized = base + (path ? "/" + path.replace(/^\\/+/, "") : "");
+      const prefix = externalMountPrefix();
+      const normalized = prefix + base + (path ? "/" + path.replace(/^\\/+/, "") : "");
       return new URL(normalized, window.location.origin).toString();
     }
     async function managementRequest(path, options = {}) {
