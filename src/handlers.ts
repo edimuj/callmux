@@ -3,6 +3,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
 import type { ResponseStore } from "./response-store.js";
+import type { SchemaCompressionDiagnostics } from "./schema-compression.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
   ParallelCall,
@@ -1759,7 +1760,8 @@ export function handleStatus(
   listenerDiagnostics?: ListenerRuntimeDiagnostics,
   recipes?: Record<string, RecipeConfig>,
   responseStore?: ResponseStore,
-  defaultOutputFormat?: OutputFormat
+  defaultOutputFormat?: OutputFormat,
+  schemaCompression?: SchemaCompressionDiagnostics
 ): CallToolResult {
   const parsed = isRecord(args) ? args : {};
   const outputFormat = resolveOutputFormat(parsed, defaultOutputFormat);
@@ -1955,6 +1957,7 @@ export function handleStatus(
     ...(toolSuite.lastChangeAt ? { lastToolSuiteChangeAt: toolSuite.lastChangeAt } : {}),
     totalTools: servers.reduce((sum, s) => sum + (s.toolCount as number), 0),
     cache: cache.stats(),
+    ...(schemaCompression ? { schemaCompression } : {}),
     ...(responseStore ? { responseStore: responseStore.stats() } : {}),
     maxConcurrency,
     ...(recipeSummaries.length > 0

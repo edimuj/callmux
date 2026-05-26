@@ -63,6 +63,10 @@ import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
 import { listenerClientUrl, renderSharedListenerStartCommand } from "./setup.js";
 import { createResponseStore } from "./response-store.js";
+import {
+  compressToolForExposure,
+  resolveSchemaCompressionConfig,
+} from "./schema-compression.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
 import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
 import { CallmuxBridge, deriveBridgeCallOptions } from "./bridge.js";
@@ -4090,6 +4094,81 @@ function mockTool(name: string, description?: string, inputFields: string[] = []
   };
 }
 
+test("schema compression preserves input contracts while trimming descriptions", () => {
+  const tool: Tool = {
+    name: "get_issue",
+    description: "Get a specific issue by number from the selected repository with all available metadata and comments",
+    inputSchema: {
+      type: "object",
+      required: ["repo", "ref", "state_reason"],
+      properties: {
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        ref: {
+          type: "string",
+          description: "Git ref such as a branch, tag, pull request head, or full commit SHA",
+          default: "main",
+        },
+        state_reason: {
+          type: "string",
+          description: "Reason for closing the issue",
+          enum: ["completed", "not_planned", "duplicate"],
+        },
+        limit: {
+          type: "integer",
+          description: "Limit",
+          minimum: 1,
+          maximum: 100,
+          default: 20,
+        },
+      },
+    },
+  };
+
+  const compressed = compressToolForExposure(tool, {
+    mode: "balanced",
+    maxDescriptionChars: 32,
+  });
+  const properties = compressed.inputSchema.properties as Record<string, Record<string, unknown>>;
+
+  assert.equal(compressed.description, "Get a specific issue by numbe...");
+  assert.equal(properties.repo.description, undefined);
+  assert.equal(properties.limit.description, undefined);
+  assert.equal(properties.ref.description, "Git ref such as a branch, tag...");
+  assert.equal(properties.ref.default, "main");
+  assert.deepEqual(compressed.inputSchema.required, ["repo", "ref", "state_reason"]);
+  assert.deepEqual(properties.state_reason.enum, ["completed", "not_planned", "duplicate"]);
+  assert.equal(properties.limit.minimum, 1);
+  assert.equal(properties.limit.maximum, 100);
+  assert.equal(properties.limit.default, 20);
+});
+
+test("schema compression supports aggressive and disabled modes", () => {
+  const tool = mockTool(
+    "list_issues",
+    "List issues with verbose routing guidance that can be removed in aggressive mode",
+    ["repo", "ref"]
+  );
+  tool.inputSchema.properties = {
+    repo: { type: "string", description: "Repository name" },
+    ref: { type: "string", description: "Git ref to query" },
+  };
+
+  const aggressive = compressToolForExposure(tool, { mode: "aggressive" });
+  const aggressiveProperties = aggressive.inputSchema.properties as Record<string, Record<string, unknown>>;
+  assert.equal(aggressive.description, undefined);
+  assert.equal(aggressiveProperties.repo.description, undefined);
+  assert.equal(aggressiveProperties.ref.description, "Git ref to query");
+
+  const disabled = compressToolForExposure(tool, { enabled: false });
+  assert.equal(disabled.description, tool.description);
+  assert.deepEqual(disabled.inputSchema, tool.inputSchema);
+  assert.deepEqual(resolveSchemaCompressionConfig().mode, "balanced");
+  assert.equal(resolveSchemaCompressionConfig().enabled, true);
+});
+
 test("handleDryRun previews resolved calls and cache-hit candidates", async () => {
   const cache = new CallCache(60);
   cache.set("github__get_issue", { id: 1 }, textResult("cached"), "github");
@@ -4574,6 +4653,43 @@ test("handleStatus includes mode field", () => {
   assert.deepEqual(standardContent.wrappedServers, ["github"]);
 });
 
+test("handleStatus reports schema compression diagnostics when provided", () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]);
+
+  const result = handleStatus(
+    upstream as never,
+    new CallCache(0),
+    20,
+    false,
+    undefined,
+    TEST_INSTANCE_IDENTITY,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      enabled: true,
+      mode: "balanced",
+      maxDescriptionChars: 160,
+      tools: 1,
+      compressedTools: 1,
+      originalBytes: 500,
+      compressedBytes: 300,
+      savedBytes: 200,
+      savedPercent: 40,
+    }
+  );
+
+  const content = result.structuredContent as {
+    schemaCompression: { mode: string; savedBytes: number };
+  };
+  assert.equal(content.schemaCompression.mode, "balanced");
+  assert.equal(content.schemaCompression.savedBytes, 200);
+});
+
 test("handleStatus includes optional namespace when provided", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -5020,6 +5136,49 @@ test("loadConfig parses metaOnly, descriptionMaxLength, and outputFormat from fi
     assert.equal(config.metaOnly, true);
     assert.equal(config.descriptionMaxLength, 80);
     assert.equal(config.outputFormat, "auto");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses schema compression settings from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-schema-compression-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: {
+            command: "node",
+            args: ["server.js"],
+            schemaCompression: {
+              mode: "aggressive",
+              maxDescriptionChars: 80,
+            },
+          },
+        },
+        schemaCompression: {
+          enabled: true,
+          mode: "balanced",
+          maxDescriptionChars: 120,
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.schemaCompression?.enabled, true);
+    assert.equal(config.schemaCompression?.mode, "balanced");
+    assert.equal(config.schemaCompression?.maxDescriptionChars, 120);
+    assert.equal(
+      (config.servers.github as StdioServerConfig).schemaCompression?.mode,
+      "aggressive"
+    );
+    assert.equal(
+      (config.servers.github as StdioServerConfig).schemaCompression?.maxDescriptionChars,
+      80
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -7950,6 +8109,38 @@ test("listener listTools is dynamic and keeps meta tools present", async () => {
   const metaOnly = (listener as any).currentTools() as Tool[];
   assert.ok(!metaOnly.some((tool) => tool.name === "github__get_issue"));
   assert.ok(metaOnly.some((tool) => tool.name === "callmux_status"));
+});
+
+test("listener listTools applies balanced schema compression by default", async () => {
+  const tool: Tool = {
+    name: "get_issue",
+    description: "Get issue",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name" },
+        ref: { type: "string", description: "Git ref to resolve" },
+      },
+    },
+  };
+  const upstream = createMockUpstream([{ server: "github", tool }]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: { github: { command: "github-mcp" } } },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const tools = (listener as any).currentTools() as Tool[];
+  const exposed = tools.find((item) => item.name === "get_issue");
+  assert.ok(exposed);
+  const properties = exposed.inputSchema.properties as Record<string, Record<string, unknown>>;
+  assert.equal(exposed.description, undefined);
+  assert.equal(properties.repo.description, undefined);
+  assert.equal(properties.ref.description, "Git ref to resolve");
 });
 
 test("listener dashboard is disabled by default", async () => {

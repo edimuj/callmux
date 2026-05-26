@@ -19,6 +19,7 @@ import type {
   RecipeConfig,
   RecipeMode,
   ResponseShieldConfig,
+  SchemaCompressionConfig,
   ServerConfig,
 } from "./types.js";
 import { hashBearerToken, parseScryptTokenHash } from "./auth.js";
@@ -189,6 +190,42 @@ function parseResponseShieldConfig(
     ...(allowTools ? { allowTools } : {}),
     ...(denyTools ? { denyTools } : {}),
     ...(maxStoredResults !== undefined ? { maxStoredResults } : {}),
+  };
+}
+
+function parseSchemaCompressionConfig(
+  value: unknown,
+  optionName: string
+): SchemaCompressionConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const mode = value.mode === undefined
+    ? undefined
+    : value.mode === "off" || value.mode === "balanced" || value.mode === "aggressive"
+      ? value.mode
+      : (() => {
+          throw new Error(`${optionName}.mode must be "off", "balanced", or "aggressive"`);
+        })();
+  const maxDescriptionChars = value.maxDescriptionChars !== undefined
+    ? parsePositiveInteger(value.maxDescriptionChars, `${optionName}.maxDescriptionChars`)
+    : undefined;
+
+  if (
+    enabled === undefined &&
+    mode === undefined &&
+    maxDescriptionChars === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(mode !== undefined ? { mode } : {}),
+    ...(maxDescriptionChars !== undefined ? { maxDescriptionChars } : {}),
   };
 }
 
@@ -1067,6 +1104,10 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     `servers.${serverName}.responseShield`,
     false
   );
+  const schemaCompression = parseSchemaCompressionConfig(
+    value.schemaCompression,
+    `servers.${serverName}.schemaCompression`
+  );
   const maxConcurrency = value.maxConcurrency !== undefined
     ? parsePositiveInteger(value.maxConcurrency, `servers.${serverName}.maxConcurrency`)
     : undefined;
@@ -1088,6 +1129,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
     ...(callTimeoutMs !== undefined ? { callTimeoutMs } : {}),
     ...(requestBodyMaxBytes !== undefined ? { requestBodyMaxBytes } : {}),
+    ...(schemaCompression ? { schemaCompression } : {}),
     ...(disabled !== undefined ? { disabled } : {}),
   };
 
@@ -1168,6 +1210,10 @@ function parseConfigDocument(
       "responseShield",
       true
     );
+    const schemaCompression = parseSchemaCompressionConfig(
+      parsed.schemaCompression,
+      "schemaCompression"
+    );
     const auth = parseAuthConfig(parsed.auth, "auth", configBaseDir);
     const authorization = parseAuthorizationConfig(
       parsed.authorization,
@@ -1197,6 +1243,7 @@ function parseConfigDocument(
           : parseNonNegativeInteger(parsed.cacheTtlSeconds, "cacheTtlSeconds"),
       ...(cachePolicy ? { cachePolicy } : {}),
       ...(responseShield ? { responseShield } : {}),
+      ...(schemaCompression ? { schemaCompression } : {}),
       maxConcurrency:
         parsed.maxConcurrency === undefined
           ? 20

@@ -156,6 +156,12 @@ callmux daemon install --start --enable
 
 [Full guide ->](docs/meta-only-mode.md)
 
+### Schema Compression: Sensible Tool Defaults
+
+Balanced schema compression is enabled by default. It minimizes verbose MCP tool and parameter descriptions before they enter the client context, while preserving names, types, required fields, enums, defaults, and bounds. Configure it globally or per server when a downstream MCP server needs more or less description.
+
+[Config reference ->](docs/config-reference.md#schema-compression)
+
 ### Enterprise Security Built In
 
 Authentication (scrypt-hashed bearer tokens, OIDC JWT), role-based access control, rate limiting, CIDR allowlists, structured audit logging, and Prometheus metrics. Shared listeners hot-reload config-file changes and still support SIGHUP reloads. Hardened defaults: non-loopback listeners refuse to start without auth.

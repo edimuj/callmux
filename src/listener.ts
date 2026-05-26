@@ -73,6 +73,10 @@ import {
   type NormalizedManagementConfig,
 } from "./management.js";
 import type { ServerConfig } from "./types.js";
+import {
+  compressToolForExposure,
+  schemaCompressionDiagnostics,
+} from "./schema-compression.js";
 
 const DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024; // 1 MiB
 const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
@@ -445,7 +449,9 @@ export class CallmuxListener {
       { sessions: true, recommendations: false },
       this.getRuntimeDiagnostics(),
       this.options.config.recipes,
-      this.responseStore
+      this.responseStore,
+      undefined,
+      this.schemaCompressionDiagnostics()
     ).structuredContent as Record<string, unknown>;
     const wrappedServers = Array.isArray(status.wrappedServers) ? status.wrappedServers : [];
     const servers = Array.isArray(status.servers) ? status.servers : [];
@@ -897,7 +903,9 @@ export class CallmuxListener {
       { sessions: true, recommendations: false },
       this.getRuntimeDiagnostics(),
       this.options.config.recipes,
-      this.responseStore
+      this.responseStore,
+      undefined,
+      this.schemaCompressionDiagnostics()
     ).structuredContent;
 
     return {
@@ -1486,7 +1494,8 @@ export class CallmuxListener {
             this.getRuntimeDiagnostics(),
             config.recipes,
             this.responseStore,
-            config.outputFormat
+            config.outputFormat,
+            this.schemaCompressionDiagnostics()
           );
           break;
         default: {
@@ -1524,12 +1533,34 @@ export class CallmuxListener {
   }
 
   private currentTools(): Tool[] {
-    if (this.options.config.metaOnly) return [...META_TOOLS];
-    const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, tool }) => ({
-      ...tool,
-      name: qualifiedName,
-    }));
-    return [...proxiedTools, ...META_TOOLS];
+    const metaTools = META_TOOLS.map((tool) =>
+      compressToolForExposure(tool, this.options.config.schemaCompression)
+    );
+    if (this.options.config.metaOnly) return metaTools;
+    const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, server, tool }) =>
+      compressToolForExposure(
+        { ...tool, name: qualifiedName },
+        this.options.config.schemaCompression,
+        this.options.config.servers[server]?.schemaCompression
+      )
+    );
+    return [...proxiedTools, ...metaTools];
+  }
+
+  private schemaCompressionDiagnostics() {
+    const upstream = this.options.upstream as UpstreamManager & {
+      getTools?: () => Array<{ qualifiedName: string; server: string; tool: Tool }>;
+    };
+    const downstreamTools = typeof upstream.getTools === "function"
+      ? upstream.getTools()
+      : [];
+    return schemaCompressionDiagnostics(this.options.config, [
+      ...downstreamTools.map(({ qualifiedName, server, tool }) => ({
+        server,
+        tool: { ...tool, name: qualifiedName },
+      })),
+      ...META_TOOLS.map((tool) => ({ tool })),
+    ]);
   }
 
   private responseShieldTarget(

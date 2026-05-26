@@ -52,6 +52,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `descriptionMaxLength` | integer | - | Default max chars for tool descriptions in `callmux_status` |
 | `outputFormat` | `"json"`, `"toon"`, or `"auto"` | `"json"` | Model-facing text format for callmux-owned structured results |
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
+| `schemaCompression` | object | balanced | Tool schema description compression for prompt-token reduction |
 
 Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
 Session-cwd precedence is: explicit meta-tool `cwd`, request `_meta` cwd, existing session cwd/header, then MCP roots when no session cwd exists.
@@ -77,6 +78,7 @@ Local process servers use `command` to launch:
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | - | Per-server cache allow/deny rules |
 | `responseShield` | object | - | Per-server response shielding overrides |
+| `schemaCompression` | object | - | Per-server schema compression overrides |
 
 ---
 
@@ -95,6 +97,7 @@ Remote servers use `url` instead of `command`:
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
 | `cachePolicy` | object | - | Per-server cache allow/deny rules |
 | `responseShield` | object | - | Per-server response shielding overrides |
+| `schemaCompression` | object | - | Per-server schema compression overrides |
 
 Transport is auto-detected: callmux tries Streamable HTTP first (the current MCP spec), then falls back to SSE for older servers. Force a specific transport with `"transport": "sse"` or `"transport": "streamable-http"`.
 
@@ -221,6 +224,42 @@ Retrieve a stored result:
   "outputFormat": "auto"
 }
 ```
+
+---
+
+## Schema Compression
+
+`schemaCompression` reduces system-prompt bloat from verbose MCP tool schemas. It only rewrites `description` fields on exposed tool definitions and input schemas; names, types, required fields, enums, defaults, bounds, and the actual argument contract are preserved.
+
+Balanced mode is the default. It drops descriptions that only restate compact field names, caps retained descriptions, and keeps guidance for ambiguous fields such as `ref`, `cursor`, `sha`, `type`, `state_reason`, and `market`.
+
+| Field | Default | Description |
+|:------|:--------|:------------|
+| `enabled` | `true` | Enable schema compression |
+| `mode` | `"balanced"` | `"off"`, `"balanced"`, or `"aggressive"` |
+| `maxDescriptionChars` | `160` | Maximum chars for retained descriptions |
+
+```json
+{
+  "schemaCompression": {
+    "mode": "balanced",
+    "maxDescriptionChars": 160
+  },
+  "servers": {
+    "github": {
+      "command": "github-mcp-server",
+      "args": ["stdio"],
+      "schemaCompression": { "mode": "aggressive" }
+    },
+    "docs": {
+      "command": "docs-mcp",
+      "schemaCompression": { "enabled": false }
+    }
+  }
+}
+```
+
+`callmux_status` includes `schemaCompression` diagnostics with original/compressed schema bytes and estimated savings.
 
 `callmux_status` includes `responseStore` stats: active stored refs, capacity, stored bytes, and total stored results since startup.
 
@@ -465,6 +504,10 @@ The `server` field in meta-tool calls lets you target specific servers:
     "maxResultBytes": 65536,
     "maxStoredResults": 100,
     "denyTools": ["download_*"]
+  },
+  "schemaCompression": {
+    "mode": "balanced",
+    "maxDescriptionChars": 160
   },
   "auth": {
     "mode": "bearer",

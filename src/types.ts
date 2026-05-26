@@ -22,6 +22,8 @@ export interface StdioServerConfig {
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
   responseShield?: ResponseShieldConfig;
+  /** Optional per-server tool schema compression overrides */
+  schemaCompression?: SchemaCompressionConfig;
   /** Exclude this server from downstream connection and tool exposure */
   disabled?: boolean;
 }
@@ -42,6 +44,8 @@ export interface HttpServerConfig {
   requestBodyMaxBytes?: number;
   /** Optional per-server response shielding overrides */
   responseShield?: ResponseShieldConfig;
+  /** Optional per-server tool schema compression overrides */
+  schemaCompression?: SchemaCompressionConfig;
   /** Exclude this server from downstream connection and tool exposure */
   disabled?: boolean;
 }
@@ -89,6 +93,17 @@ export interface ResponseShieldConfig {
   allowTools?: string[];
   /** Never shield matching tools; supports exact names or "*" wildcards */
   denyTools?: string[];
+}
+
+export type SchemaCompressionMode = "off" | "balanced" | "aggressive";
+
+export interface SchemaCompressionConfig {
+  /** Enable tool schema compression (default: true) */
+  enabled?: boolean;
+  /** Compression policy for tool and input-schema descriptions (default: balanced) */
+  mode?: SchemaCompressionMode;
+  /** Max chars for retained descriptions (default: 160) */
+  maxDescriptionChars?: number;
 }
 
 interface BearerAuthTokenHashConfig {
@@ -260,6 +275,8 @@ export interface CallmuxConfig {
     /** Maximum stored full results before oldest refs are evicted */
     maxStoredResults?: number;
   };
+  /** Tool schema compression for prompt-token reduction */
+  schemaCompression?: SchemaCompressionConfig;
   /** Global max inbound request payload bytes (0 = unlimited; default: 1048576) */
   requestBodyMaxBytes?: number;
   /** Allow per-request override via x-callmux-max-body-bytes header */

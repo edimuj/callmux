@@ -94,6 +94,7 @@
       "description": "Model-facing text format for callmux-owned structured results. structuredContent remains JSON."
     },
     "responseShield": { "$ref": "#/$defs/globalResponseShield" },
+    "schemaCompression": { "$ref": "#/$defs/schemaCompression" },
     "requestBodyMaxBytes": {
       "type": "integer",
       "minimum": 0,
@@ -177,8 +178,8 @@
           "minimum": 0,
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         },
-        "responseShield": { "$ref": "#/$defs/serverResponseShield" }
-        ,
+        "responseShield": { "$ref": "#/$defs/serverResponseShield" },
+        "schemaCompression": { "$ref": "#/$defs/schemaCompression" },
         "disabled": {
           "type": "boolean",
           "default": false,
@@ -228,8 +229,8 @@
           "minimum": 0,
           "description": "Per-server max inbound request payload bytes for calls targeting this server (0 = unlimited, omit = use global)"
         },
-        "responseShield": { "$ref": "#/$defs/serverResponseShield" }
-        ,
+        "responseShield": { "$ref": "#/$defs/serverResponseShield" },
+        "schemaCompression": { "$ref": "#/$defs/schemaCompression" },
         "disabled": {
           "type": "boolean",
           "default": false,
@@ -380,6 +381,30 @@
       "additionalProperties": false
     },
     "serverResponseShield": { "$ref": "#/$defs/responseShieldBase" },
+    "schemaCompression": {
+      "type": "object",
+      "description": "Tool schema compression policy. Reduces prompt tokens by minimizing tool and parameter descriptions without changing schema semantics.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable tool schema compression"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["off", "balanced", "aggressive"],
+          "default": "balanced",
+          "description": "Compression mode for tool and parameter descriptions"
+        },
+        "maxDescriptionChars": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 160,
+          "description": "Maximum characters for retained descriptions"
+        }
+      },
+      "additionalProperties": false
+    },
     "dashboardConfig": {
       "type": "object",
       "description": "Read-only listener dashboard configuration. Disabled by default.",
