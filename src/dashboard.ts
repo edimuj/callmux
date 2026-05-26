@@ -222,13 +222,23 @@ export function classifyDashboardToolStatus(
 }
 
 function isDashboardRuntimeError(event: RuntimeEvent): boolean {
-  if (event.type === "http_request") return event.status >= 400;
+  if (event.type === "http_request") {
+    return event.status >= 400 && !isRoutineTransportHttpClose(event);
+  }
   if (event.type === "tool_call_lifecycle") return event.success === false;
   if (event.type === "tool_call") {
     return event.status === "error" || (event.status === undefined && !event.success);
   }
   if (event.type === "config_reload") return !event.success;
   return false;
+}
+
+function isRoutineTransportHttpClose(event: RuntimeEvent): boolean {
+  return (
+    event.type === "http_request" &&
+    event.status === 499 &&
+    (event.path === "/sse" || (event.path === "/mcp" && event.method === "GET"))
+  );
 }
 
 export class RuntimeEventStore {

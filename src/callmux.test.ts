@@ -8432,6 +8432,48 @@ test("RuntimeEventStore recent errors ignores downstream tool result failures", 
   assert.equal(store.stats().recentErrors, 1);
 });
 
+test("RuntimeEventStore recent errors ignores routine transport disconnects", () => {
+  const store = new RuntimeEventStore(10);
+  store.append({
+    type: "http_request",
+    timestamp: new Date(0).toISOString(),
+    requestId: "sse-close",
+    method: "GET",
+    path: "/sse",
+    status: 499,
+    durationMs: 300_000,
+  });
+  store.append({
+    type: "http_request",
+    timestamp: new Date(1).toISOString(),
+    requestId: "mcp-get-close",
+    method: "GET",
+    path: "/mcp",
+    status: 499,
+    durationMs: 300_000,
+  });
+  store.append({
+    type: "http_request",
+    timestamp: new Date(2).toISOString(),
+    requestId: "not-found",
+    method: "GET",
+    path: "/dashboard/data",
+    status: 404,
+    durationMs: 1,
+  });
+  store.append({
+    type: "http_request",
+    timestamp: new Date(3).toISOString(),
+    requestId: "mcp-post-close",
+    method: "POST",
+    path: "/mcp",
+    status: 499,
+    durationMs: 300_000,
+  });
+
+  assert.equal(store.stats().recentErrors, 2);
+});
+
 test("listener dashboard records downstream tool failures without callmux error status", () => {
   const listener = new CallmuxListener({
     port: 0,
