@@ -206,7 +206,7 @@ callmux server add github --tools "create_issue,get_issue,list_issues" -- npx -y
 
 ### TOON Output: Fewer Tokens for Structured Results
 
-Large structured tool results can render as TOON with `outputFormat: "toon"` or conservative `outputFormat: "auto"`. Agents get compact, tabular model-facing text for rows like issues, search results, and query data, while `structuredContent`, caching, response storage, and pipeline `$json` mapping stay JSON-native. JSON remains the default.
+Large structured tool results can render as TOON with `outputFormat: "toon"` or conservative `outputFormat: "auto"`. Agents get compact, tabular model-facing text for rows like issues, search results, and query data. When TOON is actually emitted, callmux omits final `structuredContent` so MCP clients do not surface the JSON payload instead; caching, response storage, and pipeline `$json` mapping stay JSON-native internally. JSON remains the default.
 
 [Config reference ->](docs/config-reference.md#global-options)
 
@@ -232,7 +232,7 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 
 All argument objects support [file references](docs/config-reference.md#file-references) (`$file`, `$jsonFile`, `$yamlFile`, `$text`) for long content that doesn't belong in JSON strings. Use `$file`/`$text` for markdown or plain string fields such as GitHub issue bodies; use `$jsonFile`/`$yamlFile` only when the downstream field expects structured data. `$json` is pipeline `inputMapping` syntax, not a file reference.
 
-Callmux-owned structured results can render model-facing text as JSON, TOON, or conservative auto mode with `outputFormat: "json" | "toon" | "auto"`. This only changes `content[].text`; `structuredContent`, cache keys, response storage, and pipeline `$json` mapping stay JSON-native. JSON remains the default.
+Callmux-owned structured results can render model-facing text as JSON, TOON, or conservative auto mode with `outputFormat: "json" | "toon" | "auto"`. JSON mode keeps `structuredContent`; TOON output is returned text-first because some MCP clients prioritize `structuredContent` over `content[].text`. Cache keys, response storage, and pipeline `$json` mapping stay JSON-native internally. JSON remains the default.
 
 Print compact, version-aligned agent guidance with:
 

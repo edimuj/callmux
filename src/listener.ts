@@ -39,7 +39,7 @@ import {
   evaluateToolAuthorization,
   type AuthorizationPrincipal,
 } from "./authorization.js";
-import { errorResult } from "./results.js";
+import { errorResult, textFirstResultForNonJson } from "./results.js";
 import { META_TOOLS } from "./meta-tools.js";
 import { AbuseController } from "./abuse.js";
 import { AuditLogger } from "./audit.js";
@@ -1522,6 +1522,9 @@ export class CallmuxListener {
         }
       }
 
+      if (name.startsWith("callmux_")) {
+        result = this.finalizeOutputFormat(result, this.outputFormatFor(args));
+      }
       this.recordToolCallEvent(name, target, result, startedAt, cacheHit, args);
       return result;
       } finally {
@@ -1607,6 +1610,14 @@ export class CallmuxListener {
         outputFormat: outputFormat ?? this.options.config.outputFormat,
       }
     );
+  }
+
+  private finalizeOutputFormat(
+    result: CallToolResult,
+    outputFormat?: OutputFormat
+  ): CallToolResult {
+    if (outputFormat === undefined || outputFormat === "json") return result;
+    return textFirstResultForNonJson(result);
   }
 
   private outputFormatFor(args: unknown): OutputFormat | undefined {

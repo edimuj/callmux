@@ -57,7 +57,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
 Session-cwd precedence is: explicit meta-tool `cwd`, request `_meta` cwd, existing session cwd/header, then MCP roots when no session cwd exists.
 
-`outputFormat` changes only the visible text in `content[].text` for callmux-owned structured results. `structuredContent`, cache keys, stored results, dashboard state, and pipeline `$json` mapping stay JSON-native. Use `"toon"` for explicit TOON rendering, or `"auto"` to choose TOON only for larger tabular payloads where it is materially smaller than pretty JSON.
+`outputFormat` controls the model-facing text for callmux-owned structured results. JSON mode keeps `structuredContent`; when `"toon"` or `"auto"` actually emits non-JSON TOON text, callmux omits final `structuredContent` so clients do not display the JSON payload instead. Cache keys, stored results, dashboard state, and pipeline `$json` mapping stay JSON-native internally. Use `"toon"` for explicit TOON rendering, or `"auto"` to choose TOON only for larger tabular payloads where it is materially smaller than pretty JSON.
 
 ---
 

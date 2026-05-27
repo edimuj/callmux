@@ -28,7 +28,7 @@ export function renderAgentInstructions(
     "- Use `$jsonFile` or `$yamlFile` only when the downstream field expects structured data.",
     "- `$json` and `$json.path` are pipeline `inputMapping` expressions only; never put literal `$json` in normal arguments.",
     "- If a response is shielded/truncated, follow `_callmux.retrieval` with `callmux_get_result` to page/filter/project the stored result.",
-    "- Use `outputFormat: \"toon\"` or `\"auto\"` on large tabular meta-tool outputs when model-facing JSON is too verbose; `structuredContent` stays JSON.",
+    "- Use `outputFormat: \"toon\"` or `\"auto\"` on large tabular meta-tool outputs when model-facing JSON is too verbose.",
     "- Prefer `callmux_search_tools` or `callmux_status` to discover wrapped tools instead of guessing names.",
   ];
 

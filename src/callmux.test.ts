@@ -6791,7 +6791,37 @@ test("proxy applies configured outputFormat to meta-tool text", async () => {
   });
   const text = result.content[0].type === "text" ? result.content[0].text : "";
   assert.match(text, /results\[1\]/);
-  assert.equal((result.structuredContent as { succeeded: number }).succeeded, 1);
+  assert.equal(result.structuredContent, undefined);
+});
+
+test("proxy explicit TOON batch result is text-first for MCP clients", async () => {
+  const proxy = new CallmuxProxy({
+    servers: { default: { command: "ignored" } },
+  });
+
+  (proxy as unknown as { upstream: {
+    callTool: () => Promise<CallToolResult>;
+    getServerConcurrency: () => number | undefined;
+  } }).upstream = {
+    async callTool() {
+      return textResult(JSON.stringify({ id: 1, title: "issue" }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const harness = proxy as unknown as {
+    handleToolCall: (tool: string, args?: Record<string, unknown>) => Promise<CallToolResult>;
+  };
+
+  const result = await harness.handleToolCall("callmux_batch", {
+    tool: "get_issue",
+    outputFormat: "toon",
+    items: [{ arguments: { id: 1 } }],
+  });
+
+  const text = result.content[0].type === "text" ? result.content[0].text : "";
+  assert.match(text, /results\[1\]/);
+  assert.equal(result.structuredContent, undefined);
 });
 
 test("proxy routes callmux_dry_run to handleDryRun", async () => {
@@ -6970,10 +7000,7 @@ test("proxy shields large proxied results and pages stored refs", async () => {
   });
   const toonPageText = toonPage.content[0].type === "text" ? toonPage.content[0].text : "";
   assert.match(toonPageText, /data\[3\]\{id\}:/);
-  assert.deepEqual(
-    (toonPage.structuredContent as { data: Array<{ id: number }> }).data,
-    [{ id: 1 }, { id: 2 }, { id: 3 }]
-  );
+  assert.equal(toonPage.structuredContent, undefined);
 
   const fallbackPage = await harness.handleToolCall("callmux_call", {
     tool: "callmux_get_result",

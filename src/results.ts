@@ -29,6 +29,23 @@ export function jsonResult(
   };
 }
 
+export function textFirstResultForNonJson(result: CallToolResult): CallToolResult {
+  if (result.isError || result.structuredContent === undefined) return result;
+
+  const text = result.content
+    .filter((content): content is { type: "text"; text: string } => content.type === "text")
+    .map((content) => content.text)
+    .join("\n");
+
+  try {
+    JSON.parse(text);
+    return result;
+  } catch {
+    const { structuredContent: _structuredContent, ...textFirst } = result;
+    return textFirst;
+  }
+}
+
 export function errorResult(
   code: string,
   message: string,

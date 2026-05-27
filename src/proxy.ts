@@ -31,6 +31,7 @@ import {
   shieldToolResult,
   type ResponseShieldTarget,
 } from "./response-store.js";
+import { textFirstResultForNonJson } from "./results.js";
 import {
   compressToolForExposure,
   schemaCompressionDiagnostics,
@@ -250,11 +251,11 @@ export class CallmuxProxy {
 
       case "callmux_call":
         if (isCallmuxGetResultCall(args)) {
-          return handleGetResult(
+          return this.finalizeOutputFormat(handleGetResult(
             this.responseStore,
             args.arguments,
             this.outputFormatFor(args)
-          );
+          ), this.outputFormatFor(args));
         }
         return this.shieldResult(
           this.responseShieldTarget(name, args),
@@ -269,34 +270,34 @@ export class CallmuxProxy {
         );
 
       case "callmux_search_tools":
-        return handleSearchTools(
+        return this.finalizeOutputFormat(handleSearchTools(
           this.upstream,
           this.config.descriptionMaxLength,
           args,
           this.config.outputFormat
-        );
+        ), this.outputFormatFor(args));
 
       case "callmux_get_result":
-        return handleGetResult(
+        return this.finalizeOutputFormat(handleGetResult(
           this.responseStore,
           args,
           this.config.outputFormat
-        );
+        ), this.outputFormatFor(args));
 
       case "callmux_cache_clear":
-        return handleCacheClear(
+        return this.finalizeOutputFormat(handleCacheClear(
           this.cache,
           args
-        );
+        ), this.outputFormatFor(args));
 
       case "callmux_dry_run":
-        return handleDryRun(
+        return this.finalizeOutputFormat(await handleDryRun(
           this.upstream,
           this.cache,
           args,
           undefined,
           this.config.outputFormat
-        );
+        ), this.outputFormatFor(args));
 
       case "callmux_recipe_run":
         return this.shieldResult(
@@ -314,17 +315,17 @@ export class CallmuxProxy {
         );
 
       case "callmux_recipe_dry_run":
-        return handleRecipeDryRun(
+        return this.finalizeOutputFormat(await handleRecipeDryRun(
           this.upstream,
           this.cache,
           this.config.recipes,
           args,
           undefined,
           this.config.outputFormat
-        );
+        ), this.outputFormatFor(args));
 
       case "callmux_status":
-        return handleStatus(
+        return this.finalizeOutputFormat(handleStatus(
           this.upstream,
           this.cache,
           this.maxConcurrency,
@@ -337,7 +338,7 @@ export class CallmuxProxy {
           this.responseStore,
           this.config.outputFormat,
           this.schemaCompressionDiagnostics()
-        );
+        ), this.outputFormatFor(args));
     }
 
     const target = this.responseShieldTarget(name, args);
@@ -413,15 +414,24 @@ export class CallmuxProxy {
     result: CallToolResult,
     outputFormat?: OutputFormat
   ): CallToolResult {
-    return shieldToolResult(
+    const effectiveOutputFormat = outputFormat ?? this.config.outputFormat;
+    return this.finalizeOutputFormat(shieldToolResult(
       this.responseStore,
       target,
       result,
       {
         ...resolveResponseShieldOptions(this.config, target),
-        outputFormat: outputFormat ?? this.config.outputFormat,
+        outputFormat: effectiveOutputFormat,
       }
-    );
+    ), effectiveOutputFormat);
+  }
+
+  private finalizeOutputFormat(
+    result: CallToolResult,
+    outputFormat?: OutputFormat
+  ): CallToolResult {
+    if (outputFormat === undefined || outputFormat === "json") return result;
+    return textFirstResultForNonJson(result);
   }
 
   private outputFormatFor(args: unknown): OutputFormat | undefined {
