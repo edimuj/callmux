@@ -275,6 +275,94 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function schemaTypeIncludes(schema: Record<string, unknown>, type: string): boolean {
+  const schemaType = schema.type;
+  if (schemaType === type) return true;
+  return Array.isArray(schemaType) && schemaType.includes(type);
+}
+
+function schemaArrayField(schema: Record<string, unknown>, field: string): Record<string, unknown>[] {
+  const value = schema[field];
+  if (!Array.isArray(value)) return [];
+  return value.filter(isPlainObject);
+}
+
+function coercePrimitiveForSchema(value: unknown, schema: Record<string, unknown>): unknown {
+  if (typeof value !== "string") return value;
+
+  if (schemaTypeIncludes(schema, "boolean")) {
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+
+  const expectsInteger = schemaTypeIncludes(schema, "integer");
+  const expectsNumber = schemaTypeIncludes(schema, "number");
+  if (expectsInteger || expectsNumber) {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric) && (expectsNumber || Number.isInteger(numeric))) {
+        return numeric;
+      }
+    }
+  }
+
+  return value;
+}
+
+function coerceValueForSchema(value: unknown, schema: unknown): unknown {
+  if (!isPlainObject(schema)) return value;
+
+  const allOf = schemaArrayField(schema, "allOf");
+  if (allOf.length > 0) {
+    return allOf.reduce((current, nestedSchema) => coerceValueForSchema(current, nestedSchema), value);
+  }
+
+  for (const nestedSchema of [
+    ...schemaArrayField(schema, "anyOf"),
+    ...schemaArrayField(schema, "oneOf"),
+  ]) {
+    const coerced = coerceValueForSchema(value, nestedSchema);
+    if (coerced !== value) return coerced;
+  }
+
+  const primitive = coercePrimitiveForSchema(value, schema);
+  if (primitive !== value) return primitive;
+
+  if (Array.isArray(value)) {
+    const items = schema.items;
+    if (!isPlainObject(items)) return value;
+    let changed = false;
+    const coercedItems = value.map((item) => {
+      const coerced = coerceValueForSchema(item, items);
+      if (coerced !== item) changed = true;
+      return coerced;
+    });
+    return changed ? coercedItems : value;
+  }
+
+  if (!isPlainObject(value)) return value;
+
+  const properties = isPlainObject(schema.properties) ? schema.properties : undefined;
+  const additionalProperties = isPlainObject(schema.additionalProperties)
+    ? schema.additionalProperties
+    : undefined;
+  if (!properties && !additionalProperties) return value;
+
+  let changed = false;
+  const coerced: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const propertySchema = properties?.[key] ?? additionalProperties;
+    const nextValue = propertySchema
+      ? coerceValueForSchema(nestedValue, propertySchema)
+      : nestedValue;
+    if (nextValue !== nestedValue) changed = true;
+    coerced[key] = nextValue;
+  }
+
+  return changed ? coerced : value;
+}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -1628,6 +1716,16 @@ export class UpstreamManager {
     return resolved as Record<string, unknown>;
   }
 
+  private resolvedTool(server: string, actualName: string): Tool | undefined {
+    const qualified = `${server}__${actualName}`;
+    const entry = this.toolMap.get(qualified);
+    if (entry?.server === server && entry.tool.name === actualName) {
+      return entry.tool;
+    }
+
+    return this.toolsByServer.get(server)?.find((tool) => tool.name === actualName);
+  }
+
   async prepareToolCall(
     toolName: string,
     args?: Record<string, unknown>,
@@ -1643,11 +1741,15 @@ export class UpstreamManager {
 
     try {
       const resolvedArguments = await this.resolveToolArguments(args);
+      const tool = this.resolvedTool(resolved.server, resolved.actualName);
+      const coercedArguments = resolvedArguments && tool?.inputSchema
+        ? coerceValueForSchema(resolvedArguments, tool.inputSchema) as Record<string, unknown>
+        : resolvedArguments;
       return {
         toolName,
         server: resolved.server,
         actualName: resolved.actualName,
-        ...(resolvedArguments ? { resolvedArguments } : {}),
+        ...(coercedArguments ? { resolvedArguments: coercedArguments } : {}),
       };
     } catch (error) {
       return {

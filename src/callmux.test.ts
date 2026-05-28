@@ -575,6 +575,89 @@ test("batch respects per-server concurrency limit for unique unqualified tool", 
   assert.equal(maxConcurrent, 2);
 });
 
+test("batch coerces string arguments from downstream tool schema", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: Tool }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+    getServerConcurrency: (server: string) => number | undefined;
+  };
+
+  const received: Record<string, unknown>[] = [];
+  upstream.clients = new Map([
+    [
+      "memory",
+      {
+        async callTool(params) {
+          received.push(params.arguments ?? {});
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  upstream.toolMap = new Map([
+    [
+      "memory__ms_set",
+      {
+        server: "memory",
+        tool: {
+          name: "ms_set",
+          description: "Set memory",
+          inputSchema: {
+            type: "object",
+            properties: {
+              feedback: { type: "boolean" },
+              score: { type: "number" },
+              count: { type: "integer" },
+              nested: {
+                type: "object",
+                properties: {
+                  enabled: { type: "boolean" },
+                },
+              },
+            },
+          },
+        },
+      },
+    ],
+  ]);
+  upstream.exposedToolsByServer = new Map([["memory", new Set(["ms_set"])]]);
+  upstream.getServerConcurrency = () => undefined;
+
+  const result = await handleBatch(
+    upstream as never,
+    new CallCache(0),
+    {
+      server: "memory",
+      tool: "ms_set",
+      items: [
+        {
+          arguments: {
+            feedback: "false",
+            score: "4.5",
+            count: "2",
+            untouched: "123",
+            nested: { enabled: "true" },
+          },
+        },
+      ],
+    },
+    4
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(received, [
+    {
+      feedback: false,
+      score: 4.5,
+      count: 2,
+      untouched: "123",
+      nested: { enabled: true },
+    },
+  ]);
+});
+
 test("mutating proxied tools are never served from cache", async () => {
   const proxy = new CallmuxProxy({
     servers: {
