@@ -1245,6 +1245,11 @@ test("display helpers redact command arguments and URL secrets", () => {
   );
 
   assert.equal(
+    formatCommandForDisplay("server", ["--cookie", "session=abc", "--safe", "ok"]),
+    "server --cookie [redacted] --safe ok"
+  );
+
+  assert.equal(
     redactUrl("https://user:pass@example.com/mcp?token=secret&query=visible"),
     "https://%5Bredacted%5D:%5Bredacted%5D@example.com/mcp?token=%5Bredacted%5D&query=visible"
   );

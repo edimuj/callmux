@@ -36,16 +36,14 @@ function normalizeConfig(config: AuditLogConfig | undefined): Required<AuditLogC
   };
 }
 
-function shouldRedactKey(key: string, extraPatterns: string[]): boolean {
+function shouldRedactKey(key: string, extraPatterns: RegExp[]): boolean {
   if (SECRET_KEY_PATTERN.test(key)) return true;
-  return extraPatterns.some((pattern) =>
-    new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(key)
-  );
+  return extraPatterns.some((pattern) => pattern.test(key));
 }
 
 function redactPayload(
   value: unknown,
-  extraPatterns: string[]
+  extraPatterns: RegExp[]
 ): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => redactPayload(entry, extraPatterns));
@@ -80,9 +78,15 @@ function truncatePayload(payload: unknown, maxChars: number): unknown {
 
 export class AuditLogger {
   private config: Required<AuditLogConfig>;
+  private redactPatterns: RegExp[];
 
   constructor(config: AuditLogConfig | undefined) {
     this.config = normalizeConfig(config);
+    // Compile extra redact patterns once, not per key on every request.
+    this.redactPatterns = this.config.redactKeys.map(
+      (pattern) =>
+        new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+    );
   }
 
   writeRequestEvent(input: {
@@ -125,7 +129,7 @@ export class AuditLogger {
     };
 
     if (this.config.includeRequestBody && input.payload !== undefined) {
-      const redacted = redactPayload(input.payload, this.config.redactKeys);
+      const redacted = redactPayload(input.payload, this.redactPatterns);
       event.payload = truncatePayload(redacted, this.config.maxPayloadChars);
     }
 
