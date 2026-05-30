@@ -359,9 +359,67 @@ function validateArgumentsObject(
   return value;
 }
 
+/**
+ * Auto-wrap a flat argument object that is missing the `{arguments}` wrapper.
+ * The common mental model is "a list of arg objects" — when a caller writes
+ * `{tool, foo, bar}` instead of `{tool, arguments: {foo, bar}}`, lift every key
+ * except the reserved meta-level keys into `arguments`.
+ *
+ * Only fires when `arguments` is absent. `wrapEmpty` controls the no-lift case:
+ * batch requires `arguments` (so an item with only reserved keys still yields
+ * `arguments: {}`); parallel/pipeline/call treat `arguments` as optional (so a
+ * bare `{tool: "x"}` stays argument-less rather than gaining an empty object).
+ */
+function liftFlatArguments(
+  container: Record<string, unknown>,
+  reserved: ReadonlySet<string>,
+  wrapEmpty: boolean
+): { source: unknown; wrapped: boolean } {
+  if ("arguments" in container) return { source: container.arguments, wrapped: false };
+  const lifted: Record<string, unknown> = {};
+  let any = false;
+  for (const [key, value] of Object.entries(container)) {
+    if (reserved.has(key)) continue;
+    lifted[key] = value;
+    any = true;
+  }
+  if (!any && !wrapEmpty) return { source: undefined, wrapped: false };
+  return { source: lifted, wrapped: true };
+}
+
+const BATCH_RESERVED_KEYS: ReadonlySet<string> = new Set(["cwd", "timeoutMs"]);
+
+const PARALLEL_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  "tool",
+  "server",
+  "arguments",
+  "timeoutMs",
+  "cwd",
+]);
+
+const PIPELINE_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  "tool",
+  "server",
+  "arguments",
+  "timeoutMs",
+  "cwd",
+  "inputMapping",
+  "onMappingMissing",
+]);
+
+const CALL_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  "tool",
+  "server",
+  "arguments",
+  "timeoutMs",
+  "cwd",
+  "forceReconnect",
+  "outputFormat",
+]);
+
 function validateParallelArgs(
   args: unknown
-): { calls: ParallelCall[] } | CallToolResult {
+): { calls: ParallelCall[]; autoWrappedCalls?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.calls)) {
     return errorResult("invalid_arguments", `"calls" must be an array`, {
       field: "calls",
@@ -369,6 +427,7 @@ function validateParallelArgs(
   }
 
   const calls: ParallelCall[] = [];
+  let autoWrappedCalls = 0;
   for (let index = 0; index < args.calls.length; index++) {
     const call = args.calls[index];
     if (!isRecord(call)) {
@@ -386,8 +445,13 @@ function validateParallelArgs(
         : validateToolName(call.server, `calls[${index}].server`);
     if (server !== undefined && typeof server !== "string") return server;
 
+    // Auto-wrap a flat call ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
+    // Without this the stray keys are silently dropped and the tool runs with no
+    // arguments. arguments is optional here, so a bare {tool} stays argument-less.
+    const lifted = liftFlatArguments(call, PARALLEL_RESERVED_KEYS, false);
+    if (lifted.wrapped) autoWrappedCalls++;
     const parsedArgs = validateArgumentsObject(
-      call.arguments,
+      lifted.source,
       `calls[${index}].arguments`
     );
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
@@ -405,7 +469,7 @@ function validateParallelArgs(
     });
   }
 
-  return { calls };
+  return { calls, ...(autoWrappedCalls > 0 ? { autoWrappedCalls } : {}) };
 }
 
 function validateBatchArgs(
@@ -438,22 +502,14 @@ function validateBatchArgs(
       });
     }
 
-    // Auto-wrap a flat argument object that is missing the {arguments} wrapper.
-    // The common mental model is "a list of arg objects" — when an agent passes
-    // items: [{foo, bar}] instead of items: [{arguments: {foo, bar}}], lift every
-    // key except the reserved per-item keys (cwd, timeoutMs) into `arguments`.
-    let argumentsSource: unknown = item.arguments;
-    if (!("arguments" in item)) {
-      const wrapped: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(item)) {
-        if (key === "cwd" || key === "timeoutMs") continue;
-        wrapped[key] = value;
-      }
-      argumentsSource = wrapped;
-      autoWrappedItems++;
-    }
+    // Auto-wrap a flat argument object that is missing the {arguments} wrapper —
+    // items: [{foo, bar}] becomes items: [{arguments: {foo, bar}}]. Reserved
+    // per-item keys (cwd, timeoutMs) stay at the item level. arguments is
+    // required for a batch item, so wrapEmpty is true.
+    const lifted = liftFlatArguments(item, BATCH_RESERVED_KEYS, true);
+    if (lifted.wrapped) autoWrappedItems++;
 
-    const parsedArgs = validateArgumentsObject(argumentsSource, `items[${index}].arguments`);
+    const parsedArgs = validateArgumentsObject(lifted.source, `items[${index}].arguments`);
     if (!parsedArgs || !isRecord(parsedArgs)) {
       return parsedArgs ?? errorResult(
         "invalid_arguments",
@@ -489,7 +545,7 @@ function validateBatchArgs(
 
 function validatePipelineArgs(
   args: unknown
-): { steps: PipelineStep[] } | CallToolResult {
+): { steps: PipelineStep[]; autoWrappedSteps?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.steps)) {
     return errorResult("invalid_arguments", `"steps" must be an array`, {
       field: "steps",
@@ -503,6 +559,7 @@ function validatePipelineArgs(
   }
 
   const steps: PipelineStep[] = [];
+  let autoWrappedSteps = 0;
   for (let index = 0; index < args.steps.length; index++) {
     const step = args.steps[index];
     if (!isRecord(step)) {
@@ -520,8 +577,13 @@ function validatePipelineArgs(
         : validateToolName(step.server, `steps[${index}].server`);
     if (server !== undefined && typeof server !== "string") return server;
 
+    // Auto-wrap a flat step ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
+    // inputMapping/onMappingMissing are reserved, so a step that only carries a
+    // mapping is left argument-less rather than wrapped.
+    const lifted = liftFlatArguments(step, PIPELINE_RESERVED_KEYS, false);
+    if (lifted.wrapped) autoWrappedSteps++;
     const parsedArgs = validateArgumentsObject(
-      step.arguments,
+      lifted.source,
       `steps[${index}].arguments`
     );
     if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
@@ -575,7 +637,7 @@ function validatePipelineArgs(
     });
   }
 
-  return { steps };
+  return { steps, ...(autoWrappedSteps > 0 ? { autoWrappedSteps } : {}) };
 }
 
 function validateCacheClearArgs(
@@ -936,7 +998,7 @@ export async function handleParallel(
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
-  const { calls } = parsedArgs;
+  const { calls, autoWrappedCalls } = parsedArgs;
   const callsWithLimits = calls.map((call) => ({
     call,
     serverForLimit: resolveServerForConcurrency(upstream, call.tool, call.server),
@@ -1016,6 +1078,18 @@ export async function handleParallel(
     succeeded: results.length - failed,
     failed,
     failedIndexes,
+    ...(autoWrappedCalls
+      ? {
+          warnings: [
+            {
+              code: "auto_wrapped_flat_calls",
+              message: `Auto-wrapped ${autoWrappedCalls} flat call${autoWrappedCalls === 1 ? "" : "s"} into the {arguments} shape.`,
+              recommendation:
+                "Canonical shape is calls: [{ tool, arguments: {...} }]. Reserved keys (server, cwd, timeoutMs) stay outside arguments.",
+            },
+          ],
+        }
+      : {}),
   };
 
   return successResult(output as unknown as Record<string, unknown>, outputFormat);
@@ -1143,7 +1217,7 @@ export async function handlePipeline(
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
-  const { steps } = parsedArgs;
+  const { steps, autoWrappedSteps } = parsedArgs;
   const stepResults: Array<{
     step: number;
     tool: string;
@@ -1282,6 +1356,18 @@ export async function handlePipeline(
     steps: stepResults,
     finalResult: stepResults[stepResults.length - 1]?.result,
     totalDurationMs: Date.now() - startTime,
+    ...(autoWrappedSteps
+      ? {
+          warnings: [
+            {
+              code: "auto_wrapped_flat_steps",
+              message: `Auto-wrapped ${autoWrappedSteps} flat step${autoWrappedSteps === 1 ? "" : "s"} into the {arguments} shape.`,
+              recommendation:
+                "Canonical shape is steps: [{ tool, arguments: {...} }]. Reserved keys (server, cwd, timeoutMs, inputMapping, onMappingMissing) stay outside arguments.",
+            },
+          ],
+        }
+      : {}),
   }, outputFormat);
 }
 
@@ -1416,7 +1502,11 @@ export async function handleCall(
     args.server === undefined ? undefined : validateToolName(args.server, "server");
   if (server !== undefined && typeof server !== "string") return server;
 
-  const parsedArgs = validateArgumentsObject(args.arguments, "arguments");
+  // Auto-wrap a flat call ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
+  // Reserved meta keys (server, timeoutMs, cwd, forceReconnect, outputFormat)
+  // stay at the top level; everything else lifts into arguments.
+  const liftedArgs = liftFlatArguments(args, CALL_RESERVED_KEYS, false);
+  const parsedArgs = validateArgumentsObject(liftedArgs.source, "arguments");
   if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
   const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
   if (timeoutMs !== undefined && typeof timeoutMs !== "number") return timeoutMs;

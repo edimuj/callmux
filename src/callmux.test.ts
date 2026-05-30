@@ -7043,6 +7043,105 @@ test("batch does not auto-wrap items that already have an arguments key", async 
   assert.ok(!content.warnings?.some((w) => w.code === "auto_wrapped_flat_items"));
 });
 
+test("parallel auto-wraps flat calls missing the {arguments} wrapper", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      seen.push(args ?? {});
+      return textResult("ok");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    calls: [
+      { tool: "search", query: "foo", limit: 5 },
+      { tool: "search", arguments: { query: "bar" } },
+    ],
+  }, 4);
+
+  const content = result.structuredContent as {
+    status: string;
+    warnings?: Array<{ code: string }>;
+  };
+  assert.equal(content.status, "completed");
+  // Flat call lifted; canonical call untouched.
+  assert.deepEqual(seen[0], { query: "foo", limit: 5 });
+  assert.deepEqual(seen[1], { query: "bar" });
+  assert.ok(content.warnings?.some((w) => w.code === "auto_wrapped_flat_calls"));
+});
+
+test("parallel does not wrap a bare {tool} call into empty arguments", async () => {
+  let seenArgs: Record<string, unknown> | undefined = { sentinel: true };
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      seenArgs = args;
+      return textResult("ok");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleParallel(upstream as never, new CallCache(0), {
+    calls: [{ tool: "ping" }],
+  }, 1);
+
+  const content = result.structuredContent as {
+    status: string;
+    warnings?: Array<{ code: string }>;
+  };
+  assert.equal(content.status, "completed");
+  // No spurious empty-object wrap; the tool is called argument-less.
+  assert.equal(seenArgs, undefined);
+  assert.ok(!content.warnings?.some((w) => w.code === "auto_wrapped_flat_calls"));
+});
+
+test("pipeline auto-wraps a flat step but leaves mapping-only steps alone", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const upstream = {
+    async callTool(tool: string, args?: Record<string, unknown>) {
+      seen.push(args ?? {});
+      return tool === "fetch" ? textResult("payload") : textResult("done");
+    },
+  };
+
+  const result = await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [
+      { tool: "fetch", url: "http://x", depth: 2 },
+      { tool: "store", inputMapping: { body: "$text" } },
+    ],
+  });
+
+  const content = result.structuredContent as {
+    status: string;
+    warnings?: Array<{ code: string }>;
+  };
+  assert.equal(content.status, "completed");
+  // Step 1 flat keys lifted; step 2 carries only a mapping, so its args come
+  // solely from inputMapping (no spurious wrap).
+  assert.deepEqual(seen[0], { url: "http://x", depth: 2 });
+  assert.deepEqual(seen[1], { body: "payload" });
+  assert.ok(content.warnings?.some((w) => w.code === "auto_wrapped_flat_steps"));
+});
+
+test("handleCall auto-wraps a flat call missing the {arguments} wrapper", async () => {
+  let seenArgs: Record<string, unknown> | undefined;
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("create_issue") },
+  ]);
+  upstream.callTool = async (_tool: string, args?: Record<string, unknown>) => {
+    seenArgs = args;
+    return textResult("ok");
+  };
+
+  await handleCall(upstream as never, new CallCache(0), {
+    tool: "create_issue",
+    title: "Bug",
+    body: "Broken",
+  });
+
+  assert.deepEqual(seenArgs, { title: "Bug", body: "Broken" });
+});
+
 // ─── handleCall with server hints and qualified names ─────────
 
 test("handleCall resolves tool with explicit server hint", async () => {
