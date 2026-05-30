@@ -68,6 +68,7 @@ type RuntimeEvent =
       status?: DashboardToolStatus;
       success: boolean;
       cacheHit?: boolean;
+      outputFormat?: "json" | "toon";
       error?: string;
     }
   | {
@@ -320,58 +321,136 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/svg+xml" href=${JSON.stringify(DASHBOARD_FAVICON_HREF)}>
   <title>callmux dashboard</title>
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem("callmux-dashboard-theme");
+        var theme = stored || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "light");
+      }
+    })();
+  </script>
   <style>
-    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f7f8fa; color: #17202a; }
+    :root {
+      color-scheme: light;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      /* Light (default) */
+      --bg: #f7f8fa; --fg: #17202a; --muted: #667085;
+      --panel-bg: #ffffff; --border: #d9dee7; --header-bg: #ffffff;
+      --sidebar-bg: #102033; --sidebar-fg: #ffffff; --sidebar-faint: #c9d5e3; --sidebar-hover: rgba(255,255,255,0.08);
+      --accent: #38bdf8; --accent-fg: #06101d;
+      --row-hover: #f0f4f8; --row-selected: #e8f2ff; --surface: #f8fbff; --track: #e8edf5;
+      --ok: #167447; --warn: #b54708; --bad: #b42318;
+      --chip-bg: #eef5ff; --chip-border: #c8def9; --chip-fg: #194b7d;
+      --input-bg: #ffffff; --input-border: #d9dee7;
+      --btn-bg: #102033; --btn-fg: #ffffff;
+      --code-bg: #0f1720; --code-fg: #dbeafe;
+      --grid: #e4e7ec; --chart-label: #667085;
+      --series-meta: #38bdf8; --series-pass: #34d399; --series-down: #a78bfa;
+    }
+    [data-theme="sand"] {
+      color-scheme: light;
+      --bg: #f4efe4; --fg: #393225; --muted: #857a64;
+      --panel-bg: #fffdf6; --border: #e6ddc8; --header-bg: #fffdf6;
+      --sidebar-bg: #2c2518; --sidebar-fg: #f7f1e3; --sidebar-faint: #cabfa3; --sidebar-hover: rgba(255,255,255,0.08);
+      --accent: #e08a3c; --accent-fg: #2a1804;
+      --row-hover: #f0e9d7; --row-selected: #f7ead0; --surface: #faf5e9; --track: #e9e0ca;
+      --ok: #4d7a2c; --warn: #a96a16; --bad: #b23a28;
+      --chip-bg: #f4ebd7; --chip-border: #ddca9f; --chip-fg: #6a531f;
+      --input-bg: #fffdf6; --input-border: #e6ddc8;
+      --btn-bg: #2c2518; --btn-fg: #f7f1e3;
+      --code-bg: #2c2518; --code-fg: #f1e7cf;
+      --grid: #e6ddc8; --chart-label: #857a64;
+      --series-meta: #e08a3c; --series-pass: #6a9a3c; --series-down: #b06ba6;
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #101418; --fg: #e5edf5; --muted: #a7b0be;
+      --panel-bg: #161c23; --border: #303946; --header-bg: #161c23;
+      --sidebar-bg: #07111d; --sidebar-fg: #ffffff; --sidebar-faint: #a7b7ca; --sidebar-hover: rgba(255,255,255,0.08);
+      --accent: #38bdf8; --accent-fg: #06101d;
+      --row-hover: #1e2936; --row-selected: #17304a; --surface: #101820; --track: #263241;
+      --ok: #5fd99a; --warn: #f0b46a; --bad: #ff9b8f;
+      --chip-bg: #13283f; --chip-border: #26547d; --chip-fg: #b9dcff;
+      --input-bg: #101820; --input-border: #303946;
+      --btn-bg: #1e2a3a; --btn-fg: #e5edf5;
+      --code-bg: #0b1119; --code-fg: #dbeafe;
+      --grid: #303946; --chart-label: #a7b0be;
+      --series-meta: #38bdf8; --series-pass: #34d399; --series-down: #a78bfa;
+    }
+    [data-theme="midnight"] {
+      color-scheme: dark;
+      --bg: #0c0e1a; --fg: #e6e8f5; --muted: #9aa0c8;
+      --panel-bg: #14172b; --border: #272c4a; --header-bg: #14172b;
+      --sidebar-bg: #090a17; --sidebar-fg: #ffffff; --sidebar-faint: #a6abcf; --sidebar-hover: rgba(255,255,255,0.08);
+      --accent: #8b7cf6; --accent-fg: #0c0a1a;
+      --row-hover: #1c2040; --row-selected: #232a54; --surface: #101428; --track: #272c4a;
+      --ok: #5fd99a; --warn: #f0b46a; --bad: #ff8fb0;
+      --chip-bg: #1e1f44; --chip-border: #3a3f72; --chip-fg: #c9c2ff;
+      --input-bg: #101228; --input-border: #272c4a;
+      --btn-bg: #2a2c55; --btn-fg: #e6e8f5;
+      --code-bg: #090a17; --code-fg: #d8dcff;
+      --grid: #272c4a; --chart-label: #9aa0c8;
+      --series-meta: #8b7cf6; --series-pass: #34d399; --series-down: #f472b6;
+    }
+    * { transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+    body { margin: 0; background: var(--bg); color: var(--fg); }
     h1 { margin: 0; font-size: 20px; font-weight: 650; }
     h2 { margin: 0 0 12px; font-size: 18px; }
     .app-shell { display: flex; min-height: 100vh; }
-    .sidebar { background: #102033; color: white; display: flex; flex-direction: column; min-height: 100vh; position: sticky; top: 0; width: 230px; }
+    .sidebar { background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; min-height: 100vh; position: sticky; top: 0; width: 230px; }
     .brand { border-bottom: 1px solid rgba(255,255,255,0.12); padding: 18px 18px 16px; }
     .brand-mark { align-items: center; display: flex; gap: 10px; }
-    .brand-icon { align-items: center; background: #05070a; border: 1px solid rgba(56,189,248,0.35); border-radius: 8px; color: #38bdf8; display: inline-flex; font-weight: 800; height: 32px; justify-content: center; width: 32px; }
+    .brand-icon { align-items: center; background: #05070a; border: 1px solid rgba(56,189,248,0.35); border-radius: 8px; color: var(--accent); display: inline-flex; font-weight: 800; height: 32px; justify-content: center; width: 32px; }
     .brand-title { font-size: 16px; font-weight: 700; }
     .nav { display: flex; flex-direction: column; gap: 4px; padding: 12px 10px; }
-    .nav-button { align-items: center; background: transparent; border: 0; border-radius: 6px; color: #c9d5e3; cursor: pointer; display: flex; font: inherit; gap: 10px; padding: 9px 10px; text-align: left; }
-    .nav-button:hover { background: rgba(255,255,255,0.08); color: white; }
-    .nav-button.active { background: #38bdf8; color: #06101d; font-weight: 700; }
+    .nav-button { align-items: center; background: transparent; border: 0; border-radius: 6px; color: var(--sidebar-faint); cursor: pointer; display: flex; font: inherit; gap: 10px; padding: 9px 10px; text-align: left; }
+    .nav-button:hover { background: var(--sidebar-hover); color: white; }
+    .nav-button.active { background: var(--accent); color: var(--accent-fg); font-weight: 700; }
     .nav-icon { font-size: 16px; line-height: 1; width: 18px; }
-    .sidebar-footer { border-top: 1px solid rgba(255,255,255,0.12); color: #a7b7ca; font-size: 12px; margin-top: auto; padding: 14px 18px; }
+    .sidebar-footer { border-top: 1px solid rgba(255,255,255,0.12); color: var(--sidebar-faint); font-size: 12px; margin-top: auto; padding: 14px 18px; }
     .health-strip { display: grid; gap: 7px; margin-top: 12px; }
     .health-row { align-items: center; display: flex; justify-content: space-between; gap: 10px; }
     .health-pill { border-radius: 999px; font-size: 11px; font-weight: 700; padding: 2px 7px; text-transform: uppercase; }
     .health-pill.ok { background: rgba(22,116,71,0.18); color: #8ff0b9; }
     .health-pill.warn { background: rgba(181,71,8,0.20); color: #ffd19a; }
     .health-pill.bad { background: rgba(180,35,24,0.20); color: #ffb4ab; }
-    .mobile-nav { background: #102033; border-bottom: 1px solid rgba(255,255,255,0.12); display: none; gap: 6px; overflow-x: auto; padding: 8px; position: sticky; top: 0; z-index: 5; }
+    .mobile-nav { background: var(--sidebar-bg); border-bottom: 1px solid rgba(255,255,255,0.12); display: none; gap: 6px; overflow-x: auto; padding: 8px; position: sticky; top: 0; z-index: 5; }
     .content { flex: 1; min-width: 0; }
-    header { background: white; border-bottom: 1px solid #d9dee7; padding: 16px 24px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    header { background: var(--header-bg); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .header-controls { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; }
+    .theme-pick { align-items: center; color: var(--muted); display: inline-flex; font-size: 12px; font-weight: 600; gap: 6px; }
+    .theme-pick select { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 6px; color: var(--fg); font: inherit; font-size: 12px; padding: 5px 7px; }
     main { padding: 20px 24px 32px; max-width: 1240px; margin: 0 auto; }
     .view { display: none; }
     .view.active { display: block; }
     .view-header { align-items: baseline; display: none; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
-    .panel { background: white; border: 1px solid #d9dee7; border-radius: 8px; padding: 14px; }
+    .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
     .diagram { display: grid; gap: 12px; }
     .flow { align-items: stretch; display: grid; gap: 10px; grid-template-columns: 1fr 34px 1fr 34px 1fr; }
-    .flow-node { background: #f8fbff; border: 1px solid #d9dee7; border-radius: 8px; display: grid; gap: 5px; min-height: 92px; padding: 12px; }
+    .flow-node { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; display: grid; gap: 5px; min-height: 92px; padding: 12px; }
     .flow-node strong { font-size: 14px; }
-    .flow-arrow { align-items: center; color: #667085; display: flex; font-size: 24px; font-weight: 700; justify-content: center; }
+    .flow-arrow { align-items: center; color: var(--muted); display: flex; font-size: 24px; font-weight: 700; justify-content: center; }
     .mini-table { display: grid; gap: 5px; margin-top: 4px; }
     .mini-row { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; }
-    .mini-row span:first-child { color: #536070; }
+    .mini-row span:first-child { color: var(--muted); }
     .mini-row strong { font-size: 13px; text-align: right; }
     .bar-list { display: grid; gap: 9px; }
     .bar-row { display: grid; gap: 6px; }
     .bar-meta { align-items: center; display: flex; font-size: 12px; justify-content: space-between; }
-    .bar-track { background: #e8edf5; border-radius: 999px; height: 9px; overflow: hidden; }
-    .bar-fill { background: #38bdf8; border-radius: inherit; height: 100%; min-width: 2px; }
+    .bar-track { background: var(--track); border-radius: 999px; height: 9px; overflow: hidden; }
+    .bar-fill { background: var(--accent); border-radius: inherit; height: 100%; min-width: 2px; }
+    .bar-fill.ok { background: var(--ok); }
+    .bar-fill.bad { background: var(--bad); }
     .diagram-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e4e7ec; vertical-align: top; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
     td { overflow-wrap: anywhere; }
-    th { color: #536070; font-weight: 600; }
+    th { color: var(--muted); font-weight: 600; }
     .events-table { table-layout: fixed; }
     .events-table th:nth-child(1) { width: 82px; }
     .events-table th:nth-child(2) { width: 110px; }
@@ -379,104 +458,87 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .events-table th:nth-child(4) { width: 82px; }
     .events-table th:nth-child(5) { width: 104px; }
     tr.event-row { cursor: pointer; }
-    tr.event-row:hover { background: #f0f4f8; }
-    tr.selected { background: #e8f2ff; }
-    tr.event-detail-row td { background: #f8fbff; padding: 12px; }
-    .ok { color: #167447; font-weight: 600; }
-    .warn { color: #b54708; font-weight: 600; }
-    .bad { color: #b42318; font-weight: 600; }
-    .muted { color: #667085; }
+    tr.event-row:hover { background: var(--row-hover); }
+    tr.selected { background: var(--row-selected); }
+    tr.event-detail-row td { background: var(--surface); padding: 12px; }
+    .ok { color: var(--ok); font-weight: 600; }
+    .warn { color: var(--warn); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .muted { color: var(--muted); }
     .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; margin-bottom: 10px; }
     .toolbar h2 { margin: 0; }
-    .toggle { align-items: center; color: #536070; display: inline-flex; font-size: 13px; gap: 7px; user-select: none; }
+    .toggle { align-items: center; color: var(--muted); display: inline-flex; font-size: 13px; gap: 7px; user-select: none; }
     .toggle input { margin: 0; }
     .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; }
-    .detail-item { border: 1px solid #e4e7ec; border-radius: 6px; padding: 8px; }
-    .detail-label { color: #667085; font-size: 12px; margin-bottom: 4px; }
+    .detail-item { border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+    .detail-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
     .detail-value { font-size: 13px; overflow-wrap: anywhere; }
+    .pill-format { background: var(--chip-bg); border: 1px solid var(--chip-border); border-radius: 999px; color: var(--chip-fg); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; padding: 1px 7px; text-transform: uppercase; }
     .split { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) 340px; }
     .server-row { cursor: pointer; }
-    .server-row:hover { background: #f0f4f8; }
-    .server-row.selected { background: #e8f2ff; }
+    .server-row:hover { background: var(--row-hover); }
+    .server-row.selected { background: var(--row-selected); }
     .filters { align-items: end; display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(130px, 1fr)); margin-bottom: 12px; }
     .search-field { grid-column: 1 / -1; }
     .filter-field { display: grid; gap: 4px; }
-    .filter-field label { color: #667085; font-size: 12px; font-weight: 600; }
-    .filter-field input, .filter-field select { background: white; border: 1px solid #d9dee7; border-radius: 6px; color: inherit; font: inherit; padding: 7px 8px; }
-    .button { background: #102033; border: 1px solid #102033; border-radius: 6px; color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; padding: 6px 9px; }
-    .button.secondary { background: transparent; color: #102033; }
-    .button.danger { background: #b42318; border-color: #b42318; }
+    .filter-field label { color: var(--muted); font-size: 12px; font-weight: 600; }
+    .filter-field input, .filter-field select { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 6px; color: inherit; font: inherit; padding: 7px 8px; }
+    .button { background: var(--btn-bg); border: 1px solid var(--btn-bg); border-radius: 6px; color: var(--btn-fg); cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; padding: 6px 9px; }
+    .button.secondary { background: transparent; color: var(--fg); border-color: var(--border); }
+    .button.danger { background: #b42318; border-color: #b42318; color: #ffffff; }
     .button:disabled { cursor: not-allowed; opacity: 0.45; }
     .inline-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .management-grid { display: grid; gap: 14px; }
     .management-form { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(180px, 1fr) auto; }
-    .notice { border: 1px solid #d9dee7; border-radius: 6px; margin-top: 10px; padding: 8px 10px; }
-    .notice.ok { background: rgba(22,116,71,0.08); border-color: rgba(22,116,71,0.25); color: #167447; }
-    .notice.bad { background: rgba(180,35,24,0.08); border-color: rgba(180,35,24,0.25); color: #b42318; }
+    .notice { border: 1px solid var(--border); border-radius: 6px; margin-top: 10px; padding: 8px 10px; }
+    .notice.ok { background: color-mix(in srgb, var(--ok) 10%, transparent); border-color: color-mix(in srgb, var(--ok) 30%, transparent); color: var(--ok); }
+    .notice.bad { background: color-mix(in srgb, var(--bad) 10%, transparent); border-color: color-mix(in srgb, var(--bad) 30%, transparent); color: var(--bad); }
     .tools-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-    .tool-chip { background: #eef5ff; border: 1px solid #c8def9; border-radius: 999px; color: #194b7d; font-size: 12px; padding: 3px 8px; }
+    .tool-chip { background: var(--chip-bg); border: 1px solid var(--chip-border); border-radius: 999px; color: var(--chip-fg); font-size: 12px; padding: 3px 8px; }
     .suite-card { display: grid; gap: 10px; }
     .suite-card + .suite-card { margin-top: 12px; }
-    .runtime-json { background: #0f1720; border-radius: 8px; color: #dbeafe; font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
+    .runtime-json { background: var(--code-bg); border-radius: 8px; color: var(--code-fg); font-size: 12px; margin: 0; max-height: 68vh; overflow: auto; padding: 12px; white-space: pre-wrap; }
     .traffic-chart { display: grid; gap: 6px; }
     .traffic-chart svg { display: block; height: 200px; width: 100%; }
-    .chart-grid { stroke: #e4e7ec; stroke-dasharray: 3 3; stroke-width: 0.5; }
-    .chart-label { fill: #667085; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 9px; }
-    .chart-line-meta { fill: none; stroke: #38bdf8; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-    .chart-line-passthrough { fill: none; stroke: #34d399; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-    .chart-line-downstream { fill: none; stroke: #a78bfa; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
-    .chart-area-meta { fill: rgba(56,189,248,0.12); }
-    .chart-area-passthrough { fill: rgba(52,211,153,0.12); }
-    .chart-area-downstream { fill: rgba(167,139,250,0.10); }
+    .chart-grid { stroke: var(--grid); stroke-dasharray: 3 3; stroke-width: 0.5; }
+    .chart-label { fill: var(--chart-label); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 9px; }
+    .chart-line-meta { fill: none; stroke: var(--series-meta); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-line-passthrough { fill: none; stroke: var(--series-pass); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-line-downstream { fill: none; stroke: var(--series-down); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+    .chart-area-meta { fill: color-mix(in srgb, var(--series-meta) 12%, transparent); }
+    .chart-area-passthrough { fill: color-mix(in srgb, var(--series-pass) 12%, transparent); }
+    .chart-area-downstream { fill: color-mix(in srgb, var(--series-down) 10%, transparent); }
     .chart-legend { display: flex; gap: 16px; justify-content: center; }
-    .chart-legend-item { align-items: center; color: #536070; display: flex; font-size: 12px; gap: 5px; }
+    .chart-legend-item { align-items: center; color: var(--muted); display: flex; font-size: 12px; gap: 5px; }
     .chart-legend-dot { border-radius: 50%; display: inline-block; height: 8px; width: 8px; }
     .active-calls { display: grid; gap: 8px; }
-    .active-call { align-items: start; border: 1px solid #e4e7ec; border-radius: 6px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 9px; }
-    .active-call-meta { color: #667085; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #101418; color: #e5edf5; }
-      header { background: #161c23; border-bottom-color: #303946; }
-      .sidebar, .mobile-nav { background: #07111d; }
-      .panel { background: #161c23; border-color: #303946; }
-      th, td { border-bottom-color: #303946; }
-      tr.event-row:hover { background: #1e2936; }
-      tr.selected { background: #17304a; }
-      .detail-item { border-color: #303946; }
-      .server-row:hover { background: #1e2936; }
-      .server-row.selected { background: #17304a; }
-      .filter-field input, .filter-field select { background: #101820; border-color: #303946; }
-      .button.secondary { color: #e5edf5; border-color: #303946; }
-      .notice { border-color: #303946; }
-      .tool-chip { background: #13283f; border-color: #26547d; color: #b9dcff; }
-      .flow-node { background: #101820; border-color: #303946; }
-      .bar-track { background: #263241; }
-      tr.event-detail-row td { background: #101820; }
-      .mini-row span:first-child { color: #a7b0be; }
-      .chart-grid { stroke: #303946; }
-      .chart-label { fill: #a7b0be; }
-      .chart-legend-item { color: #a7b0be; }
-      .active-call { border-color: #303946; }
-      .active-call-meta { color: #a7b0be; }
-      th, .muted, .toggle { color: #a7b0be; }
+    .active-call { align-items: start; border: 1px solid var(--border); border-radius: 6px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 9px; }
+    .active-call-meta { color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+    @media (max-width: 960px) {
+      .split { grid-template-columns: 1fr; }
+      .diagram-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 720px) {
       .app-shell { display: block; }
       .sidebar { display: none; }
       .mobile-nav { display: flex; }
       .nav-button { flex: 0 0 auto; padding: 8px 10px; }
-      header { align-items: flex-start; flex-direction: column; padding: 14px 16px; }
+      header { align-items: stretch; flex-direction: column; padding: 14px 16px; }
+      .header-controls { justify-content: flex-start; }
       main { padding: 14px 12px 24px; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
       .panel { padding: 12px; }
       .metric { font-size: 22px; }
-      .events-table, .events-table thead, .events-table tbody, .events-table tr, .events-table td { display: block; width: 100%; }
-      .events-table thead { display: none; }
-      .events-table tr.event-row { border: 1px solid #e4e7ec; border-radius: 8px; margin-bottom: 10px; padding: 8px 10px; }
-      .events-table td { border-bottom: 0; box-sizing: border-box; display: grid; gap: 6px; grid-template-columns: 68px minmax(0, 1fr); padding: 4px 0; }
-      .events-table td::before { content: attr(data-label); color: #667085; font-size: 12px; font-weight: 600; }
+      .events-table, .events-table thead, .events-table tbody, .events-table tr, .events-table td,
+      .data-table, .data-table thead, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+      .events-table thead, .data-table thead { display: none; }
+      .events-table tr.event-row, .data-table tbody tr { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; padding: 8px 10px; }
+      .events-table td, .data-table td { border-bottom: 0; box-sizing: border-box; display: grid; gap: 6px; grid-template-columns: 92px minmax(0, 1fr); padding: 4px 0; }
+      .events-table td::before, .data-table td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: 12px; font-weight: 600; }
       .events-table td[data-label="Detail"] { display: block; padding-top: 7px; }
       .events-table td[data-label="Detail"]::before { display: block; margin-bottom: 3px; }
+      .data-table td[data-label="Actions"] { display: block; padding-top: 7px; }
+      .data-table td[data-label="Actions"]::before { display: block; margin-bottom: 4px; }
       .event-detail-row td { display: block; }
       .event-detail-row td::before { content: ""; display: none; }
       .detail-grid { grid-template-columns: 1fr; }
@@ -489,9 +551,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       .diagram-grid { grid-template-columns: 1fr; }
       .view-header { display: flex; }
     }
-    @media (max-width: 720px) and (prefers-color-scheme: dark) {
-      .events-table tr.event-row { border-color: #303946; }
-      .events-table td::before { color: #a7b0be; }
+    @media (max-width: 480px) {
+      .grid { grid-template-columns: 1fr; }
+      .metric { font-size: 24px; }
     }
   </style>
 </head>
@@ -527,6 +589,16 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       </div>
       <header>
         <h1 id="view-title">Overview</h1>
+        <div class="header-controls">
+          <label class="theme-pick">Theme
+            <select id="theme-select">
+              <option value="light">Light</option>
+              <option value="sand">Sand</option>
+              <option value="dark">Dark</option>
+              <option value="midnight">Midnight</option>
+            </select>
+          </label>
+        </div>
       </header>
       <main>
         <section id="view-overview" class="view active">
@@ -545,7 +617,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           <div class="view-header"><h2>Servers</h2></div>
           <div class="split">
             <section class="panel">
-              <table><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
+              <table class="data-table"><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
             </section>
             <section class="panel">
               <div id="server-detail" class="muted">Select a server for details.</div>
@@ -567,7 +639,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
               <div id="management-status" class="notice muted">No management action yet.</div>
             </section>
             <section class="panel">
-              <table><thead><tr><th>Server</th><th>State</th><th>Tools</th><th>Managed</th><th>Actions</th></tr></thead><tbody id="management-servers"></tbody></table>
+              <table class="data-table"><thead><tr><th>Server</th><th>State</th><th>Tools</th><th>Managed</th><th>Actions</th></tr></thead><tbody id="management-servers"></tbody></table>
             </section>
           </section>
         </section>
@@ -846,27 +918,39 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     function eventDetailHtml(event) {
       if (!event) return "";
-      return "<div><h3 style=\\"margin:0 0 8px\\">Event details</h3><div class=\\"detail-grid\\">" + [
-        detailItem("Type", event.type),
-        detailItem("Status", statusText(event, event.success !== false)),
-        detailItem("Request id", event.requestId),
-        detailItem("Session id", event.sessionId),
-        detailItem("HTTP", event.method ? event.method + " " + (event.path || "") : ""),
-        detailItem("Lifecycle", event.lifecycle),
-        detailItem("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / ")),
-        detailItem("Tool kind", event.toolKind),
-        detailItem("Operation", event.operation),
-        detailItem("Passthrough tool calls", event.passthroughToolCalls),
-        detailItem("Callmux meta tool calls", event.callmuxMetaToolCalls ?? event.callmuxToolCalls),
-        detailItem("Callmux downstream calls", event.callmuxDownstreamToolCalls),
-        detailItem("Total downstream calls", event.totalDownstreamToolCalls ?? event.realToolCalls),
-        detailItem("Downstream targets", targetList(event.downstreamTargets)),
-        detailItem("Added tools", Array.isArray(event.addedTools) ? event.addedTools.join(", ") : ""),
-        detailItem("Removed tools", Array.isArray(event.removedTools) ? event.removedTools.join(", ") : ""),
-        detailItem("Tool suite generation", event.generation),
-        detailItem("Duration", event.durationMs !== undefined ? event.durationMs + "ms" : ""),
-        detailItem("Error", event.error),
-      ].join("") + "</div></div>";
+      const rows = [];
+      // Only render fields that carry a value, so the panel shows signal not a wall of empties.
+      const add = (label, value) => {
+        if (value === undefined || value === null || value === "") return;
+        if (typeof value === "number" && value === 0) return;
+        rows.push(detailItem(label, value));
+      };
+      rows.push(detailItem("Type", event.type));
+      rows.push(detailItem("Status", statusText(event, event.success !== false)));
+      add("Request id", event.requestId);
+      add("Session id", event.sessionId);
+      add("HTTP", event.method ? event.method + " " + (event.path || "") : "");
+      add("Lifecycle", event.lifecycle);
+      add("JSON-RPC", [event.jsonRpcMethod, event.jsonRpcTool].filter(Boolean).join(" / "));
+      add("Tool kind", event.toolKind === "callmux_meta" ? "callmux meta" : event.toolKind);
+      add("Operation", event.operation);
+      if (event.outputFormat) {
+        rows.push('<div class="detail-item"><div class="detail-label">Output format</div><div class="detail-value"><span class="pill-format">' + esc(event.outputFormat) + '</span></div></div>');
+      }
+      if (event.cacheHit) rows.push(detailItem("Cache", "hit"));
+      add("Passthrough tool calls", event.passthroughToolCalls);
+      add("Callmux meta tool calls", event.callmuxMetaToolCalls ?? event.callmuxToolCalls);
+      add("Callmux downstream calls", event.callmuxDownstreamToolCalls);
+      add("Total downstream calls", event.totalDownstreamToolCalls ?? event.realToolCalls);
+      if (Array.isArray(event.downstreamTargets) && event.downstreamTargets.length) {
+        rows.push(detailItem("Downstream targets", targetList(event.downstreamTargets)));
+      }
+      add("Added tools", Array.isArray(event.addedTools) && event.addedTools.length ? event.addedTools.join(", ") : "");
+      add("Removed tools", Array.isArray(event.removedTools) && event.removedTools.length ? event.removedTools.join(", ") : "");
+      add("Tool suite generation", event.generation);
+      if (event.durationMs !== undefined) rows.push(detailItem("Duration", event.durationMs + "ms"));
+      add("Error", event.error);
+      return '<div><h3 style="margin:0 0 8px">Event details</h3><div class="detail-grid">' + rows.join("") + '</div></div>';
     }
     function toolChips(tools) {
       if (!Array.isArray(tools) || tools.length === 0) return '<span class="muted">No exposed tools</span>';
@@ -905,11 +989,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const disabled = config.disabled === true || state === "disabled";
         const tools = Array.isArray(server.tools) ? server.tools.length : (server.toolCount ?? 0);
         return '<tr>' +
-          cell(esc(server.name)) +
-          cell(esc(state), disabled ? "warn" : state === "connected" ? "ok" : "bad") +
-          cell(esc(tools)) +
-          cell(esc(server.managed ? "Override" : "base")) +
-          '<td><div class="inline-actions">' +
+          cell(esc(server.name), "", "Server") +
+          cell(esc(state), disabled ? "warn" : state === "connected" ? "ok" : "bad", "State") +
+          cell(esc(tools), "", "Tools") +
+          cell(esc(server.managed ? "Override" : "base"), "", "Managed") +
+          '<td data-label="Actions"><div class="inline-actions">' +
             '<button class="button secondary" data-management-action="restart" data-server="' + esc(server.name) + '"' + (disabled ? ' disabled title="Enable this server before restarting"' : '') + '>Restart</button>' +
             '<button class="button secondary" data-management-action="' + (disabled ? "enable" : "disable") + '" data-server="' + esc(server.name) + '">' + (disabled ? "Enable" : "Disable") + '</button>' +
             '<button class="button danger" data-management-action="delete" data-server="' + esc(server.name) + '">Remove</button>' +
@@ -1131,7 +1215,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const totalTools = server.totalTools ?? toolCount;
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
         const selected = server.name === selectedServerName ? " selected" : "";
-        return '<tr class="server-row' + selected + '" data-server="' + esc(server.name) + '">' + cell(esc(server.name)) + cell(esc(server.state), stateClass) + cell(esc(server.transport)) + cell(esc(toolCount + "/" + totalTools)) + cell(esc(latency)) + "</tr>";
+        return '<tr class="server-row' + selected + '" data-server="' + esc(server.name) + '">' + cell(esc(server.name), "", "Server") + cell(esc(server.state), stateClass, "State") + cell(esc(server.transport), "", "Transport") + cell(esc(toolCount + "/" + totalTools), "", "Tools") + cell(esc(latency), "", "Latency") + "</tr>";
       }).join("");
       document.querySelectorAll("tr.server-row").forEach(row => {
         row.addEventListener("click", () => {
@@ -1214,6 +1298,16 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     document.querySelectorAll("[data-view-button]").forEach(button => {
       button.addEventListener("click", () => switchView(button.dataset.viewButton));
     });
+    (function () {
+      const select = document.getElementById("theme-select");
+      if (!select) return;
+      select.value = document.documentElement.getAttribute("data-theme") || "light";
+      select.addEventListener("change", () => {
+        const theme = select.value;
+        document.documentElement.setAttribute("data-theme", theme);
+        try { localStorage.setItem("callmux-dashboard-theme", theme); } catch {}
+      });
+    })();
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
       if (res.ok) renderWhenSelectionAllows(await res.json());
