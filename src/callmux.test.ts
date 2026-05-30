@@ -11729,7 +11729,7 @@ test("listener dashboard metrics endpoint aggregates and persists across restart
     await callTool(port, session, "fake__get_item", { id: 2 }, 3);
     await callTool(port, session, "callmux_status", {}, 4);
 
-    const res = await fetch(`http://127.0.0.1:${port}/dashboard/metrics?range=1h`);
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard/series?range=1h`);
     assert.equal(res.status, 200);
     const body = await res.json() as {
       totals: { calls: number; meta: number; passthrough: number; downstream: number };
@@ -11762,14 +11762,14 @@ test("listener dashboard metrics endpoint aggregates and persists across restart
     await listener2.start();
     const port2 = listenerPort(listener2);
 
-    const restored = await (await fetch(`http://127.0.0.1:${port2}/dashboard/metrics?range=1h`)).json() as {
+    const restored = await (await fetch(`http://127.0.0.1:${port2}/dashboard/series?range=1h`)).json() as {
       totals: { calls: number };
     };
     assert.equal(restored.totals.calls, 3, "restart should restore persisted call count");
 
     const session2 = await initSession(port2);
     await callTool(port2, session2, "fake__get_item", { id: 9 }, 2);
-    const after = await (await fetch(`http://127.0.0.1:${port2}/dashboard/metrics?range=1h`)).json() as {
+    const after = await (await fetch(`http://127.0.0.1:${port2}/dashboard/series?range=1h`)).json() as {
       totals: { calls: number };
     };
     assert.equal(after.totals.calls, 4, "new calls accrue onto restored history");

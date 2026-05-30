@@ -630,7 +630,7 @@ export class CallmuxListener {
       this.isDashboardBasePath(path, base) ||
       path === this.dashboardChildPath(base, "data") ||
       path === this.dashboardChildPath(base, "events") ||
-      path === this.dashboardChildPath(base, "metrics")
+      path === this.dashboardChildPath(base, "series")
     );
   }
 
@@ -951,8 +951,8 @@ export class CallmuxListener {
       return;
     }
 
-    if (path === this.dashboardChildPath(base, "metrics")) {
-      this.handleDashboardMetrics(req, res, context);
+    if (path === this.dashboardChildPath(base, "series")) {
+      this.handleDashboardSeries(req, res, context);
       return;
     }
 
@@ -1007,7 +1007,7 @@ export class CallmuxListener {
     };
   }
 
-  private handleDashboardMetrics(
+  private handleDashboardSeries(
     req: IncomingMessage,
     res: ServerResponse,
     context: RequestContext
