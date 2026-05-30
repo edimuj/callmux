@@ -5690,6 +5690,23 @@ test("loadConfig parses oidc_jwt auth config", async () => {
   }
 });
 
+test("loadConfig rejects a document with both servers and mcpServers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-both-keys-"));
+  const configPath = join(dir, "config.json");
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { a: { command: "node", args: ["a.js"] } },
+        mcpServers: { b: { command: "node", args: ["b.js"] } },
+      })
+    );
+    await assert.rejects(loadConfig(configPath), /not both/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig rejects oidc_jwt jwksUri over plaintext http", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-jwks-http-"));
   const configPath = join(dir, "config.json");

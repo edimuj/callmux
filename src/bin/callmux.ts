@@ -362,6 +362,16 @@ async function loadOrCreateManagedConfig(configPath: string) {
   return (await loadManagedConfig(configPath)) ?? createEmptyConfig();
 }
 
+async function requireManagedConfig(configPath: string) {
+  const config = await loadManagedConfig(configPath);
+  if (!config) {
+    throw new Error(
+      `No callmux config found at ${configPath}. Run \`callmux init\` to create one.`
+    );
+  }
+  return config;
+}
+
 async function handleInit(configPath: string, force: boolean): Promise<void> {
   const existing = await loadManagedConfig(configPath);
   if (existing && !force) {
@@ -439,8 +449,8 @@ async function handleServerCommand(
     }
 
     const extracted = extractFlag(args.slice(2), "--json");
-    const config = await loadManagedConfig(configPath);
-    if (!config || !config.servers[name]) {
+    const config = await requireManagedConfig(configPath);
+    if (!config.servers[name]) {
       throw new Error(`Server "${name}" not found in ${configPath}`);
     }
 
@@ -494,10 +504,7 @@ async function handleServerCommand(
       }
     }
 
-    const config = await loadManagedConfig(configPath);
-    if (!config) {
-      throw new Error(`No native callmux config found at ${configPath}`);
-    }
+    const config = await requireManagedConfig(configPath);
 
     if (!all && name && !config.servers[name]) {
       throw new Error(`Server "${name}" not found in ${configPath}`);
@@ -544,8 +551,8 @@ async function handleServerCommand(
     if (extracted.remainingArgs.length > 0) {
       throw new Error("Usage: callmux server remove <name> [--json]");
     }
-    const config = await loadManagedConfig(configPath);
-    if (!config || !config.servers[name]) {
+    const config = await requireManagedConfig(configPath);
+    if (!config.servers[name]) {
       throw new Error(`Server "${name}" not found in ${configPath}`);
     }
 
@@ -851,8 +858,8 @@ async function handleBridgeCommand(args: string[]): Promise<void> {
       }
       headers[raw.slice(0, separator).trim()] = raw.slice(separator + 1).trim();
     } else if (arg === "--call-timeout" && i + 1 < args.length) {
-      callTimeoutMs = parseInt(args[++i], 10);
-      if (!Number.isFinite(callTimeoutMs) || callTimeoutMs < 0) {
+      callTimeoutMs = Number(args[++i]);
+      if (!Number.isInteger(callTimeoutMs) || callTimeoutMs < 0) {
         throw new Error("--call-timeout must be a non-negative integer");
       }
     } else {
@@ -959,7 +966,10 @@ async function handleDaemonCommand(
     if (arg === "--name" && i + 1 < args.length) {
       name = args[++i];
     } else if (arg === "--port" && i + 1 < args.length) {
-      port = parseInt(args[++i], 10);
+      port = Number(args[++i]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("--port must be a valid port (1-65535)");
+      }
     } else if (arg === "--host" && i + 1 < args.length) {
       host = args[++i];
     } else if (arg === "--user") {
@@ -1154,8 +1164,8 @@ async function main(): Promise<void> {
   const filteredArgs: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--listen" && i + 1 < args.length) {
-      listenPort = parseInt(args[++i], 10);
-      if (!Number.isFinite(listenPort) || listenPort < 1 || listenPort > 65535) {
+      listenPort = Number(args[++i]);
+      if (!Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) {
         console.error("Error: --listen requires a valid port (1-65535)");
         process.exit(2);
       }
@@ -1398,8 +1408,8 @@ async function main(): Promise<void> {
       });
     }
 
-    process.on("SIGINT", () => { shutdown("SIGINT"); });
-    process.on("SIGTERM", () => { shutdown("SIGTERM"); });
+    process.on("SIGINT", () => { void shutdown("SIGINT"); });
+    process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
   } else {
     // Stdio mode (default)
     const transport = new StdioServerTransport();
