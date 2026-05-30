@@ -381,10 +381,21 @@ export class CallmuxListener {
     const { port, host = "127.0.0.1" } = this.options;
 
     this.httpServer = createServer((req, res) => this.handleRequest(req, res));
+    const server = this.httpServer;
 
     await new Promise<void>((resolve, reject) => {
-      this.httpServer!.listen(port, host, () => resolve());
-      this.httpServer!.once("error", reject);
+      const onStartupError = (err: Error) => reject(err);
+      server.once("error", onStartupError);
+      server.listen(port, host, () => {
+        server.removeListener("error", onStartupError);
+        resolve();
+      });
+    });
+
+    // Persistent handler so a post-startup socket error (bad TLS frame,
+    // client reset) is logged instead of bubbling to an uncaught crash.
+    server.on("error", (err: Error) => {
+      process.stderr.write(`[callmux] http server error: ${err.message}\n`);
     });
 
     process.stderr.write(
@@ -951,11 +962,31 @@ export class CallmuxListener {
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     });
-    res.write(`event: snapshot\ndata: ${JSON.stringify(this.createDashboardSnapshot())}\n\n`);
-    const unsubscribe = this.runtimeEvents.subscribe((event) => {
-      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    let active = true;
+    let unsubscribe = () => {};
+    const stop = () => {
+      if (!active) return;
+      active = false;
+      unsubscribe();
+    };
+    // A write to a half-closed socket emits 'error' on res; without this
+    // guard + handler an unhandled error would crash the daemon (EPIPE).
+    const safeWrite = (chunk: string) => {
+      if (!active || !res.writable) return;
+      try {
+        res.write(chunk);
+      } catch {
+        stop();
+      }
+    };
+    res.on("close", stop);
+    res.on("error", stop);
+    unsubscribe = this.runtimeEvents.subscribe((event) => {
+      safeWrite(`data: ${JSON.stringify(event)}\n\n`);
     });
-    res.on("close", unsubscribe);
+    safeWrite(
+      `event: snapshot\ndata: ${JSON.stringify(this.createDashboardSnapshot())}\n\n`
+    );
   }
 
   // ─── Streamable HTTP ────────────────────────────────────────────

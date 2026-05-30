@@ -38,31 +38,51 @@ function getConfigLocations(): Array<{ path: string; label: string }> {
   ];
 }
 
-async function readJsonSafe(path: string): Promise<Record<string, unknown> | null> {
+async function readJsonDocument(
+  path: string
+): Promise<{ doc: Record<string, unknown> | null; error?: string }> {
+  let raw: string;
   try {
-    const raw = await readFile(path, "utf-8");
+    raw = await readFile(path, "utf-8");
+  } catch (err) {
+    // Absent file is the normal case, not an error worth surfacing.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { doc: null };
+    return { doc: null, error: (err as Error).message };
+  }
+  try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+      return { doc: parsed as Record<string, unknown> };
     }
-    return null;
-  } catch {
-    return null;
+    return { doc: null, error: "expected a JSON object at the top level" };
+  } catch (err) {
+    return { doc: null, error: `invalid JSON: ${(err as Error).message}` };
   }
 }
 
-function extractServers(doc: Record<string, unknown>): Record<string, ServerConfig> | null {
+function extractServers(
+  doc: Record<string, unknown>,
+  path: string,
+  errors: Array<{ path: string; error: string }>
+): Record<string, ServerConfig> {
+  const result: Record<string, ServerConfig> = {};
   const mcpServers = doc.mcpServers;
   if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
-    return null;
+    return result;
   }
 
-  const result: Record<string, ServerConfig> = {};
   for (const [name, entry] of Object.entries(mcpServers as Record<string, unknown>)) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const e = entry as Record<string, unknown>;
 
     if (typeof e.command === "string" && e.command.length > 0) {
+      if (
+        e.args !== undefined &&
+        (!Array.isArray(e.args) || !e.args.every((a) => typeof a === "string"))
+      ) {
+        errors.push({ path, error: `server "${name}": args must be an array of strings` });
+        continue;
+      }
       result[name] = {
         command: e.command,
         ...(Array.isArray(e.args) ? { args: e.args as string[] } : {}),
@@ -75,27 +95,35 @@ function extractServers(doc: Record<string, unknown>): Record<string, ServerConf
         ...(typeof e.transport === "string" ? { transport: e.transport as "streamable-http" | "sse" } : {}),
         ...(e.headers && typeof e.headers === "object" ? { headers: e.headers as Record<string, string> } : {}),
       };
+    } else {
+      errors.push({ path, error: `server "${name}": missing "command" or "url"` });
     }
   }
 
-  return Object.keys(result).length > 0 ? result : null;
+  return result;
 }
 
 export async function detectExistingConfigs(): Promise<DetectionResult> {
   const locations = getConfigLocations();
   const servers: DetectedServer[] = [];
-  const scanned: string[] = [];
+  const scanned: string[] = locations.map((l) => l.path);
   const errors: Array<{ path: string; error: string }> = [];
 
-  for (const { path, label } of locations) {
-    scanned.push(path);
-    const doc = await readJsonSafe(path);
+  const reads = await Promise.all(
+    locations.map(async ({ path, label }) => ({
+      path,
+      label,
+      ...(await readJsonDocument(path)),
+    }))
+  );
+
+  for (const { path, label, doc, error } of reads) {
+    if (error) {
+      errors.push({ path, error });
+      continue;
+    }
     if (!doc) continue;
-
-    const extracted = extractServers(doc);
-    if (!extracted) continue;
-
-    for (const [name, config] of Object.entries(extracted)) {
+    for (const [name, config] of Object.entries(extractServers(doc, path, errors))) {
       servers.push({ name, config, source: label });
     }
   }

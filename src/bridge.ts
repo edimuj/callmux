@@ -111,6 +111,11 @@ export class CallmuxBridge {
         const code = isReconnectableBridgeError(error)
           ? "bridge_upstream_unavailable"
           : "bridge_tool_call_failed";
+        if (code === "bridge_upstream_unavailable") {
+          // Warm the connection in the background with backoff so the next
+          // call is more likely to land on a live upstream.
+          this.scheduleReconnect();
+        }
         return errorResult(code, message, {
           tool: request.params.name,
           url: this.options.url,

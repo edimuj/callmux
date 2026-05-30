@@ -1055,7 +1055,8 @@ export async function handleBatch(
       const cacheScope = cacheScopeForCall(upstream, tool, prepared.server, callContext);
       const cached = cache.get(tool, prepared.args, prepared.server, cacheScope);
       if (cached) {
-        succeeded++;
+        if (cached.isError) failed++;
+        else succeeded++;
         return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
@@ -1408,9 +1409,16 @@ export async function handleCall(
     const available = server
       ? upstream.getServerTools(server)
       : upstream.getServerNames().flatMap((s) => upstream.getServerTools(s));
+    const previewLimit = 25;
     return errorResult("tool_not_found", `tool "${tool}" not found`, {
       tool,
-      available,
+      totalAvailable: available.length,
+      available: available.slice(0, previewLimit),
+      ...(available.length > previewLimit
+        ? {
+            hint: `Showing ${previewLimit} of ${available.length} tools. Use callmux_search_tools to find the right one.`,
+          }
+        : {}),
     });
   }
   if ("error" in resolved) return resolved.error;
@@ -1509,6 +1517,7 @@ function scoreToolSearchResult(tool: SearchableTool, query: string): number {
   const server = normalizeSearchText(tool.server);
   const description = normalizeSearchText(tool.description ?? "");
   const inputFields = normalizeSearchText(tool.inputFields.join(" "));
+  const inputFieldSet = new Set(inputFields ? inputFields.split(/\s+/) : []);
   const haystack = `${qualifiedName} ${name} ${server} ${description} ${inputFields}`;
 
   let score = 0;
@@ -1517,7 +1526,7 @@ function scoreToolSearchResult(tool: SearchableTool, query: string): number {
     if (name.startsWith(token)) score += 8;
     if (name.includes(token)) score += 6;
     if (qualifiedName.includes(token)) score += 5;
-    if (inputFields.split(/\s+/).includes(token)) score += 4;
+    if (inputFieldSet.has(token)) score += 4;
     if (server === token || server.includes(token)) score += 3;
     if (description.includes(token)) score += 2;
     if (haystack.includes(token)) score += 1;

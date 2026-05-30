@@ -4587,10 +4587,31 @@ test("handleCall returns tool_not_found with available tools", async () => {
       message: 'tool "missing_tool" not found',
       details: {
         tool: "missing_tool",
+        totalAvailable: 2,
         available: ["get_issue", "list_issues"],
       },
     },
   });
+});
+
+test("handleCall truncates the available tool list and points to search", async () => {
+  const tools = Array.from({ length: 40 }, (_v, i) => ({
+    server: "github",
+    tool: mockTool(`tool_${i}`),
+  }));
+  const upstream = createMockUpstream(tools);
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "missing_tool",
+  });
+
+  assert.equal(result.isError, true);
+  const details = (result.structuredContent as {
+    error: { details: { totalAvailable: number; available: string[]; hint: string } };
+  }).error.details;
+  assert.equal(details.totalAvailable, 40);
+  assert.equal(details.available.length, 25);
+  assert.match(details.hint, /callmux_search_tools/);
 });
 
 test("handleCall validates missing tool name", async () => {

@@ -1380,7 +1380,15 @@ async function parseConfigDocument(
     };
   };
 
-  if (parsed.servers && typeof parsed.servers === "object") {
+  const hasServers = parsed.servers && typeof parsed.servers === "object";
+  const hasMcpServers = parsed.mcpServers && typeof parsed.mcpServers === "object";
+  if (hasServers && hasMcpServers) {
+    throw new Error(
+      'Invalid config: specify either "servers" or "mcpServers", not both'
+    );
+  }
+
+  if (hasServers) {
     const sharedFields = await parseSharedFields();
     return {
       config: {
@@ -1391,7 +1399,7 @@ async function parseConfigDocument(
     };
   }
 
-  if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+  if (hasMcpServers) {
     const sharedFields = await parseSharedFields();
     return {
       config: {
