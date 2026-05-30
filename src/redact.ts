@@ -1,5 +1,5 @@
 const SECRET_KEY_PATTERN =
-  /(?:^|[-_])(token|secret|password|passwd|api[-_]?key|authorization|credential|auth)(?:$|[-_])/i;
+  /(?:^|[-_])(token|secret|password|passwd|api[-_]?key|authorization|credential|auth|cookie)(?:$|[-_])/i;
 
 function isSecretKey(value: string): boolean {
   return SECRET_KEY_PATTERN.test(value);

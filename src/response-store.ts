@@ -92,7 +92,9 @@ function matchesPolicy(patterns: string[], candidates: string[]): boolean {
 }
 
 function normalizeToolName(tool: string): string {
-  const separatorIndex = tool.indexOf("__");
+  // Use the LAST separator so a server name containing "__" still yields the
+  // bare tool name — matches cache.ts so shield and cache policies agree.
+  const separatorIndex = tool.lastIndexOf("__");
   return separatorIndex === -1 ? tool : tool.slice(separatorIndex + 2);
 }
 

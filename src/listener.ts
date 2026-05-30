@@ -697,7 +697,9 @@ export class CallmuxListener {
       this.writeJson(res, 404, context, { error: "Not found" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.writeJson(res, 400, context, { error: message });
+      // "not found" throws are 404; the rest are treated as bad requests.
+      const status = /\bnot found\b/i.test(message) ? 404 : 400;
+      this.writeJson(res, status, context, { error: message });
     }
   }
 

@@ -220,11 +220,13 @@ export const META_TOOLS: Tool[] = [
             "Optional dot path inside the stored result, for example preview.items or content.",
         },
         offset: {
-          type: "number",
+          type: "integer",
+          minimum: 0,
           description: "Start offset for arrays or strings (default 0).",
         },
         limit: {
-          type: "number",
+          type: "integer",
+          minimum: 1,
           description: "Items to return for arrays, or chunks of about 200 chars for strings (default 50, max 100).",
         },
         fields: {
@@ -448,7 +450,8 @@ export const META_TOOLS: Tool[] = [
           description: "Include tool descriptions in output (default false)",
         },
         descriptionMaxLength: {
-          type: "number",
+          type: "integer",
+          minimum: 0,
           description:
             "Max chars per tool description. Truncated values end with '...'. " +
             "0 or omit = no limit. Only applies when descriptions is true.",
