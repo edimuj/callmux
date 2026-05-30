@@ -11327,17 +11327,26 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
   const upstream = new UpstreamManager(1200);
   const cache = new CallCache(0, undefined, {}, 100);
   let listener: CallmuxListener | undefined;
+  // The upstream call hangs on a promise the test releases explicitly, so the
+  // in_flight -> client_aborted -> cleanup sequence is fully deterministic and
+  // never races the wall-clock call timeout (the source of past flakiness).
+  let releaseCall: (() => void) | undefined;
 
   try {
     await upstream.connect({
-      fake: fakeMcpServer("fake", {
-        FAKE_MCP_CALL_MODE: "hang",
-      }),
+      fake: fakeMcpServer("fake"),
     });
     const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
       ...tool,
       name: qualifiedName,
     }));
+    // Keep the real connected upstream (so server/targetTool resolve through
+    // real metadata) but make the actual call controllable.
+    (upstream as unknown as { callTool: () => Promise<CallToolResult> }).callTool =
+      () =>
+        new Promise<CallToolResult>((resolve) => {
+          releaseCall = () => resolve(textResult("released"));
+        });
     listener = new CallmuxListener({
       port: 0,
       host: "127.0.0.1",
@@ -11426,6 +11435,10 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
       event.targetTool === "get_item"
     ));
 
+    // Release the hung upstream call so the request handler's finally runs and
+    // the active-call entry is cleaned up — no timeout firing required.
+    releaseCall?.();
+
     await waitFor(async () =>
       ((listener as any).getRuntimeDiagnostics() as { activeToolCallCount?: number })
         .activeToolCallCount === 0,
@@ -11433,6 +11446,7 @@ test("listener dashboard exposes in-flight and client-aborted tool calls", async
       20
     );
   } finally {
+    releaseCall?.();
     await listener?.close();
     await upstream.close();
   }
