@@ -209,14 +209,18 @@ export class MetricsStore {
   }
 
   private recordServers(sample: ToolCallSample, at: number): void {
-    // Attribute the call to the server(s) it actually hit.
+    // Attribute the call to the server(s) it hit. downstreamTargets is the
+    // authoritative per-server breakdown when present (passthrough calls carry
+    // both a `server` and a matching target, so using both would double-count);
+    // fall back to the flat `server` only when no targets are reported.
     const targets = new Map<string, number>();
-    if (sample.server) {
+    const reported = (sample.downstreamTargets ?? []).filter((t) => t?.server);
+    if (reported.length > 0) {
+      for (const target of reported) {
+        targets.set(target.server as string, (targets.get(target.server as string) ?? 0) + (target.count ?? 0));
+      }
+    } else if (sample.server) {
       targets.set(sample.server, (sample.downstreamCalls ?? 1) || 1);
-    }
-    for (const target of sample.downstreamTargets ?? []) {
-      if (!target?.server) continue;
-      targets.set(target.server, (targets.get(target.server) ?? 0) + (target.count ?? 0));
     }
     if (targets.size === 0) return;
 

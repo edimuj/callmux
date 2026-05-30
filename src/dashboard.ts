@@ -148,6 +148,20 @@ interface DashboardToolStatusContext {
   realToolCalls?: number;
 }
 
+export interface DashboardMetricsSnapshot {
+  startedAt: number;
+  totals: Record<string, number>;
+  servers: {
+    server: string;
+    calls: number;
+    errors: number;
+    downstream: number;
+    bytesOut: number;
+    totalDurationMs: number;
+    lastCallAt?: number;
+  }[];
+}
+
 export interface DashboardSnapshot {
   generatedAt: string;
   summary: DashboardRuntimeSummary;
@@ -157,6 +171,7 @@ export interface DashboardSnapshot {
     path: string;
   };
   managementServers?: unknown[];
+  metrics?: DashboardMetricsSnapshot;
   events: RuntimeEvent[];
 }
 

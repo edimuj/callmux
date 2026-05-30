@@ -53,6 +53,25 @@ test("per-server stats attribute calls, errors, and downstream fan-out", () => {
   assert.equal(stats[0].server, "github");
 });
 
+test("passthrough call with matching server and target is not double counted", () => {
+  // Real summaries carry both a flat `server` and a downstreamTargets entry for
+  // the same server; attributing both would double the per-server downstream.
+  const store = new MetricsStore(T0);
+  store.record({
+    at: T0,
+    server: "github",
+    downstreamCalls: 1,
+    downstreamTargets: [{ server: "github", count: 1 }],
+  });
+  const stats = store.serverStats();
+  assert.equal(stats.length, 1);
+  assert.equal(stats[0].server, "github");
+  assert.equal(stats[0].calls, 1);
+  assert.equal(stats[0].downstream, 1);
+  // per-server downstream stays consistent with the global counter
+  assert.equal(store.totals().downstream, 1);
+});
+
 test("1h series buckets by minute and pads gaps with zeros", () => {
   const store = new MetricsStore(T0);
   store.record({ at: T0 - 30 * 60_000, server: "a" }); // 30 min ago

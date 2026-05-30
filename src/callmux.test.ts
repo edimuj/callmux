@@ -11660,3 +11660,124 @@ test("listener SSE endpoint establishes connection", async () => {
     await listener.close();
   }
 });
+
+test("listener dashboard metrics endpoint aggregates and persists across restart", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-metrics-"));
+  const configPath = join(dir, "config.json");
+  const metricsPath = join(dir, "callmux-metrics.json");
+
+  const mcpHeaders = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+  };
+
+  // Initialize an MCP session and return its id.
+  async function initSession(port: number): Promise<string> {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        id: 1,
+      }),
+    });
+    const sessionId = res.headers.get("mcp-session-id");
+    assert.ok(sessionId, "expected a session id");
+    return sessionId;
+  }
+
+  async function callTool(port: number, sessionId: string, name: string, args: unknown, id: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": sessionId },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/call", params: { name, arguments: args }, id }),
+    });
+    await res.text(); // drain so the call completes server-side
+  }
+
+  function buildListener(upstream: UpstreamManager, cache: CallCache, allTools: unknown[]): CallmuxListener {
+    return new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      configPath,
+      config: { servers: { fake: fakeMcpServer("fake") }, dashboard: { enabled: true, maxEvents: 50 } },
+      upstream,
+      cache,
+      allTools: allTools as never,
+      maxConcurrency: 10,
+    });
+  }
+
+  const upstream = new UpstreamManager();
+  const upstream2 = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  const cache2 = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+  let listener2: CallmuxListener | undefined;
+  try {
+    await upstream.connect({ fake: fakeMcpServer("fake") });
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({ ...tool, name: qualifiedName }));
+    listener = buildListener(upstream, cache, allTools);
+    await listener.start();
+    const port = listenerPort(listener);
+    const session = await initSession(port);
+
+    // 2 passthrough downstream calls + 1 meta call (callmux_status hits no server)
+    await callTool(port, session, "fake__get_item", { id: 1 }, 2);
+    await callTool(port, session, "fake__get_item", { id: 2 }, 3);
+    await callTool(port, session, "callmux_status", {}, 4);
+
+    const res = await fetch(`http://127.0.0.1:${port}/dashboard/metrics?range=1h`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as {
+      totals: { calls: number; meta: number; passthrough: number; downstream: number };
+      servers: { server: string; calls: number; downstream: number }[];
+      series: { bucketMs: number; points: unknown[] };
+    };
+    assert.equal(body.totals.calls, 3);
+    assert.equal(body.totals.meta, 1);
+    assert.equal(body.totals.passthrough, 2);
+    // per-server downstream stays consistent with the global counter (no double counting)
+    const serverDownstream = body.servers.reduce((sum, s) => sum + s.downstream, 0);
+    assert.equal(serverDownstream, body.totals.downstream);
+    const fake = body.servers.find((s) => s.server === "fake");
+    assert.ok(fake);
+    assert.equal(fake.calls, 2);
+    assert.equal(body.series.bucketMs, 60_000);
+    // ~60 one-minute buckets for a 1h window (61 when `from` straddles a boundary)
+    assert.ok(body.series.points.length >= 60 && body.series.points.length <= 61);
+
+    // Closing flushes the metrics snapshot to the config dir.
+    await listener.close();
+    listener = undefined;
+    const persisted = JSON.parse(await readFile(metricsPath, "utf8")) as { aggregate: { calls: number } };
+    assert.equal(persisted.aggregate.calls, 3);
+
+    // A fresh listener on the same configPath restores the counters and accrues onto them.
+    await upstream2.connect({ fake: fakeMcpServer("fake") });
+    const allTools2 = upstream2.getTools().map(({ qualifiedName, tool }) => ({ ...tool, name: qualifiedName }));
+    listener2 = buildListener(upstream2, cache2, allTools2);
+    await listener2.start();
+    const port2 = listenerPort(listener2);
+
+    const restored = await (await fetch(`http://127.0.0.1:${port2}/dashboard/metrics?range=1h`)).json() as {
+      totals: { calls: number };
+    };
+    assert.equal(restored.totals.calls, 3, "restart should restore persisted call count");
+
+    const session2 = await initSession(port2);
+    await callTool(port2, session2, "fake__get_item", { id: 9 }, 2);
+    const after = await (await fetch(`http://127.0.0.1:${port2}/dashboard/metrics?range=1h`)).json() as {
+      totals: { calls: number };
+    };
+    assert.equal(after.totals.calls, 4, "new calls accrue onto restored history");
+  } finally {
+    await listener?.close();
+    await listener2?.close();
+    await upstream.close();
+    await upstream2.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

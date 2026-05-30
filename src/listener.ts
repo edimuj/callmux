@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isAbsolute } from "node:path";
+import { isAbsolute, dirname, join, resolve as resolvePath } from "node:path";
+import { homedir } from "node:os";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -58,7 +60,9 @@ import {
   renderDashboardHtml,
   RuntimeEventStore,
   type DashboardSnapshot,
+  type DashboardMetricsSnapshot,
 } from "./dashboard.js";
+import { MetricsStore, type MetricsRange } from "./metrics-store.js";
 import {
   applyManagementOverlay,
   assertServerConfig,
@@ -83,6 +87,8 @@ const DEFAULT_LISTENER_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 180_000;
 const TOOL_CALL_TIMEOUT_OVERRUN_GRACE_MS = 1_000;
 const REQUEST_BODY_OVERRIDE_HEADER = "x-callmux-max-body-bytes";
+const METRICS_FLUSH_INTERVAL_MS = 15_000;
+const METRICS_RANGES: MetricsRange[] = ["1h", "today", "yesterday", "7d", "30d"];
 const REQUEST_ID_HEADER = "x-request-id";
 const CWD_HEADER = "x-callmux-cwd";
 const CLIENT_HEADER = "x-callmux-client";
@@ -216,6 +222,11 @@ export class CallmuxListener {
   /** Serializes management mutations so concurrent add/patch/delete can't clobber each other's overlay write. */
   private managementMutation: Promise<unknown> = Promise.resolve();
   private runtimeEvents: RuntimeEventStore;
+  private metricsStore = new MetricsStore();
+  private metricsPath: string | undefined;
+  private metricsDirty = false;
+  private metricsFlushTimer: ReturnType<typeof setInterval> | undefined;
+  private metricsLoaded = false;
   private activeToolCalls = new Map<string, ActiveToolCallEntry>();
   private unsubscribeToolSuiteChanges: (() => void) | undefined;
   private lastReloadAt: string | undefined;
@@ -245,6 +256,7 @@ export class CallmuxListener {
     this.managementBaseConfig = options.managementBaseConfig ?? options.config;
     this.managementOverlay = options.managementOverlay ?? { version: 1 };
     this.runtimeEvents = new RuntimeEventStore(this.dashboardConfig.maxEvents);
+    this.metricsPath = this.resolveMetricsPath(options.configPath);
     this.subscribeToolSuiteChanges(options.upstream);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture(options.config, this.authConfig);
@@ -380,6 +392,16 @@ export class CallmuxListener {
   async start(): Promise<void> {
     const { port, host = "127.0.0.1" } = this.options;
 
+    // Load persisted metrics before accepting traffic so early calls accrue
+    // onto the restored history instead of a fresh empty store.
+    await this.loadMetrics();
+    if (this.metricsPath) {
+      this.metricsFlushTimer = setInterval(() => {
+        void this.flushMetrics();
+      }, METRICS_FLUSH_INTERVAL_MS);
+      this.metricsFlushTimer.unref?.();
+    }
+
     this.httpServer = createServer((req, res) => this.handleRequest(req, res));
     const server = this.httpServer;
 
@@ -409,6 +431,11 @@ export class CallmuxListener {
   }
 
   async close(): Promise<void> {
+    if (this.metricsFlushTimer) {
+      clearInterval(this.metricsFlushTimer);
+      this.metricsFlushTimer = undefined;
+    }
+    await this.flushMetrics();
     this.unsubscribeToolSuiteChanges?.();
     this.unsubscribeToolSuiteChanges = undefined;
     const sessions = Array.from(this.sessions.entries());
@@ -602,7 +629,8 @@ export class CallmuxListener {
     return (
       this.isDashboardBasePath(path, base) ||
       path === this.dashboardChildPath(base, "data") ||
-      path === this.dashboardChildPath(base, "events")
+      path === this.dashboardChildPath(base, "events") ||
+      path === this.dashboardChildPath(base, "metrics")
     );
   }
 
@@ -923,6 +951,11 @@ export class CallmuxListener {
       return;
     }
 
+    if (path === this.dashboardChildPath(base, "metrics")) {
+      this.handleDashboardMetrics(req, res, context);
+      return;
+    }
+
     this.writeJson(res, 404, context, { error: "Not found" });
   }
 
@@ -960,8 +993,79 @@ export class CallmuxListener {
         path: this.managementConfig.path,
       },
       managementServers: this.managementConfig.enabled ? this.managementServers() : [],
+      ...(this.metricsSnapshot() ? { metrics: this.metricsSnapshot() } : {}),
       events: this.runtimeEvents.list(),
     };
+  }
+
+  private metricsSnapshot(): DashboardMetricsSnapshot | undefined {
+    if (!this.dashboardConfig.enabled) return undefined;
+    return {
+      startedAt: this.metricsStore.startedAtMs(),
+      totals: this.metricsStore.totals() as unknown as Record<string, number>,
+      servers: this.metricsStore.serverStats(),
+    };
+  }
+
+  private handleDashboardMetrics(
+    req: IncomingMessage,
+    res: ServerResponse,
+    context: RequestContext
+  ): void {
+    const raw = new URL(req.url ?? "/", "http://localhost").searchParams.get("range");
+    const range: MetricsRange = METRICS_RANGES.includes(raw as MetricsRange)
+      ? (raw as MetricsRange)
+      : "1h";
+    this.writeJson(res, 200, context, {
+      range,
+      startedAt: this.metricsStore.startedAtMs(),
+      totals: this.metricsStore.totals(),
+      servers: this.metricsStore.serverStats(),
+      series: this.metricsStore.series(range),
+    });
+  }
+
+  private resolveMetricsPath(configPath: string | undefined): string | undefined {
+    if (!this.dashboardConfig.enabled) return undefined;
+    const dir = configPath
+      ? dirname(resolvePath(configPath))
+      : join(homedir(), ".config", "callmux");
+    return join(dir, "callmux-metrics.json");
+  }
+
+  private async loadMetrics(): Promise<void> {
+    if (this.metricsLoaded) return;
+    this.metricsLoaded = true;
+    if (!this.metricsPath) return;
+    try {
+      const raw = await readFile(this.metricsPath, "utf8");
+      this.metricsStore = MetricsStore.fromJSON(JSON.parse(raw));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT") {
+        process.stderr.write(
+          `[callmux] could not load metrics from ${this.metricsPath}: ${(error as Error).message}\n`
+        );
+      }
+    }
+  }
+
+  /** Persist metrics atomically (temp file + rename) so a crash can't corrupt it. */
+  private async flushMetrics(): Promise<void> {
+    if (!this.metricsPath || !this.metricsDirty) return;
+    this.metricsDirty = false;
+    const payload = JSON.stringify(this.metricsStore.toJSON());
+    try {
+      await mkdir(dirname(this.metricsPath), { recursive: true });
+      const tmp = `${this.metricsPath}.tmp`;
+      await writeFile(tmp, payload, "utf8");
+      await rename(tmp, this.metricsPath);
+    } catch (error) {
+      this.metricsDirty = true; // leave dirty so the next tick retries
+      process.stderr.write(
+        `[callmux] could not persist metrics to ${this.metricsPath}: ${(error as Error).message}\n`
+      );
+    }
   }
 
   private handleDashboardEvents(res: ServerResponse): void {
@@ -1934,6 +2038,15 @@ export class CallmuxListener {
       callmuxToolCalls: summary.callmuxToolCalls,
       realToolCalls: summary.totalDownstreamToolCalls,
     });
+    const isMeta = tool.startsWith("callmux_");
+    const requestedFormat = this.outputFormatFor(args);
+    // Only json/toon are concrete; "auto" picks per-payload deep in the
+    // handlers and isn't surfaced here. Format applies to meta-tool output.
+    const format =
+      isMeta && (requestedFormat === "toon" || requestedFormat === "json")
+        ? requestedFormat
+        : undefined;
+    const durationMs = Date.now() - startedAt;
     this.runtimeEvents.append({
       type: "tool_call",
       timestamp: new Date().toISOString(),
@@ -1941,12 +2054,28 @@ export class CallmuxListener {
       ...(target?.server ? { server: target.server } : {}),
       ...(target?.tool ? { targetTool: target.tool } : {}),
       ...summary,
-      durationMs: Date.now() - startedAt,
+      durationMs,
       status,
       success: status !== "error",
       ...(cacheHit ? { cacheHit } : {}),
+      ...(format ? { outputFormat: format } : {}),
       ...(result.isError ? { error: extractToolError(result) } : {}),
     });
+    if (this.dashboardConfig.enabled) {
+      this.metricsStore.record({
+        ...(target?.server ? { server: target.server } : {}),
+        downstreamTargets: summary.downstreamTargets,
+        meta: isMeta,
+        downstreamCalls: summary.totalDownstreamToolCalls,
+        cacheHit: Boolean(cacheHit),
+        error: status === "error",
+        bytesIn: jsonByteLength(args),
+        bytesOut: jsonByteLength(result),
+        durationMs,
+        ...(format ? { format } : {}),
+      });
+      this.metricsDirty = true;
+    }
   }
 
   private summarizeHttpRequestPayload(payload: unknown): Partial<{
@@ -2715,6 +2844,16 @@ class RequestBodyAbortedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "RequestBodyAbortedError";
+  }
+}
+
+/** Serialized byte size of a value, for per-call payload accounting. */
+function jsonByteLength(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return 0;
   }
 }
 
