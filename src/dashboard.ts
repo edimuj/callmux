@@ -523,12 +523,30 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .chart-area-meta { fill: color-mix(in srgb, var(--series-meta) 12%, transparent); }
     .chart-area-passthrough { fill: color-mix(in srgb, var(--series-pass) 12%, transparent); }
     .chart-area-downstream { fill: color-mix(in srgb, var(--series-down) 10%, transparent); }
-    .chart-legend { display: flex; gap: 16px; justify-content: center; }
+    .chart-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; justify-content: center; }
     .chart-legend-item { align-items: center; color: var(--muted); display: flex; font-size: 12px; gap: 5px; }
     .chart-legend-dot { border-radius: 50%; display: inline-block; height: 8px; width: 8px; }
     .active-calls { display: grid; gap: 8px; }
     .active-call { align-items: start; border: 1px solid var(--border); border-radius: 6px; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; padding: 9px; }
     .active-call-meta { color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+    .savings-hero { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 18px; }
+    .hero-card { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; position: relative; overflow: hidden; }
+    .hero-card.accent { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--panel-bg)), var(--panel-bg)); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+    .hero-label { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+    .hero-value { font-size: 32px; font-weight: 800; line-height: 1.1; margin-top: 8px; }
+    .hero-sub { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .hero-spark { display: block; height: 34px; margin-top: 10px; width: 100%; }
+    .range-bar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; margin-bottom: 14px; }
+    .range-label { font-size: 15px; font-weight: 650; }
+    .range-buttons { display: inline-flex; flex-wrap: wrap; gap: 4px; background: var(--track); border-radius: 8px; padding: 3px; }
+    .range-button { background: transparent; border: 0; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; padding: 5px 11px; }
+    .range-button:hover { color: var(--fg); }
+    .range-button.active { background: var(--panel-bg); box-shadow: 0 1px 2px rgba(0,0,0,0.12); color: var(--fg); }
+    .history-charts { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .history-chart h3 { font-size: 14px; margin: 0 0 4px; }
+    .history-chart .chart-sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .section-subtle { color: var(--muted); font-size: 13px; font-weight: 650; margin: 22px 0 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .empty-chart { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
     @media (max-width: 960px) {
       .split { grid-template-columns: 1fr; }
       .diagram-grid { grid-template-columns: 1fr; }
@@ -618,6 +636,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       <main>
         <section id="view-overview" class="view active">
           <div class="view-header"><h2>Overview</h2></div>
+          <section id="savings-hero" class="savings-hero"></section>
           <section class="grid" id="summary"></section>
           <section class="panel" style="margin-bottom:18px">
             <h2>In-Flight Tool Calls</h2>
@@ -632,7 +651,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           <div class="view-header"><h2>Servers</h2></div>
           <div class="split">
             <section class="panel">
-              <table class="data-table"><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
+              <table class="data-table"><thead><tr><th>Server</th><th>State</th><th>Transport</th><th>Tools</th><th>Calls</th><th>Errors</th><th>Latency</th></tr></thead><tbody id="servers"></tbody></table>
             </section>
             <section class="panel">
               <div id="server-detail" class="muted">Select a server for details.</div>
@@ -660,6 +679,20 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         </section>
         <section id="view-diagrams" class="view">
           <div class="view-header"><h2>Runtime Diagrams</h2></div>
+          <section class="panel" style="margin-bottom:18px">
+            <div class="range-bar">
+              <span class="range-label">History</span>
+              <div class="range-buttons" id="range-buttons">
+                <button class="range-button active" data-range="1h">1h</button>
+                <button class="range-button" data-range="today">Today</button>
+                <button class="range-button" data-range="yesterday">Yesterday</button>
+                <button class="range-button" data-range="7d">7d</button>
+                <button class="range-button" data-range="30d">30d</button>
+              </div>
+            </div>
+            <section id="history-charts" class="history-charts"></section>
+          </section>
+          <h3 class="section-subtle">Live (last 2 minutes)</h3>
           <section id="runtime-diagrams" class="diagram-grid"></section>
         </section>
         <section id="view-events" class="view">
@@ -709,6 +742,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let currentView = loadView();
     let managementToken = loadManagementToken();
     let managementMessage = { kind: "muted", text: "No management action yet." };
+    let metricsRange = loadRange();
+    let seriesData = null;
+    let serverStatsMap = {};
+    const seriesUrl = dashboardEndpoint("series");
+
+    function loadRange() {
+      try { return localStorage.getItem("callmux-dashboard-range") || "1h"; } catch { return "1h"; }
+    }
+    function saveRange(range) {
+      try { localStorage.setItem("callmux-dashboard-range", range); } catch {}
+    }
 
     function loadView() {
       try {
@@ -798,6 +842,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       document.querySelectorAll(".view").forEach(section => section.classList.toggle("active", section.id === "view-" + view));
       document.querySelectorAll("[data-view-button]").forEach(button => button.classList.toggle("active", button.dataset.viewButton === view));
       document.getElementById("view-title").textContent = viewTitles[view];
+      if (view === "diagrams") loadSeries();
     }
     function cell(value, className = "", label = "") {
       return "<td" + (className ? " class=\\"" + className + "\\"" : "") + (label ? " data-label=\\"" + esc(label) + "\\"" : "") + ">" + String(value ?? "") + "</td>";
@@ -979,16 +1024,22 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         return;
       }
       detail.className = "";
-      detail.innerHTML = '<h3 style="margin:0 0 8px">' + esc(server.name) + '</h3><div class="detail-grid">' + [
+      const rows = [
         detailItem("State", server.state),
         detailItem("Transport", server.transport),
         detailItem("Tools", (server.toolCount ?? server.exposedTools ?? 0) + "/" + (server.totalTools ?? server.toolCount ?? server.exposedTools ?? 0)),
-        detailItem("Latency", server.connectDurationMs !== undefined ? server.connectDurationMs + "ms" : ""),
-        detailItem("Last connected", formatDateTime(server.lastConnectedAt)),
-        detailItem("Last failure", formatDateTime(server.lastFailureAt)),
-        detailItem("Next retry", formatDateTime(server.nextRetryAt)),
-        detailItem("Last error", server.lastError ?? server.error),
-      ].join("") + '</div><h4 style="margin:14px 0 6px">Tools</h4>' + toolChips(server.tools);
+      ];
+      if (server.connectDurationMs !== undefined) rows.push(detailItem("Connect latency", server.connectDurationMs + "ms"));
+      if (server.lastConnectedAt) rows.push(detailItem("Last connected", formatDateTime(server.lastConnectedAt)));
+      if (server.lastFailureAt) rows.push(detailItem("Last failure", formatDateTime(server.lastFailureAt)));
+      if (server.nextRetryAt) rows.push(detailItem("Next retry", formatDateTime(server.nextRetryAt)));
+      const lastError = server.lastError ?? server.error;
+      if (lastError) rows.push(detailItem("Last error", lastError));
+      const stat = serverStatsMap[server.name];
+      const statsHtml = stat
+        ? '<h4 style="margin:14px 0 6px">Traffic</h4><div class="detail-grid">' + renderServerStats(stat) + '</div>'
+        : '';
+      detail.innerHTML = '<h3 style="margin:0 0 8px">' + esc(server.name) + '</h3><div class="detail-grid">' + rows.join("") + '</div>' + statsHtml + '<h4 style="margin:14px 0 6px">Tools</h4>' + toolChips(server.tools);
     }
     function renderManagement(servers) {
       const target = document.getElementById("management-servers");
@@ -1074,6 +1125,174 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const http = sessions.filter(session => session.transport === "streamable-http" && session.clientKind !== "stdio-bridge").length;
       return [["HTTP", http], ["SSE", sse], ["STDIO Bridge", bridge]];
     }
+    function formatNum(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n)) return "0";
+      if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+      return String(Math.round(n));
+    }
+    function formatBytes(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n) || n <= 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0, v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
+    }
+    function renderSavingsHero(metrics) {
+      const host = document.getElementById("savings-hero");
+      if (!host) return;
+      if (!metrics || !metrics.totals) { host.innerHTML = ""; return; }
+      const t = metrics.totals;
+      const calls = Number(t.calls || 0);
+      const downstream = Number(t.downstream || 0);
+      const saved = Math.max(0, downstream - calls);
+      const ratio = calls > 0 ? downstream / calls : 1;
+      const cacheHits = Number(t.cacheHits || 0);
+      const bytes = Number(t.bytesIn || 0) + Number(t.bytesOut || 0);
+      const cards = [
+        {
+          accent: true,
+          label: "Round-trips saved",
+          value: formatNum(saved + cacheHits),
+          sub: ratio >= 1.05
+            ? ratio.toFixed(1) + "x fan-out (" + formatNum(downstream) + " downstream from " + formatNum(calls) + " calls)"
+            : "meta-tools + cache collapse calls into one",
+        },
+        { label: "Cache hits", value: formatNum(cacheHits), sub: cacheHits > 0 ? "downstream calls served from cache" : "no cache hits yet" },
+        { label: "Data through callmux", value: formatBytes(bytes), sub: formatBytes(t.bytesIn) + " in / " + formatBytes(t.bytesOut) + " out" },
+        { label: "Tool calls", value: formatNum(calls), sub: formatNum(t.meta) + " meta / " + formatNum(t.passthrough) + " passthrough" },
+      ];
+      host.innerHTML = cards.map(c =>
+        '<div class="hero-card' + (c.accent ? ' accent' : '') + '">' +
+          '<div class="hero-label">' + esc(c.label) + '</div>' +
+          '<div class="hero-value">' + esc(c.value) + '</div>' +
+          '<div class="hero-sub">' + esc(c.sub) + '</div>' +
+        '</div>'
+      ).join("");
+    }
+    function seriesXLabels(points) {
+      const n = points.length;
+      if (n === 0) return [];
+      const span = points[n - 1].t - points[0].t;
+      const useDate = span > 36 * 3600 * 1000;
+      const count = Math.min(5, n);
+      const labels = [];
+      for (let k = 0; k < count; k++) {
+        const i = count <= 1 ? 0 : Math.round(k * (n - 1) / (count - 1));
+        const dt = new Date(points[i].t);
+        labels.push({ i, label: useDate
+          ? (dt.getMonth() + 1) + "/" + dt.getDate()
+          : dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      }
+      return labels;
+    }
+    function renderSeriesChart(points, defs, opts) {
+      opts = opts || {};
+      const fmt = opts.format || formatNum;
+      if (!points || points.length === 0) return '<div class="empty-chart">No data in this range yet</div>';
+      const L = 42, R = 314, T = 10, B = 120, W = R - L, H = B - T;
+      let rawMax = 1;
+      for (let i = 0; i < points.length; i++) {
+        for (let d = 0; d < defs.length; d++) rawMax = Math.max(rawMax, Number(points[i][defs[d].key] || 0));
+      }
+      function niceNum(v) {
+        if (v <= 0) return 1;
+        const e = Math.floor(Math.log10(v));
+        const f = v / Math.pow(10, e);
+        return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * Math.pow(10, e);
+      }
+      const ticks = 4;
+      const step = Math.max(1, niceNum(rawMax / ticks));
+      const nMax = step * ticks;
+      const n = points.length;
+      function xAt(i) { return L + (n <= 1 ? 0 : i * W / (n - 1)); }
+      function yAt(v) { return B - Number(v || 0) / nMax * H; }
+      let grid = "";
+      for (let k = 0; k <= ticks; k++) {
+        const val = k * step;
+        const yy = yAt(val).toFixed(1);
+        grid += '<line class="chart-grid" x1="' + L + '" y1="' + yy + '" x2="' + R + '" y2="' + yy + '"/>';
+        grid += '<text class="chart-label" x="' + (L - 4) + '" y="' + (Number(yy) + 3).toFixed(1) + '" text-anchor="end">' + esc(fmt(val)) + '</text>';
+      }
+      let xs = "";
+      const marks = seriesXLabels(points);
+      for (let m = 0; m < marks.length; m++) {
+        const mx = xAt(marks[m].i);
+        const anchor = mx <= L + 10 ? "start" : mx >= R - 10 ? "end" : "middle";
+        xs += '<text class="chart-label" x="' + mx.toFixed(1) + '" y="' + (B + 14) + '" text-anchor="' + anchor + '">' + esc(marks[m].label) + '</text>';
+      }
+      let series = "";
+      for (let d = 0; d < defs.length; d++) {
+        const def = defs[d];
+        let line = "", area = L + "," + B + " ";
+        for (let i = 0; i < n; i++) {
+          const px = xAt(i).toFixed(1), py = yAt(points[i][def.key]).toFixed(1);
+          line += (i ? " " : "") + px + "," + py;
+          area += px + "," + py + " ";
+        }
+        area += R + "," + B;
+        series += '<polygon points="' + area + '" fill="' + def.color + '" fill-opacity="0.12"/>';
+        series += '<polyline points="' + line + '" fill="none" stroke="' + def.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      }
+      let legend = '<div class="chart-legend">';
+      for (let d = 0; d < defs.length; d++) {
+        let total = 0;
+        for (let i = 0; i < n; i++) total += Number(points[i][defs[d].key] || 0);
+        legend += '<div class="chart-legend-item"><span class="chart-legend-dot" style="background:' + defs[d].color + '"></span>' + esc(defs[d].label) + ' <span class="muted">(' + esc(fmt(total)) + ')</span></div>';
+      }
+      legend += '</div>';
+      return '<div class="traffic-chart"><svg viewBox="0 0 324 140" role="img" aria-label="' + esc(opts.aria || "chart") + '">' + grid + xs + series + '</svg>' + legend + '</div>';
+    }
+    function renderHistoryCharts(series) {
+      const host = document.getElementById("history-charts");
+      if (!host) return;
+      if (!series || !Array.isArray(series.points)) {
+        host.innerHTML = '<div class="empty-chart">No metrics recorded yet</div>';
+        return;
+      }
+      const pts = series.points;
+      host.innerHTML = [
+        '<section class="panel history-chart"><h3>Tool Calls</h3><div class="chart-sub">meta vs passthrough vs real downstream</div>' +
+          renderSeriesChart(pts, [
+            { key: "downstream", label: "Downstream", color: "#a78bfa" },
+            { key: "passthrough", label: "Passthrough", color: "#34d399" },
+            { key: "meta", label: "Meta", color: "#38bdf8" },
+          ], { aria: "Tool calls over time" }) + '</section>',
+        '<section class="panel history-chart"><h3>Data Volume</h3><div class="chart-sub">bytes in / out through callmux</div>' +
+          renderSeriesChart(pts, [
+            { key: "bytesOut", label: "Out", color: "#f59e0b" },
+            { key: "bytesIn", label: "In", color: "#38bdf8" },
+          ], { format: formatBytes, aria: "Data volume over time" }) + '</section>',
+        '<section class="panel history-chart"><h3>Cache &amp; Errors</h3><div class="chart-sub">cache hits vs errors</div>' +
+          renderSeriesChart(pts, [
+            { key: "cacheHits", label: "Cache hits", color: "#34d399" },
+            { key: "errors", label: "Errors", color: "#f87171" },
+          ], { aria: "Cache hits and errors over time" }) + '</section>',
+      ].join("");
+    }
+    async function loadSeries() {
+      try {
+        const res = await fetch(seriesUrl + "?range=" + encodeURIComponent(metricsRange), { headers: { "Accept": "application/json" } });
+        if (!res.ok) return;
+        const data = await res.json();
+        seriesData = data.series || null;
+        renderHistoryCharts(seriesData);
+      } catch {}
+    }
+    function renderServerStats(stat) {
+      if (!stat) return "";
+      const avg = stat.calls > 0 ? Math.round(stat.totalDurationMs / stat.calls) : 0;
+      return [
+        detailItem("Calls", formatNum(stat.calls)),
+        ...(stat.errors ? [detailItem("Errors", formatNum(stat.errors))] : []),
+        detailItem("Downstream", formatNum(stat.downstream)),
+        detailItem("Avg duration", avg + "ms"),
+        detailItem("Bytes out", formatBytes(stat.bytesOut)),
+      ].join("");
+    }
     function renderTrafficChart(events) {
       const now = Date.now();
       const bucketMs = 5000;
@@ -1123,8 +1342,9 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       var xMarks = [[0, "2m"], [6, "90s"], [12, "1m"], [18, "30s"], [bucketCount - 1, "now"]];
       var xSvg = "";
       for (var m = 0; m < xMarks.length; m++) {
-        var x = (L + xMarks[m][0] * W / Math.max(1, bucketCount - 1)).toFixed(1);
-        xSvg += '<text class="chart-label" x="' + x + '" y="' + (B + 14) + '" text-anchor="middle">' + xMarks[m][1] + '</text>';
+        var xv = L + xMarks[m][0] * W / Math.max(1, bucketCount - 1);
+        var xAnchor = xv <= L + 10 ? "start" : xv >= R - 10 ? "end" : "middle";
+        xSvg += '<text class="chart-label" x="' + xv.toFixed(1) + '" y="' + (B + 14) + '" text-anchor="' + xAnchor + '">' + xMarks[m][1] + '</text>';
       }
       var series = [
         { b: downstreamBuckets, lc: "chart-line-downstream", ac: "chart-area-downstream", label: "Downstream", color: "#a78bfa" },
@@ -1208,6 +1428,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       const allEvents = Array.isArray(data.events) ? data.events : [];
       const managementServers = Array.isArray(data.managementServers) ? data.managementServers : servers;
       if (!selectedServerName && servers.length > 0) selectedServerName = servers[0].name;
+      serverStatsMap = {};
+      if (data.metrics && Array.isArray(data.metrics.servers)) {
+        for (const stat of data.metrics.servers) serverStatsMap[stat.server] = stat;
+      }
+      renderSavingsHero(data.metrics);
       renderHealthStrip(status, servers);
       updateServerFilterOptions(servers);
       document.getElementById("summary").innerHTML = [
@@ -1230,7 +1455,11 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         const totalTools = server.totalTools ?? toolCount;
         const latency = server.connectDurationMs === undefined ? "" : server.connectDurationMs + "ms";
         const selected = server.name === selectedServerName ? " selected" : "";
-        return '<tr class="server-row' + selected + '" data-server="' + esc(server.name) + '">' + cell(esc(server.name), "", "Server") + cell(esc(server.state), stateClass, "State") + cell(esc(server.transport), "", "Transport") + cell(esc(toolCount + "/" + totalTools), "", "Tools") + cell(esc(latency), "", "Latency") + "</tr>";
+        const stat = serverStatsMap[server.name];
+        const callsText = stat ? formatNum(stat.calls) : "0";
+        const errorsText = stat ? formatNum(stat.errors) : "0";
+        const errorsClass = stat && stat.errors > 0 ? "bad" : "muted";
+        return '<tr class="server-row' + selected + '" data-server="' + esc(server.name) + '">' + cell(esc(server.name), "", "Server") + cell(esc(server.state), stateClass, "State") + cell(esc(server.transport), "", "Transport") + cell(esc(toolCount + "/" + totalTools), "", "Tools") + cell(esc(callsText), "", "Calls") + cell(esc(errorsText), errorsClass, "Errors") + cell(esc(latency), "", "Latency") + "</tr>";
       }).join("");
       document.querySelectorAll("tr.server-row").forEach(row => {
         row.addEventListener("click", () => {
@@ -1323,6 +1552,17 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         try { localStorage.setItem("callmux-dashboard-theme", theme); } catch {}
       });
     })();
+    document.querySelectorAll("#range-buttons [data-range]").forEach(button => {
+      button.classList.toggle("active", button.dataset.range === metricsRange);
+      button.addEventListener("click", () => {
+        metricsRange = button.dataset.range;
+        saveRange(metricsRange);
+        document.querySelectorAll("#range-buttons [data-range]").forEach(b => b.classList.toggle("active", b.dataset.range === metricsRange));
+        loadSeries();
+      });
+    });
+    // Refresh the historic charts periodically while the diagrams view is open.
+    setInterval(() => { if (currentView === "diagrams") loadSeries(); }, 15000);
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
       if (res.ok) renderWhenSelectionAllows(await res.json());
