@@ -58,6 +58,8 @@ import type { ServerConfig, StdioServerConfig } from "./types.js";
 import { META_TOOLS } from "./meta-tools.js";
 import { errorResult } from "./results.js";
 import { formatToolText } from "./output-format.js";
+import { VERSION } from "./version.js";
+import { OidcJwtVerifier } from "./oidc.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
@@ -5667,6 +5669,184 @@ test("loadConfig parses oidc_jwt auth config", async () => {
   }
 });
 
+test("loadConfig rejects oidc_jwt jwksUri over plaintext http", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-jwks-http-"));
+  const configPath = join(dir, "config.json");
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        auth: {
+          mode: "oidc_jwt",
+          issuer: "https://id.example.com",
+          audience: "callmux",
+          jwksUri: "http://id.example.com/jwks.json",
+        },
+      })
+    );
+    await assert.rejects(loadConfig(configPath), /jwksUri must use https/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig allows insecure jwksUri for localhost and via explicit override", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-jwks-local-"));
+  try {
+    const localhostPath = join(dir, "localhost.json");
+    await writeFile(
+      localhostPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        auth: {
+          mode: "oidc_jwt",
+          issuer: "https://id.example.com",
+          audience: "callmux",
+          jwksUri: "http://localhost:8080/jwks.json",
+        },
+      })
+    );
+    const localhostConfig = await loadConfig(localhostPath);
+    assert.equal(localhostConfig.auth?.mode, "oidc_jwt");
+
+    const overridePath = join(dir, "override.json");
+    await writeFile(
+      overridePath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        auth: {
+          mode: "oidc_jwt",
+          issuer: "https://id.example.com",
+          audience: "callmux",
+          jwksUri: "http://internal.lan/jwks.json",
+          allowInsecureJwksUri: true,
+        },
+      })
+    );
+    const overrideConfig = await loadConfig(overridePath);
+    assert.equal(overrideConfig.auth?.mode, "oidc_jwt");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig resolves bearer tokenRef from a file: secret reference", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-secret-file-"));
+  try {
+    const secretPath = join(dir, "token.txt");
+    await writeFile(secretPath, "  s3cr3t-token\n");
+    const configPath = join(dir, "config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "ops", tokenRef: "file:token.txt" }],
+        },
+      })
+    );
+    const config = await loadConfig(configPath);
+    assert.equal(config.auth?.mode, "bearer");
+    // Plaintext tokenRef is hashed on load; the raw value must not leak.
+    const token = config.auth?.mode === "bearer" ? config.auth.tokens[0] : undefined;
+    assert.equal(token?.id, "ops");
+    assert.ok(token && "hash" in token && typeof token.hash === "string");
+    assert.ok(!JSON.stringify(config.auth).includes("s3cr3t-token"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig surfaces a clear error for a missing file: secret reference", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-secret-missing-"));
+  try {
+    const configPath = join(dir, "config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        auth: {
+          mode: "bearer",
+          tokens: [{ id: "ops", tokenRef: "file:does-not-exist.txt" }],
+        },
+      })
+    );
+    await assert.rejects(loadConfig(configPath), /could not read secret file/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("OidcJwtVerifier rejects an oversized JWKS response body", async () => {
+  const key = createJwtKeyPair("cap-key");
+  // Serve a multi-megabyte JWKS body that nonetheless contains the real key.
+  const filler = "x".repeat(2_000_000);
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ keys: [key.jwk], filler }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const verifier = new OidcJwtVerifier({
+      mode: "oidc_jwt",
+      issuer: "https://id.example.com",
+      audience: "callmux",
+      jwksUri: `http://127.0.0.1:${address.port}/jwks`,
+      algorithms: ["RS256"],
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const token = signJwtRs256(key, {
+      iss: "https://id.example.com",
+      aud: "callmux",
+      sub: "user-1",
+      iat: now,
+      exp: now + 600,
+    });
+    // The key is present, but the body exceeds the cap, so it can't be loaded.
+    assert.equal(await verifier.verify(token), undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("OidcJwtVerifier accepts a normal-sized JWKS response body", async () => {
+  const key = createJwtKeyPair("ok-key");
+  const jwks = await startJwksServer([key.jwk]);
+  try {
+    const verifier = new OidcJwtVerifier({
+      mode: "oidc_jwt",
+      issuer: "https://id.example.com",
+      audience: "callmux",
+      jwksUri: jwks.url,
+      algorithms: ["RS256"],
+    });
+    const now = Math.floor(Date.now() / 1000);
+    const token = signJwtRs256(key, {
+      iss: "https://id.example.com",
+      aud: "callmux",
+      sub: "user-1",
+      iat: now,
+      exp: now + 600,
+    });
+    const principal = await verifier.verify(token);
+    assert.ok(principal);
+  } finally {
+    await jwks.close();
+  }
+});
+
+test("VERSION matches package.json", async () => {
+  const pkg = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf-8")
+  ) as { version: string };
+  assert.equal(VERSION, pkg.version);
+  assert.match(VERSION, /^\d+\.\d+\.\d+/);
+});
+
 test("loadConfig parses authorization policy config", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-authz-"));
   const configPath = join(dir, "config.json");
@@ -8510,6 +8690,75 @@ test("listener management API requires management auth for mutations and persist
 
     const overlay = await loadManagementOverlay(statePath);
     assert.equal(overlay.servers?.alpha.config?.disabled, true);
+  } finally {
+    await listener?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener serializes concurrent management mutations without clobbering the overlay", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-management-race-"));
+  const statePath = join(dir, "overlay.json");
+  const baseConfig = {
+    servers: {
+      alpha: { command: "node", args: ["alpha.js"] },
+    },
+    management: {
+      enabled: true,
+      statePath,
+      auth: {
+        mode: "bearer" as const,
+        tokens: [{ id: "admin", token: "mgmt-secret" }],
+      },
+      allowUnauthenticatedRead: true,
+    },
+  };
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: baseConfig,
+      configPath: join(dir, "config.json"),
+      managementBaseConfig: baseConfig,
+      managementOverlay: { version: 1 },
+      upstream,
+      cache,
+      allTools: [],
+      maxConcurrency: 20,
+      onManagementConfigChange: async (nextConfig, _trigger, overlay) => {
+        listener!.applyReloadedState({
+          config: nextConfig,
+          upstream,
+          cache,
+          allTools: [],
+          maxConcurrency: 20,
+          managementBaseConfig: baseConfig,
+          managementOverlay: overlay ?? { version: 1 },
+        });
+      },
+    });
+    await listener.start();
+    const port = listenerPort(listener);
+
+    const client = new ManagementClient({
+      baseUrl: `http://127.0.0.1:${port}/management/v1`,
+      token: "mgmt-secret",
+    });
+
+    // Fire several adds concurrently. Without serialization, each handler
+    // reads the same base overlay and the last write wins, dropping the rest.
+    const names = ["beta", "gamma", "delta", "epsilon"];
+    await Promise.all(
+      names.map((name) => client.addServer(name, { command: "node", args: [`${name}.js`] }))
+    );
+
+    const overlay = await loadManagementOverlay(statePath);
+    const persisted = Object.keys(overlay.servers ?? {}).sort();
+    assert.deepEqual(persisted, [...names].sort());
   } finally {
     await listener?.close();
     await rm(dir, { recursive: true, force: true });

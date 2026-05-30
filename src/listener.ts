@@ -213,6 +213,8 @@ export class CallmuxListener {
   private managementConfig: NormalizedManagementConfig;
   private managementBaseConfig: CallmuxConfig;
   private managementOverlay: ManagementOverlay;
+  /** Serializes management mutations so concurrent add/patch/delete can't clobber each other's overlay write. */
+  private managementMutation: Promise<unknown> = Promise.resolve();
   private runtimeEvents: RuntimeEventStore;
   private activeToolCalls = new Map<string, ActiveToolCallEntry>();
   private unsubscribeToolSuiteChanges: (() => void) | undefined;
@@ -759,25 +761,44 @@ export class CallmuxListener {
       });
   }
 
-  private async managementAddServer(body: unknown): Promise<Record<string, unknown>> {
-    if (!isRecord(body) || typeof body.name !== "string" || body.name.trim().length === 0) {
-      throw new Error("name is required");
-    }
-    assertServerConfig(body.config, "config");
-    const dryRun = body.dryRun === true;
-    const nextOverlay = setOverlayServer(this.managementOverlay, body.name, body.config);
-    const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
-    if (dryRun) {
-      return { dryRun: true, action: "add_server", server: body.name, config: redactConfig(nextConfig) };
-    }
-    await this.commitManagementOverlay(nextOverlay, nextConfig, `management add ${body.name}`);
-    return { action: "added", server: body.name };
+  /**
+   * Run a management mutation in a serialized critical section so the
+   * read-overlay → compute-next → commit sequence is atomic across
+   * concurrent requests. The internal chain never rejects (so one failed
+   * mutation can't poison later ones); the real result/rejection is
+   * returned to the caller.
+   */
+  private withManagementLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.managementMutation.then(fn, fn);
+    this.managementMutation = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
   }
 
-  private async managementPatchServer(
+  private managementAddServer(body: unknown): Promise<Record<string, unknown>> {
+    return this.withManagementLock(async () => {
+      if (!isRecord(body) || typeof body.name !== "string" || body.name.trim().length === 0) {
+        throw new Error("name is required");
+      }
+      assertServerConfig(body.config, "config");
+      const dryRun = body.dryRun === true;
+      const nextOverlay = setOverlayServer(this.managementOverlay, body.name, body.config);
+      const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
+      if (dryRun) {
+        return { dryRun: true, action: "add_server", server: body.name, config: redactConfig(nextConfig) };
+      }
+      await this.commitManagementOverlay(nextOverlay, nextConfig, `management add ${body.name}`);
+      return { action: "added", server: body.name };
+    });
+  }
+
+  private managementPatchServer(
     name: string,
     body: unknown
   ): Promise<Record<string, unknown>> {
+    return this.withManagementLock(async () => {
     const current = this.options.config.servers[name];
     if (!current) throw new Error(`server "${name}" not found`);
     if (!isRecord(body)) throw new Error("request body must be an object");
@@ -814,20 +835,23 @@ export class CallmuxListener {
     }
     await this.commitManagementOverlay(nextOverlay, nextConfig, `management patch ${name}`);
     return { action: "updated", server: name };
+    });
   }
 
-  private async managementDeleteServer(
+  private managementDeleteServer(
     name: string,
     dryRun: boolean
   ): Promise<Record<string, unknown>> {
-    if (!this.options.config.servers[name]) throw new Error(`server "${name}" not found`);
-    const nextOverlay = deleteOverlayServer(this.managementOverlay, name);
-    const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
-    if (dryRun) {
-      return { dryRun: true, action: "delete_server", server: name, config: redactConfig(nextConfig) };
-    }
-    await this.commitManagementOverlay(nextOverlay, nextConfig, `management delete ${name}`);
-    return { action: "deleted", server: name };
+    return this.withManagementLock(async () => {
+      if (!this.options.config.servers[name]) throw new Error(`server "${name}" not found`);
+      const nextOverlay = deleteOverlayServer(this.managementOverlay, name);
+      const nextConfig = applyManagementOverlay(this.managementBaseConfig, nextOverlay);
+      if (dryRun) {
+        return { dryRun: true, action: "delete_server", server: name, config: redactConfig(nextConfig) };
+      }
+      await this.commitManagementOverlay(nextOverlay, nextConfig, `management delete ${name}`);
+      return { action: "deleted", server: name };
+    });
   }
 
   private async commitManagementOverlay(

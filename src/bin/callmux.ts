@@ -3,10 +3,10 @@
 import { watch, type FSWatcher } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallmuxBridge } from "../bridge.js";
 import { CallmuxProxy } from "../proxy.js";
+import { VERSION } from "../version.js";
 import { CallmuxListener } from "../listener.js";
 import {
   attachClaudeConfig,
@@ -1104,9 +1104,7 @@ async function main(): Promise<void> {
   }
 
   if (args.includes("--version") || args.includes("-v")) {
-    const pkgPath = resolve(fileURLToPath(import.meta.url), "../../../package.json");
-    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
-    console.log(pkg.version);
+    console.log(VERSION);
     process.exit(0);
   }
 

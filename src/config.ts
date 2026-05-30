@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { readFile, access, mkdir, writeFile } from "node:fs/promises";
 import { resolve, join, dirname, isAbsolute } from "node:path";
 import { homedir } from "node:os";
@@ -253,11 +252,11 @@ function parseAuthAllowUnauthenticatedHealth(
   return parseBooleanOption(value, `${optionName}.allowUnauthenticatedHealth`);
 }
 
-function resolveSecretRefValue(
+async function resolveSecretRefValue(
   ref: unknown,
   optionName: string,
   configBaseDir?: string
-): string {
+): Promise<string> {
   if (typeof ref !== "string" || ref.trim().length === 0) {
     throw new Error(`${optionName} must be a non-empty string`);
   }
@@ -282,7 +281,15 @@ function resolveSecretRefValue(
     const resolvedPath = configBaseDir
       ? resolve(configBaseDir, rawPath)
       : resolve(rawPath);
-    const value = readFileSync(resolvedPath, "utf-8").trim();
+    let raw: string;
+    try {
+      raw = await readFile(resolvedPath, "utf-8");
+    } catch (err) {
+      throw new Error(
+        `${optionName} could not read secret file "${resolvedPath}": ${(err as Error).message}`
+      );
+    }
+    const value = raw.trim();
     if (value.length === 0) {
       throw new Error(`${optionName} resolved to an empty value from file "${resolvedPath}"`);
     }
@@ -536,11 +543,11 @@ function parseDashboardConfig(
   };
 }
 
-function parseManagementConfig(
+async function parseManagementConfig(
   value: unknown,
   optionName: string,
   configBaseDir?: string
-): ManagementConfig | undefined {
+): Promise<ManagementConfig | undefined> {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
     throw new Error(`${optionName} must be an object`);
@@ -569,7 +576,7 @@ function parseManagementConfig(
     value.allowUnauthenticatedRead,
     `${optionName}.allowUnauthenticatedRead`
   );
-  const auth = parseAuthConfig(value.auth, `${optionName}.auth`, configBaseDir);
+  const auth = await parseAuthConfig(value.auth, `${optionName}.auth`, configBaseDir);
   if (auth && auth.mode !== "bearer") {
     throw new Error(`${optionName}.auth only supports bearer mode`);
   }
@@ -896,11 +903,11 @@ function parseRecipesConfig(
   );
 }
 
-function parseAuthConfig(
+async function parseAuthConfig(
   value: unknown,
   optionName: string,
   configBaseDir?: string
-): AuthConfig | undefined {
+): Promise<AuthConfig | undefined> {
   if (value === undefined) return undefined;
   if (!isRecord(value)) {
     throw new Error(`${optionName} must be an object`);
@@ -915,7 +922,8 @@ function parseAuthConfig(
       throw new Error(`${optionName}.tokens must contain at least one token`);
     }
 
-    const tokens = value.tokens.map((token, index): BearerAuthTokenConfig => {
+    const tokens = await Promise.all(
+      value.tokens.map(async (token, index): Promise<BearerAuthTokenConfig> => {
       if (!isRecord(token)) {
         throw new Error(`${optionName}.tokens[${index}] must be an object`);
       }
@@ -942,7 +950,7 @@ function parseAuthConfig(
       if (hasHash || hasHashRef) {
         const hashValue = hasHash
           ? token.hash
-          : resolveSecretRefValue(
+          : await resolveSecretRefValue(
               token.hashRef,
               `${optionName}.tokens[${index}].hashRef`,
               configBaseDir
@@ -965,7 +973,7 @@ function parseAuthConfig(
 
       const plaintextToken = hasToken
         ? token.token
-        : resolveSecretRefValue(
+        : await resolveSecretRefValue(
             token.tokenRef,
             `${optionName}.tokens[${index}].tokenRef`,
             configBaseDir
@@ -986,7 +994,8 @@ function parseAuthConfig(
         id: token.id,
         hash: hashBearerToken(plaintextToken),
       };
-    });
+    })
+    );
 
     const allowUnauthenticatedHealth = parseAuthAllowUnauthenticatedHealth(
       value.allowUnauthenticatedHealth,
@@ -1008,6 +1017,23 @@ function parseAuthConfig(
     }
     if (typeof value.jwksUri !== "string" || value.jwksUri.trim().length === 0) {
       throw new Error(`${optionName}.jwksUri must be a non-empty string`);
+    }
+    let jwksProtocol: string;
+    try {
+      jwksProtocol = new URL(value.jwksUri).protocol;
+    } catch {
+      throw new Error(`${optionName}.jwksUri must be a valid URL`);
+    }
+    if (jwksProtocol !== "https:") {
+      const allowInsecure =
+        value.allowInsecureJwksUri === true ||
+        new URL(value.jwksUri).hostname === "localhost" ||
+        new URL(value.jwksUri).hostname === "127.0.0.1";
+      if (!allowInsecure) {
+        throw new Error(
+          `${optionName}.jwksUri must use https:// (set "allowInsecureJwksUri": true to override for local/dev)`
+        );
+      }
     }
 
     const audience = (() => {
@@ -1195,15 +1221,15 @@ function parseServers(
   );
 }
 
-function parseConfigDocument(
+async function parseConfigDocument(
   parsed: Record<string, unknown>,
   sourcePath?: string
-): {
+): Promise<{
   config: CallmuxConfig;
   format: ConfigFormat;
-} {
+}> {
   const configBaseDir = sourcePath ? dirname(resolve(sourcePath)) : undefined;
-  const parseSharedFields = () => {
+  const parseSharedFields = async () => {
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
     const responseShield = parseResponseShieldConfig(
       parsed.responseShield,
@@ -1214,7 +1240,7 @@ function parseConfigDocument(
       parsed.schemaCompression,
       "schemaCompression"
     );
-    const auth = parseAuthConfig(parsed.auth, "auth", configBaseDir);
+    const auth = await parseAuthConfig(parsed.auth, "auth", configBaseDir);
     const authorization = parseAuthorizationConfig(
       parsed.authorization,
       "authorization"
@@ -1226,7 +1252,7 @@ function parseConfigDocument(
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
     const dashboard = parseDashboardConfig(parsed.dashboard, "dashboard");
-    const management = parseManagementConfig(
+    const management = await parseManagementConfig(
       parsed.management,
       "management",
       configBaseDir
@@ -1355,20 +1381,22 @@ function parseConfigDocument(
   };
 
   if (parsed.servers && typeof parsed.servers === "object") {
+    const sharedFields = await parseSharedFields();
     return {
       config: {
         servers: parseServers(parsed.servers, "servers"),
-        ...parseSharedFields(),
+        ...sharedFields,
       },
       format: "native",
     };
   }
 
   if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+    const sharedFields = await parseSharedFields();
     return {
       config: {
         servers: parseServers(parsed.mcpServers, "mcpServers"),
-        ...parseSharedFields(),
+        ...sharedFields,
       },
       format: "mcpCompatible",
     };
@@ -1428,7 +1456,7 @@ export async function loadConfig(configPath: string): Promise<CallmuxConfig> {
   const resolvedPath = resolve(configPath);
   const raw = await readFile(resolvedPath, "utf-8");
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return parseConfigDocument(parsed, resolvedPath).config;
+  return (await parseConfigDocument(parsed, resolvedPath)).config;
 }
 
 export async function loadConfigWithMetadata(configPath: string): Promise<{
@@ -1438,7 +1466,7 @@ export async function loadConfigWithMetadata(configPath: string): Promise<{
   const resolvedPath = resolve(configPath);
   const raw = await readFile(resolvedPath, "utf-8");
   const parsed = JSON.parse(raw) as Record<string, unknown>;
-  return parseConfigDocument(parsed, resolvedPath);
+  return await parseConfigDocument(parsed, resolvedPath);
 }
 
 export async function loadManagedConfig(

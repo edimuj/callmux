@@ -36,6 +36,7 @@ import {
   compressToolForExposure,
   schemaCompressionDiagnostics,
 } from "./schema-compression.js";
+import { VERSION } from "./version.js";
 
 export class CallmuxProxy {
   private server: Server;
@@ -108,7 +109,7 @@ export class CallmuxProxy {
     this.upstream.setInstanceIdentity(this.instanceIdentity);
 
     this.server = new Server(
-      { name: "callmux", version: "0.1.0" },
+      { name: "callmux", version: VERSION },
       { capabilities: { tools: {} } }
     );
 

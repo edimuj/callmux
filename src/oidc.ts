@@ -5,6 +5,8 @@ import type { AuthorizationPrincipal } from "./authorization.js";
 const DEFAULT_CLOCK_SKEW_SECONDS = 30;
 const DEFAULT_JWKS_CACHE_TTL_SECONDS = 300;
 const DEFAULT_JWKS_FETCH_TIMEOUT_MS = 5000;
+/** Cap the JWKS response body so a hostile/compromised provider can't OOM us. */
+const MAX_JWKS_BYTES = 1_000_000;
 const DEFAULT_UNKNOWN_KID_TTL_MS = 10_000;
 const DEFAULT_FORCED_REFRESH_INTERVAL_MS = 10_000;
 
@@ -273,7 +275,18 @@ export class OidcJwtVerifier {
       });
       if (!response.ok) return undefined;
 
-      const body = await response.json();
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_JWKS_BYTES) {
+        return undefined;
+      }
+      const text = await response.text();
+      if (text.length > MAX_JWKS_BYTES) return undefined;
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return undefined;
+      }
       if (!isRecord(body) || !Array.isArray(body.keys)) return undefined;
 
       const keysByKid = new Map<string, Record<string, unknown>>();
