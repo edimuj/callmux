@@ -1,8 +1,17 @@
 import {
   randomBytes,
+  scrypt,
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
+import { promisify } from "node:util";
+
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: Buffer,
+  keylen: number,
+  options: { N: number; r: number; p: number; maxmem: number }
+) => Promise<Buffer>;
 import type {
   BearerAuthConfig,
   BearerAuthTokenConfig,
@@ -44,6 +53,20 @@ function deriveScryptKey(
   // Node rejects scrypt parameters when maxmem is too low.
   const maxmem = 256 * N * r + 1024 * 1024;
   return scryptSync(token, salt, keyLength, { N, r, p, maxmem });
+}
+
+async function deriveScryptKeyAsync(
+  token: string,
+  salt: Buffer,
+  N: number,
+  r: number,
+  p: number,
+  keyLength: number
+): Promise<Buffer> {
+  // Run on the libuv threadpool so per-request verification doesn't block
+  // the event loop (scrypt at N=16384 is ~50-100ms of CPU).
+  const maxmem = 256 * N * r + 1024 * 1024;
+  return scryptAsync(token, salt, keyLength, { N, r, p, maxmem });
 }
 
 export function parseScryptTokenHash(
@@ -103,13 +126,16 @@ export function hashBearerToken(token: string): string {
   ].join("$");
 }
 
-function verifyBearerTokenHash(token: string, serializedHash: string): boolean {
+async function verifyBearerTokenHash(
+  token: string,
+  serializedHash: string
+): Promise<boolean> {
   const parsed = parseScryptTokenHash(serializedHash);
   if (!parsed) return false;
 
   let candidateKey: Buffer;
   try {
-    candidateKey = deriveScryptKey(
+    candidateKey = await deriveScryptKeyAsync(
       token,
       parsed.salt,
       parsed.N,
@@ -130,10 +156,10 @@ export function isPlaintextBearerTokenConfig(
   return "token" in token;
 }
 
-function verifyBearerToken(
+async function verifyBearerToken(
   token: string,
   configuredToken: BearerAuthTokenConfig
-): boolean {
+): Promise<boolean> {
   if ("hash" in configuredToken) {
     return verifyBearerTokenHash(token, configuredToken.hash);
   }
@@ -146,12 +172,12 @@ function verifyBearerToken(
   return constantTimeBufferEquals(left, right);
 }
 
-export function authenticateBearerToken(
+export async function authenticateBearerToken(
   token: string,
   config: BearerAuthConfig
-): AuthorizationPrincipal | undefined {
+): Promise<AuthorizationPrincipal | undefined> {
   for (const candidate of config.tokens) {
-    if (!verifyBearerToken(token, candidate)) {
+    if (!(await verifyBearerToken(token, candidate))) {
       continue;
     }
 

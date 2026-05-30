@@ -122,6 +122,8 @@ export class CallCache {
   private ttlMs: number;
   private maxEntries: number;
   private pruneIntervalMs: number;
+  private hits = 0;
+  private misses = 0;
   private nextPruneAt = 0;
   private globalPolicy?: CachePolicyConfig;
   private serverPolicies: Map<string, CachePolicyConfig>;
@@ -242,14 +244,19 @@ export class CallCache {
 
     const key = this.key(tool, args, effectiveServer, scope);
     const entry = this.entries.get(key);
-    if (!entry) return null;
+    if (!entry) {
+      this.misses++;
+      return null;
+    }
     if (now > entry.expiresAt) {
       this.entries.delete(key);
+      this.misses++;
       return null;
     }
 
     this.entries.delete(key);
     this.entries.set(key, entry);
+    this.hits++;
     return entry.result;
   }
 
@@ -309,13 +316,25 @@ export class CallCache {
     return this.ttlMs / 1000;
   }
 
-  stats(): { entries: number; ttlSeconds: number; enabled: boolean; maxEntries: number } {
+  stats(): {
+    entries: number;
+    ttlSeconds: number;
+    enabled: boolean;
+    maxEntries: number;
+    hits: number;
+    misses: number;
+    hitRate: number;
+  } {
     this.pruneExpired();
+    const lookups = this.hits + this.misses;
     return {
       entries: this.entries.size,
       ttlSeconds: this.ttlMs / 1000,
       enabled: this.ttlMs > 0,
       maxEntries: this.maxEntries,
+      hits: this.hits,
+      misses: this.misses,
+      hitRate: lookups > 0 ? this.hits / lookups : 0,
     };
   }
 }

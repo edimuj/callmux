@@ -322,6 +322,20 @@ test("CallCache evicts least-recently-used entries beyond max size", () => {
   assert.equal(cache.stats().maxEntries, 2);
 });
 
+test("CallCache tracks hit/miss counters and hit rate", () => {
+  const cache = new CallCache(60);
+  cache.set("get_item", { id: 1 }, textResult("one"));
+
+  assert.deepEqual(cache.get("get_item", { id: 1 }), textResult("one")); // hit
+  assert.equal(cache.get("get_item", { id: 2 }), null); // miss
+  assert.equal(cache.get("get_item", { id: 3 }), null); // miss
+
+  const stats = cache.stats();
+  assert.equal(stats.hits, 1);
+  assert.equal(stats.misses, 2);
+  assert.ok(Math.abs(stats.hitRate - 1 / 3) < 1e-9);
+});
+
 test("CallCache respects explicit allow and deny policies", () => {
   const cache = new CallCache(
     60,

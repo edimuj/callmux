@@ -620,7 +620,7 @@ export class CallmuxListener {
   ): Promise<void> {
     const method = (req.method ?? "GET").toUpperCase();
     const write = method !== "GET";
-    if (!this.authenticateManagementRequest(req, context, write)) {
+    if (!(await this.authenticateManagementRequest(req, context, write))) {
       this.writeJson(res, write ? 401 : 403, context, {
         error: write
           ? "Management auth is required for mutations"
@@ -701,15 +701,15 @@ export class CallmuxListener {
     }
   }
 
-  private authenticateManagementRequest(
+  private async authenticateManagementRequest(
     req: IncomingMessage,
     context: RequestContext,
     write: boolean
-  ): boolean {
+  ): Promise<boolean> {
     const auth = this.managementConfig.auth;
     if (auth) {
       const token = this.extractManagementBearerToken(req);
-      if (token && authenticateBearerToken(token, auth)) return true;
+      if (token && (await authenticateBearerToken(token, auth))) return true;
       return !write && this.managementConfig.allowUnauthenticatedRead;
     }
     if (write) return false;
@@ -2173,7 +2173,7 @@ export class CallmuxListener {
     if (!token) return null;
 
     if (auth.mode === "bearer") {
-      return authenticateBearerToken(token, auth) ?? null;
+      return (await authenticateBearerToken(token, auth)) ?? null;
     }
 
     if (!this.oidcVerifier) return null;
