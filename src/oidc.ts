@@ -8,6 +8,8 @@ const DEFAULT_JWKS_FETCH_TIMEOUT_MS = 5000;
 /** Cap the JWKS response body so a hostile/compromised provider can't OOM us. */
 const MAX_JWKS_BYTES = 1_000_000;
 const DEFAULT_UNKNOWN_KID_TTL_MS = 10_000;
+/** Bound the negative-kid cache so a flood of unique kids can't grow the heap. */
+const MAX_UNKNOWN_KID_ENTRIES = 1000;
 const DEFAULT_FORCED_REFRESH_INTERVAL_MS = 10_000;
 
 const ALGORITHM_TO_VERIFY_HASH: Record<string, string> = {
@@ -166,6 +168,10 @@ export class OidcJwtVerifier {
 
     const refreshedJwk = await this.getJwkByKid(kid, true);
     if (!refreshedJwk) {
+      if (this.unknownKidCache.size >= MAX_UNKNOWN_KID_ENTRIES) {
+        const oldest = this.unknownKidCache.keys().next().value;
+        if (oldest !== undefined) this.unknownKidCache.delete(oldest);
+      }
       this.unknownKidCache.set(kid, Date.now() + DEFAULT_UNKNOWN_KID_TTL_MS);
       return undefined;
     }

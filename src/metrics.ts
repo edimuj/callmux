@@ -34,7 +34,14 @@ function formatLabels(labels: Record<string, string>): string {
   if (entries.length === 0) return "";
   const pairs = entries
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}="${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+    .map(
+      ([key, value]) =>
+        `${key}="${value
+          .replace(/\\/g, "\\\\")
+          .replace(/"/g, '\\"')
+          .replace(/\n/g, "\\n")
+          .replace(/\r/g, "\\r")}"`
+    );
   return `{${pairs.join(",")}}`;
 }
 

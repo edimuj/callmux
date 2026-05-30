@@ -189,6 +189,7 @@ export class AbuseController {
   private principalRates = new Map<string, RateState>();
   private principalInflight = new Map<string, number>();
   private allowlist: ParsedCidr[] | undefined;
+  private acquireCount = 0;
 
   constructor(config: AbuseControlsConfig) {
     this.config = config;
@@ -207,10 +208,12 @@ export class AbuseController {
     options: AcquireOptions = {}
   ): { result: AbuseLimitResult; lease?: AbuseLease } {
     const now = Date.now();
+    this.maybePrune(now);
     const principalKey = principalRateKey(principal);
     const includeGlobalRate = options.includeGlobalRate ?? true;
     const includePrincipalLimits = options.includePrincipalLimits ?? true;
 
+    let globalConsumed = false;
     const globalLimit = this.config.globalRequestsPerMinute;
     if (includeGlobalRate && globalLimit && globalLimit > 0) {
       const result = this.consumeRate(
@@ -222,8 +225,10 @@ export class AbuseController {
       if (!result.allowed) {
         return { result };
       }
+      globalConsumed = true;
     }
 
+    let principalConsumed = false;
     const principalLimit = this.config.principalRequestsPerMinute;
     if (includePrincipalLimits && principalLimit && principalLimit > 0) {
       const result = this.consumeRate(
@@ -233,14 +238,21 @@ export class AbuseController {
         now
       );
       if (!result.allowed) {
+        // The request never ran — give back the global slot so a single
+        // principal hitting its own limit can't drain the global budget.
+        if (globalConsumed) this.refundRate(this.globalRates, "global");
         return { result };
       }
+      principalConsumed = true;
     }
 
     const inFlightLimit = this.config.principalMaxInFlight;
     if (includePrincipalLimits && inFlightLimit && inFlightLimit > 0) {
       const current = this.principalInflight.get(principalKey) ?? 0;
       if (current >= inFlightLimit) {
+        // Rejected before running — return the consumed rate slots.
+        if (globalConsumed) this.refundRate(this.globalRates, "global");
+        if (principalConsumed) this.refundRate(this.principalRates, principalKey);
         return {
           result: {
             allowed: false,
@@ -300,5 +312,30 @@ export class AbuseController {
     existing.count += 1;
     rates.set(key, existing);
     return { allowed: true, code: "ok", reason: "Allowed" };
+  }
+
+  private refundRate(rates: Map<string, RateState>, key: string): void {
+    const existing = rates.get(key);
+    if (existing && existing.count > 0) existing.count -= 1;
+  }
+
+  /**
+   * Periodically drop rate-window entries that have fully expired, so a
+   * stream of unique principal keys can't grow the maps without bound.
+   * Runs every 1000 acquires — cheap, no timers to leak in tests/shutdown.
+   */
+  private maybePrune(nowMs: number): void {
+    this.acquireCount += 1;
+    if (this.acquireCount % 1000 !== 0) return;
+    for (const [key, state] of this.globalRates) {
+      if (nowMs - state.windowStartMs >= RATE_LIMIT_WINDOW_MS) {
+        this.globalRates.delete(key);
+      }
+    }
+    for (const [key, state] of this.principalRates) {
+      if (nowMs - state.windowStartMs >= RATE_LIMIT_WINDOW_MS) {
+        this.principalRates.delete(key);
+      }
+    }
   }
 }

@@ -60,6 +60,8 @@ import { errorResult } from "./results.js";
 import { formatToolText } from "./output-format.js";
 import { VERSION } from "./version.js";
 import { OidcJwtVerifier } from "./oidc.js";
+import { AbuseController } from "./abuse.js";
+import { PrometheusMetrics } from "./metrics.js";
 import { formatCommandForDisplay, redactUrl } from "./redact.js";
 import { hashBearerToken } from "./auth.js";
 import { evaluateToolAuthorization } from "./authorization.js";
@@ -5875,6 +5877,43 @@ test("OidcJwtVerifier accepts a normal-sized JWKS response body", async () => {
   } finally {
     await jwks.close();
   }
+});
+
+test("AbuseController refunds the global slot when a principal-rate check denies", () => {
+  const controller = new AbuseController({
+    globalRequestsPerMinute: 2,
+    principalRequestsPerMinute: 1,
+  });
+  const principal = (id: string) => ({
+    kind: "bearer" as const,
+    id,
+    scopes: [],
+    groups: [],
+  });
+
+  // A consumes 1 global + 1 principal.
+  assert.equal(controller.acquire(principal("a")).result.allowed, true);
+  // A again: denied by its own per-principal limit; global must be refunded.
+  assert.equal(controller.acquire(principal("a")).result.allowed, false);
+  // With the refund, B and C should still fit the global budget of 2.
+  assert.equal(controller.acquire(principal("b")).result.allowed, true);
+  // Now global is genuinely exhausted (a + b = 2).
+  assert.equal(controller.acquire(principal("c")).result.code, "abuse_rate_limit");
+});
+
+test("PrometheusMetrics escapes newlines in label values", () => {
+  const metrics = new PrometheusMetrics({ enabled: true });
+  metrics.onRequestStart();
+  metrics.onRequestComplete({
+    method: "GET",
+    path: "/foo\ninjected_metric 1",
+    status: 200,
+    durationMs: 5,
+  });
+  const text = metrics.renderPrometheusText();
+  // The injected newline must be escaped so it can't forge a metric line.
+  assert.ok(!text.includes("\ninjected_metric 1"));
+  assert.ok(text.includes("\\ninjected_metric 1"));
 });
 
 test("VERSION matches package.json", async () => {
