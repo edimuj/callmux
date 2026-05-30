@@ -902,7 +902,13 @@ export class CallmuxListener {
     const base = this.dashboardConfig.path;
     if (this.isDashboardBasePath(path, base)) {
       const html = renderDashboardHtml(this.dashboardConfig);
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      // The dashboard ships as a single self-contained HTML doc that changes
+      // on every release. Without this, browsers heuristically cache it and
+      // users keep seeing the old UI after an upgrade until a manual purge.
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+      });
       res.end(html);
       return;
     }
