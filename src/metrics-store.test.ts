@@ -88,10 +88,12 @@ test("1h series buckets by minute and pads gaps with zeros", () => {
 });
 
 test("today and yesterday windows use the five-minute tier and split at local midnight", () => {
-  const now = Date.now();
-  const store = new MetricsStore(now);
-  const midnight = new Date(now);
+  // Anchor "now" at local noon so the in-window instants stay in the past
+  // regardless of the wall-clock hour the test actually runs at.
+  const midnight = new Date();
   midnight.setHours(0, 0, 0, 0);
+  const now = midnight.getTime() + 12 * 60 * 60_000; // noon today
+  const store = new MetricsStore(now);
   const todayInstant = midnight.getTime() + 60 * 60_000; // 1am today
   const yesterdayInstant = midnight.getTime() - 60 * 60_000; // 11pm yesterday
 

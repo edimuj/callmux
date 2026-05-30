@@ -410,7 +410,7 @@ function validateParallelArgs(
 
 function validateBatchArgs(
   args: unknown
-): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number; cwd?: string } | CallToolResult {
+): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number; cwd?: string; autoWrappedItems?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.items)) {
     return errorResult("invalid_arguments", `"items" must be an array`, {
       field: "items",
@@ -429,6 +429,7 @@ function validateBatchArgs(
   if (cwd !== undefined && typeof cwd !== "string") return cwd;
 
   const items: BatchItem[] = [];
+  let autoWrappedItems = 0;
   for (let index = 0; index < args.items.length; index++) {
     const item = args.items[index];
     if (!isRecord(item)) {
@@ -437,7 +438,22 @@ function validateBatchArgs(
       });
     }
 
-    const parsedArgs = validateArgumentsObject(item.arguments, `items[${index}].arguments`);
+    // Auto-wrap a flat argument object that is missing the {arguments} wrapper.
+    // The common mental model is "a list of arg objects" — when an agent passes
+    // items: [{foo, bar}] instead of items: [{arguments: {foo, bar}}], lift every
+    // key except the reserved per-item keys (cwd, timeoutMs) into `arguments`.
+    let argumentsSource: unknown = item.arguments;
+    if (!("arguments" in item)) {
+      const wrapped: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(item)) {
+        if (key === "cwd" || key === "timeoutMs") continue;
+        wrapped[key] = value;
+      }
+      argumentsSource = wrapped;
+      autoWrappedItems++;
+    }
+
+    const parsedArgs = validateArgumentsObject(argumentsSource, `items[${index}].arguments`);
     if (!parsedArgs || !isRecord(parsedArgs)) {
       return parsedArgs ?? errorResult(
         "invalid_arguments",
@@ -464,6 +480,7 @@ function validateBatchArgs(
   return {
     tool,
     items,
+    ...(autoWrappedItems > 0 ? { autoWrappedItems } : {}),
     ...(typeof server === "string" ? { server } : {}),
     ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
     ...(typeof cwd === "string" ? { cwd } : {}),
@@ -1021,7 +1038,7 @@ export async function handleBatch(
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
-  const { server, tool, items, timeoutMs, cwd } = parsedArgs;
+  const { server, tool, items, timeoutMs, cwd, autoWrappedItems } = parsedArgs;
 
   const serverForLimit = resolveServerForConcurrency(upstream, tool, server);
   const serverLimit = serverForLimit
@@ -1096,6 +1113,18 @@ export async function handleBatch(
     succeeded,
     failed,
     failedIndexes,
+    ...(autoWrappedItems
+      ? {
+          warnings: [
+            {
+              code: "auto_wrapped_flat_items",
+              message: `Auto-wrapped ${autoWrappedItems} flat item${autoWrappedItems === 1 ? "" : "s"} into the {arguments} shape.`,
+              recommendation:
+                "Canonical shape is items: [{ arguments: {...} }]. Reserved per-item keys (cwd, timeoutMs) stay outside arguments.",
+            },
+          ],
+        }
+      : {}),
   };
 
   return successResult(output as unknown as Record<string, unknown>, outputFormat);

@@ -6950,6 +6950,99 @@ test("batch with all items succeeding reports zero failures", async () => {
   assert.deepEqual(content.failedIndexes, []);
 });
 
+test("batch auto-wraps flat items missing the {arguments} wrapper", async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      seen.push(args ?? {});
+      return textResult("ok");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "write_node",
+    items: [
+      { story: "s1", nodeId: "n1", messages: ["a"] },
+      { story: "s2", nodeId: "n2", messages: ["b"] },
+    ],
+  }, 4);
+
+  const content = result.structuredContent as {
+    status: string;
+    succeeded: number;
+    warnings?: Array<{ code: string; message: string }>;
+  };
+
+  // Both items executed with their flat keys lifted into arguments.
+  assert.equal(content.status, "completed");
+  assert.equal(content.succeeded, 2);
+  assert.deepEqual(seen, [
+    { story: "s1", nodeId: "n1", messages: ["a"] },
+    { story: "s2", nodeId: "n2", messages: ["b"] },
+  ]);
+
+  // A one-line warning teaches the canonical shape.
+  assert.ok(content.warnings?.some((w) => w.code === "auto_wrapped_flat_items"));
+});
+
+test("batch auto-wrap keeps reserved cwd/timeoutMs at the item level", async () => {
+  let seenArgs: Record<string, unknown> | undefined;
+  let seenCwd: string | undefined;
+  const upstream = {
+    async callTool(
+      _tool: string,
+      args?: Record<string, unknown>,
+      _server?: string,
+      ctx?: { cwd?: string },
+    ) {
+      seenArgs = args;
+      seenCwd = ctx?.cwd;
+      return textResult("ok");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "run_thing",
+    items: [
+      { path: "/tmp/x", flag: true, cwd: "/repo", timeoutMs: 5000 },
+    ],
+  }, 1);
+
+  const content = result.structuredContent as { status: string };
+  assert.equal(content.status, "completed");
+  // cwd/timeoutMs are stripped from arguments and honored as per-item overrides.
+  assert.deepEqual(seenArgs, { path: "/tmp/x", flag: true });
+  assert.equal(seenCwd, "/repo");
+});
+
+test("batch does not auto-wrap items that already have an arguments key", async () => {
+  let seenArgs: Record<string, unknown> | undefined;
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      seenArgs = args;
+      return textResult("ok");
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "write_node",
+    items: [
+      { arguments: { id: 1 } },
+    ],
+  }, 1);
+
+  const content = result.structuredContent as {
+    status: string;
+    warnings?: Array<{ code: string }>;
+  };
+  assert.equal(content.status, "completed");
+  assert.deepEqual(seenArgs, { id: 1 });
+  assert.ok(!content.warnings?.some((w) => w.code === "auto_wrapped_flat_items"));
+});
+
 // ─── handleCall with server hints and qualified names ─────────
 
 test("handleCall resolves tool with explicit server hint", async () => {
