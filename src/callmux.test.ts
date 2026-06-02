@@ -3386,7 +3386,11 @@ test("UpstreamManager returns structured error when $file path is missing", asyn
   );
 });
 
-test("UpstreamManager rejects a file reference passed as a JSON string", async () => {
+test("UpstreamManager resolves a file reference coerced to a JSON string", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-stringified-ref-"));
+  const bodyPath = join(dir, "body.md");
+  await writeFile(bodyPath, "# Real Body\n\nResolved from a stringified ref.\n");
+
   const upstream = new UpstreamManager() as unknown as {
     clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
     toolMap: Map<string, { server: string; tool: { name: string } }>;
@@ -3403,32 +3407,29 @@ test("UpstreamManager rejects a file reference passed as a JSON string", async (
   ]);
   upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
 
-  // A ref accidentally JSON-encoded as a string must fail loudly, not be
-  // forwarded verbatim and silently stored as literal text.
-  const result = await upstream.callTool("create_issue", {
-    body: JSON.stringify({ $file: "/tmp/whatever.md" }),
-  });
-  assert.equal(result.isError, true);
-  assert.equal(
-    (result.structuredContent as { error: { code: string } }).error.code,
-    "argument_resolution_failed"
-  );
-  assert.match(
-    (result.structuredContent as { error: { message: string } }).error.message,
-    /stringified file reference/i
-  );
-  assert.equal(forwarded, undefined);
+  try {
+    // The client stringifies a {$file} object onto a string-typed field; callmux
+    // must still resolve it to the file content, not forward the literal.
+    const result = await upstream.callTool("create_issue", {
+      body: JSON.stringify({ $file: bodyPath }),
+    });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(forwarded, { body: "# Real Body\n\nResolved from a stringified ref.\n" });
 
-  // A normal string that merely mentions "$file" or is non-ref JSON passes through.
-  const ok = await upstream.callTool("create_issue", {
-    title: "see the $file convention",
-    body: JSON.stringify({ $file: "/tmp/x", title: "keep me" }),
-  });
-  assert.equal(ok.isError, undefined);
-  assert.deepEqual(forwarded, {
-    title: "see the $file convention",
-    body: '{"$file":"/tmp/x","title":"keep me"}',
-  });
+    // A normal string that merely mentions "$file", or non-lone-ref JSON, is left alone.
+    forwarded = undefined;
+    const ok = await upstream.callTool("create_issue", {
+      title: "see the $file convention",
+      body: JSON.stringify({ $file: "/tmp/x", title: "keep me" }),
+    });
+    assert.equal(ok.isError, undefined);
+    assert.deepEqual(forwarded, {
+      title: "see the $file convention",
+      body: '{"$file":"/tmp/x","title":"keep me"}',
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("UpstreamManager enforces $file maxBytes with optional override", async () => {

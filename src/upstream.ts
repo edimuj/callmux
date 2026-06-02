@@ -1536,28 +1536,30 @@ export class UpstreamManager {
     }
   }
 
-  private assertNotStringifiedFileRef(value: string, path: string): void {
+  /**
+   * Detect a reference that arrived as a JSON-encoded string rather than an
+   * object. MCP clients coerce object values onto string-typed fields (e.g. an
+   * issue `body`) by JSON-stringifying them, so `{ "$file": "..." }` reaches us
+   * as the string `'{"$file":"..."}'`. Returns the parsed lone-ref object so it
+   * can be resolved normally, or undefined for ordinary strings.
+   */
+  private parseStringifiedFileRef(value: string): Record<string, unknown> | undefined {
     const trimmed = value.trim();
-    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return;
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return undefined;
     if (!Object.keys(FILE_REF_ALLOWED_KEYS).some((key) => trimmed.includes(`"${key}"`))) {
-      return;
+      return undefined;
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(trimmed);
     } catch {
-      return; // not valid JSON — an ordinary string that happens to contain braces
+      return undefined; // not valid JSON — an ordinary string that contains braces
     }
-    if (!isPlainObject(parsed)) return;
+    if (!isPlainObject(parsed)) return undefined;
     const keys = Object.keys(parsed);
     const refKey = Object.keys(FILE_REF_ALLOWED_KEYS).find((key) => key in parsed);
-    if (!refKey) return;
-    if (keys.every((key) => FILE_REF_ALLOWED_KEYS[refKey].has(key))) {
-      throw new Error(
-        `argument at ${path} is a stringified file reference; pass { "${refKey}": ... } ` +
-          `as an object value, not a JSON-encoded string`
-      );
-    }
+    if (!refKey) return undefined;
+    return keys.every((key) => FILE_REF_ALLOWED_KEYS[refKey].has(key)) ? parsed : undefined;
   }
 
   private async resolveFileReferences(
@@ -1571,10 +1573,11 @@ export class UpstreamManager {
     }
 
     if (typeof value === "string") {
-      // A ref ({ "$file": "..." }) passed as a JSON *string* instead of an
-      // object would otherwise be forwarded verbatim and silently stored as
-      // literal text. Catch that and fail loudly with a fix hint.
-      this.assertNotStringifiedFileRef(value, path);
+      // A ref ({ "$file": "..." }) coerced to a JSON *string* by the client (the
+      // usual fate on string-typed fields like an issue body). Resolve it as if
+      // it had arrived as an object, so $file works on string fields too.
+      const stringifiedRef = this.parseStringifiedFileRef(value);
+      if (stringifiedRef) return this.resolveFileReferences(stringifiedRef, path);
       return value;
     }
 

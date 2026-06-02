@@ -368,7 +368,7 @@ Optional `maxBytes` override per reference:
 - `maxBytes` defaults to `1000000` (1 MB) when omitted
 - Hard cap for `maxBytes` is `10000000` (10 MB)
 
-> **Pass the reference as an object, not a JSON string.** `{ "body": { "$file": "..." } }` resolves; `{ "body": "{\"$file\": \"...\"}" }` (a JSON-encoded string) does not — callmux now rejects that with a clear error instead of silently forwarding the literal text. This matters most for fields whose schema types the value as `string` (e.g. an issue `body`), which can nudge a caller toward stringifying.
+> **Works on string-typed fields too.** Prefer the object form `{ "body": { "$file": "..." } }`. But when a field's schema types the value as `string` (e.g. an issue `body`), the MCP client may coerce the object into a JSON string (`"{\"$file\": \"...\"}"`) before callmux sees it. callmux detects a lone-ref string and resolves it the same way, so `$file`/`$jsonFile`/`$yamlFile`/`$text` work on string fields as well. A normal string that merely contains `$file`, or JSON with other keys alongside the ref, is left untouched.
 
 ### `$jsonFile` / `$yamlFile` - Parsed file content
 
