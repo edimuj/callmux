@@ -3386,6 +3386,51 @@ test("UpstreamManager returns structured error when $file path is missing", asyn
   );
 });
 
+test("UpstreamManager rejects a file reference passed as a JSON string", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let forwarded: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    ["github", { async callTool(params) { forwarded = params.arguments; return textResult("ok"); } }],
+  ]);
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  // A ref accidentally JSON-encoded as a string must fail loudly, not be
+  // forwarded verbatim and silently stored as literal text.
+  const result = await upstream.callTool("create_issue", {
+    body: JSON.stringify({ $file: "/tmp/whatever.md" }),
+  });
+  assert.equal(result.isError, true);
+  assert.equal(
+    (result.structuredContent as { error: { code: string } }).error.code,
+    "argument_resolution_failed"
+  );
+  assert.match(
+    (result.structuredContent as { error: { message: string } }).error.message,
+    /stringified file reference/i
+  );
+  assert.equal(forwarded, undefined);
+
+  // A normal string that merely mentions "$file" or is non-ref JSON passes through.
+  const ok = await upstream.callTool("create_issue", {
+    title: "see the $file convention",
+    body: JSON.stringify({ $file: "/tmp/x", title: "keep me" }),
+  });
+  assert.equal(ok.isError, undefined);
+  assert.deepEqual(forwarded, {
+    title: "see the $file convention",
+    body: '{"$file":"/tmp/x","title":"keep me"}',
+  });
+});
+
 test("UpstreamManager enforces $file maxBytes with optional override", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-file-ref-max-"));
   const bodyPath = join(dir, "big.md");

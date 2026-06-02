@@ -28,6 +28,14 @@ const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS = 600;
 const DEFAULT_FILE_REF_MAX_BYTES = 1_000_000; // 1 MB
 const HARD_FILE_REF_MAX_BYTES = 10_000_000; // 10 MB
+// Reference keys and their permitted companion keys. Used both to resolve refs
+// and to detect a ref accidentally passed as a JSON-encoded string.
+const FILE_REF_ALLOWED_KEYS: Record<string, ReadonlySet<string>> = {
+  $file: new Set(["$file", "maxBytes"]),
+  $jsonFile: new Set(["$jsonFile", "maxBytes"]),
+  $yamlFile: new Set(["$yamlFile", "maxBytes"]),
+  $text: new Set(["$text"]),
+};
 const RECONNECT_INITIAL_DELAY_MS = 250;
 const RECONNECT_MAX_DELAY_MS = 10_000;
 const RECONNECT_JITTER_RATIO = 0.2;
@@ -1528,6 +1536,30 @@ export class UpstreamManager {
     }
   }
 
+  private assertNotStringifiedFileRef(value: string, path: string): void {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return;
+    if (!Object.keys(FILE_REF_ALLOWED_KEYS).some((key) => trimmed.includes(`"${key}"`))) {
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return; // not valid JSON — an ordinary string that happens to contain braces
+    }
+    if (!isPlainObject(parsed)) return;
+    const keys = Object.keys(parsed);
+    const refKey = Object.keys(FILE_REF_ALLOWED_KEYS).find((key) => key in parsed);
+    if (!refKey) return;
+    if (keys.every((key) => FILE_REF_ALLOWED_KEYS[refKey].has(key))) {
+      throw new Error(
+        `argument at ${path} is a stringified file reference; pass { "${refKey}": ... } ` +
+          `as an object value, not a JSON-encoded string`
+      );
+    }
+  }
+
   private async resolveFileReferences(
     value: unknown,
     path: string
@@ -1536,6 +1568,14 @@ export class UpstreamManager {
       return Promise.all(
         value.map((item, index) => this.resolveFileReferences(item, `${path}[${index}]`))
       );
+    }
+
+    if (typeof value === "string") {
+      // A ref ({ "$file": "..." }) passed as a JSON *string* instead of an
+      // object would otherwise be forwarded verbatim and silently stored as
+      // literal text. Catch that and fail loudly with a fix hint.
+      this.assertNotStringifiedFileRef(value, path);
+      return value;
     }
 
     if (!isPlainObject(value)) {

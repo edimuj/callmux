@@ -368,6 +368,8 @@ Optional `maxBytes` override per reference:
 - `maxBytes` defaults to `1000000` (1 MB) when omitted
 - Hard cap for `maxBytes` is `10000000` (10 MB)
 
+> **Pass the reference as an object, not a JSON string.** `{ "body": { "$file": "..." } }` resolves; `{ "body": "{\"$file\": \"...\"}" }` (a JSON-encoded string) does not — callmux now rejects that with a clear error instead of silently forwarding the literal text. This matters most for fields whose schema types the value as `string` (e.g. an issue `body`), which can nudge a caller toward stringifying.
+
 ### `$jsonFile` / `$yamlFile` - Parsed file content
 
 ```json
