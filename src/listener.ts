@@ -743,7 +743,10 @@ export class CallmuxListener {
       return !write && this.managementConfig.allowUnauthenticatedRead;
     }
     if (write) return false;
-    return this.managementConfig.allowUnauthenticatedRead || Boolean(context.principal);
+    if (this.managementConfig.allowUnauthenticatedRead) return true;
+    // A globally authenticated MCP principal is only granted management read
+    // when explicitly opted in — tool-call access does not imply config access.
+    return this.managementConfig.allowAuthenticatedRead && Boolean(context.principal);
   }
 
   private extractManagementBearerToken(req: IncomingMessage): string | undefined {
@@ -2319,8 +2322,14 @@ export class CallmuxListener {
 
   private resolveRequestId(req: IncomingMessage): string {
     const incoming = headerValue(req.headers[REQUEST_ID_HEADER]);
-    if (incoming && incoming.trim().length > 0) {
-      return incoming.trim();
+    if (incoming) {
+      const trimmed = incoming.trim();
+      // Only accept a safe, bounded token. The value is reflected in a
+      // response header and written to logs, so reject anything that could
+      // carry CR/LF (header/log injection) or unbounded length.
+      if (/^[A-Za-z0-9._-]{1,128}$/.test(trimmed)) {
+        return trimmed;
+      }
     }
     return randomUUID();
   }

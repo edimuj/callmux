@@ -96,9 +96,19 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 
+// Cache policy patterns are config-fixed, but shouldCache() runs on every
+// cache get/set. Memoize compilation so the hot path reuses RegExp objects
+// instead of recompiling per call. Bounded by the number of distinct patterns.
+const patternRegExpCache = new Map<string, RegExp>();
+
 function patternToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
-  return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`);
+  let compiled = patternRegExpCache.get(pattern);
+  if (!compiled) {
+    const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+    compiled = new RegExp(`^${escaped.replace(/\*/g, ".*")}$`);
+    patternRegExpCache.set(pattern, compiled);
+  }
+  return compiled;
 }
 
 function matchesPolicy(patterns: string[], candidates: string[]): boolean {

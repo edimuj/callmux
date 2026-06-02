@@ -85,7 +85,7 @@ interface UpstreamConnectOptions {
   strictStartup?: boolean;
 }
 
-interface PreparedToolCall {
+export interface PreparedToolCall {
   toolName: string;
   server: string;
   actualName: string;
@@ -1881,6 +1881,20 @@ export class UpstreamManager {
   ): Promise<CallToolResult> {
     const prepared = await this.prepareToolCall(toolName, args, serverHint);
     if ("error" in prepared) return prepared.error;
+    return this.callPrepared(prepared, context, serverHint);
+  }
+
+  /**
+   * Invoke a call whose arguments and server have already been resolved by
+   * prepareToolCall(). Lets meta-tool handlers — which prepare once for cache
+   * keying — skip a redundant second resolution on the hot path.
+   */
+  async callPrepared(
+    prepared: PreparedToolCall,
+    context?: ToolCallContext,
+    serverHint?: string
+  ): Promise<CallToolResult> {
+    const toolName = prepared.toolName;
     const scopedKey = this.shouldUseSessionCwd(prepared.server, context)
       ? this.sessionClientKey(prepared.server, context.cwd)
       : undefined;

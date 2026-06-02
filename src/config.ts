@@ -576,6 +576,10 @@ async function parseManagementConfig(
     value.allowUnauthenticatedRead,
     `${optionName}.allowUnauthenticatedRead`
   );
+  const allowAuthenticatedRead = parseBooleanOption(
+    value.allowAuthenticatedRead,
+    `${optionName}.allowAuthenticatedRead`
+  );
   const auth = await parseAuthConfig(value.auth, `${optionName}.auth`, configBaseDir);
   if (auth && auth.mode !== "bearer") {
     throw new Error(`${optionName}.auth only supports bearer mode`);
@@ -586,6 +590,7 @@ async function parseManagementConfig(
     path === undefined &&
     statePath === undefined &&
     allowUnauthenticatedRead === undefined &&
+    allowAuthenticatedRead === undefined &&
     auth === undefined
   ) {
     return undefined;
@@ -597,6 +602,7 @@ async function parseManagementConfig(
     ...(statePath ? { statePath } : {}),
     ...(auth ? { auth } : {}),
     ...(allowUnauthenticatedRead !== undefined ? { allowUnauthenticatedRead } : {}),
+    ...(allowAuthenticatedRead !== undefined ? { allowAuthenticatedRead } : {}),
   };
 }
 

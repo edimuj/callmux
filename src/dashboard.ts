@@ -266,6 +266,7 @@ export class RuntimeEventStore {
   private totalDownstreamToolCalls = 0;
   private callmuxToolCalls = 0;
   private realToolCalls = 0;
+  private recentErrors = 0;
   private subscribers = new Set<(event: RuntimeEvent) => void>();
 
   constructor(private maxEvents = DEFAULT_MAX_EVENTS) {}
@@ -287,6 +288,7 @@ export class RuntimeEventStore {
       this.callmuxToolCalls += event.callmuxToolCalls ?? 0;
       this.realToolCalls += event.realToolCalls ?? 0;
     }
+    if (isDashboardRuntimeError(event)) this.recentErrors += 1;
     this.events.push(event);
     this.evictOldest();
     for (const subscriber of this.subscribers) {
@@ -309,7 +311,7 @@ export class RuntimeEventStore {
       callmuxToolCalls: this.callmuxToolCalls,
       realToolCalls: this.realToolCalls,
       maxEvents: this.maxEvents,
-      recentErrors: this.events.filter(isDashboardRuntimeError).length,
+      recentErrors: this.recentErrors,
     };
   }
 
@@ -321,8 +323,13 @@ export class RuntimeEventStore {
   }
 
   private evictOldest(): void {
-    while (this.events.length > this.maxEvents) {
-      this.events.shift();
+    const excess = this.events.length - this.maxEvents;
+    if (excess <= 0) return;
+    // Single bulk removal instead of repeated O(n) shift(); keep the
+    // recentErrors counter in sync with what falls out of the ring.
+    const removed = this.events.splice(0, excess);
+    for (const event of removed) {
+      if (isDashboardRuntimeError(event)) this.recentErrors -= 1;
     }
   }
 }

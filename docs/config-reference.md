@@ -315,7 +315,10 @@ The management API is disabled by default and only applies to standalone listene
 | `path` | string | `"/management/v1"` | Management API base path |
 | `statePath` | string | `<config>.management.json` | Persistent managed overlay path |
 | `auth` | bearer auth object | - | Management bearer tokens. Required for mutations |
-| `allowUnauthenticatedRead` | boolean | `false` | Allow read-only management endpoints without management auth |
+| `allowUnauthenticatedRead` | boolean | `false` | Allow read-only management endpoints without any auth |
+| `allowAuthenticatedRead` | boolean | `false` | When no management `auth` is set, allow any globally authenticated MCP principal to read management endpoints. A tool-calling principal is **not** granted management read by default |
+
+> **Security note:** Mutations always require a management `auth` token — a global MCP principal can never write. Management write registers arbitrary servers (including stdio `command` servers), so treat the management write token as shell-equivalent.
 
 Initial endpoints:
 

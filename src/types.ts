@@ -239,6 +239,12 @@ export interface ManagementConfig {
   auth?: BearerAuthConfig;
   /** Allow read-only management endpoints without management auth. Mutations still require auth. */
   allowUnauthenticatedRead?: boolean;
+  /**
+   * When no management-specific auth is configured, allow any globally
+   * authenticated MCP principal to read management endpoints. Default false:
+   * a tool-calling principal is not implicitly granted management read.
+   */
+  allowAuthenticatedRead?: boolean;
 }
 
 export interface CallmuxConfig {

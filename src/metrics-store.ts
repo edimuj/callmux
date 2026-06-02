@@ -255,10 +255,14 @@ export class MetricsStore {
   }
 
   private pruneTier(tier: Tier): void {
-    if (tier.buckets.size <= tier.retain) return;
-    const keys = [...tier.buckets.keys()].sort((a, b) => a - b);
-    for (let i = 0; i < keys.length - tier.retain; i++) {
-      tier.buckets.delete(keys[i]);
+    // Buckets are inserted in ascending time order (monotonic `at`), and
+    // re-setting an existing bucket preserves its Map position, so the first
+    // key in iteration order is always the oldest. Evict from the front
+    // instead of spreading + sorting all keys on every record().
+    while (tier.buckets.size > tier.retain) {
+      const oldest = tier.buckets.keys().next().value as number | undefined;
+      if (oldest === undefined) return;
+      tier.buckets.delete(oldest);
     }
   }
 

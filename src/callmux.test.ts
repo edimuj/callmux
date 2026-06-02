@@ -4591,6 +4591,30 @@ test("handleCall passes through to upstream and caches result", async () => {
   assert.deepEqual(cached, result);
 });
 
+test("handleCall resolves the call once instead of preparing twice", async () => {
+  const upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as UpstreamManager;
+
+  let prepareCalls = 0;
+  const original = upstream.prepareToolCall.bind(upstream);
+  (upstream as unknown as { prepareToolCall: UpstreamManager["prepareToolCall"] }).prepareToolCall =
+    ((tool, args, server) => {
+      prepareCalls += 1;
+      return original(tool, args, server);
+    }) as UpstreamManager["prepareToolCall"];
+
+  const result = await handleCall(upstream as never, new CallCache(0), {
+    tool: "get_issue",
+    arguments: { id: 1 },
+  });
+
+  assert.equal(result.isError, undefined);
+  // prepareResolvedCacheKey prepares once; the call must reuse that result via
+  // callPrepared rather than re-running prepareToolCall inside callTool.
+  assert.equal(prepareCalls, 1);
+});
+
 test("handleCall returns tool_not_found with available tools", async () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -7124,22 +7148,22 @@ test("pipeline auto-wraps a flat step but leaves mapping-only steps alone", asyn
 });
 
 test("handleCall auto-wraps a flat call missing the {arguments} wrapper", async () => {
-  let seenArgs: Record<string, unknown> | undefined;
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("create_issue") },
   ]);
-  upstream.callTool = async (_tool: string, args?: Record<string, unknown>) => {
-    seenArgs = args;
-    return textResult("ok");
-  };
 
-  await handleCall(upstream as never, new CallCache(0), {
+  const result = await handleCall(upstream as never, new CallCache(0), {
     tool: "create_issue",
     title: "Bug",
     body: "Broken",
   });
 
-  assert.deepEqual(seenArgs, { title: "Bug", body: "Broken" });
+  // The mock client echoes the arguments it actually received; the flat fields
+  // must arrive as the tool's arguments object end-to-end.
+  assert.equal(result.isError, undefined);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /"title":"Bug"/);
+  assert.match(text, /"body":"Broken"/);
 });
 
 // ─── handleCall with server hints and qualified names ─────────
@@ -8984,6 +9008,94 @@ test("listener management API requires management auth for mutations and persist
   }
 });
 
+test("management read denies a bare MCP principal unless allowAuthenticatedRead is set", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-mgmt-read-"));
+  const buildConfig = (allowAuthenticatedRead: boolean) => ({
+    servers: { alpha: { command: "node", args: ["alpha.js"] } },
+    auth: { mode: "bearer" as const, tokens: [{ id: "ops", token: "ops-secret" }] },
+    management: {
+      enabled: true,
+      ...(allowAuthenticatedRead ? { allowAuthenticatedRead: true } : {}),
+    },
+  });
+  const makeListener = (cfg: ReturnType<typeof buildConfig>) =>
+    new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: cfg,
+      configPath: join(dir, "config.json"),
+      managementBaseConfig: cfg,
+      managementOverlay: { version: 1 },
+      upstream: new UpstreamManager(),
+      cache: new CallCache(0),
+      allTools: [],
+      maxConcurrency: 10,
+    });
+  const readConfig = (port: number) =>
+    fetch(`http://127.0.0.1:${port}/management/v1/config/effective`, {
+      headers: { Authorization: "Bearer ops-secret" },
+    });
+
+  // Default: a valid global bearer authenticates the request (it is NOT a 401),
+  // but management read is still refused — tool access does not imply config read.
+  const gated = makeListener(buildConfig(false));
+  try {
+    await gated.start();
+    const denied = await readConfig(listenerPort(gated));
+    assert.equal(denied.status, 403);
+  } finally {
+    await gated.close();
+  }
+
+  // Opt in: the same principal is now allowed to read.
+  const opened = makeListener(buildConfig(true));
+  try {
+    await opened.start();
+    const allowed = await readConfig(listenerPort(opened));
+    assert.equal(allowed.status, 200);
+  } finally {
+    await opened.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener sanitizes a client-supplied x-request-id", async () => {
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream: new UpstreamManager(),
+    cache: new CallCache(0),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  await listener.start();
+  try {
+    const port = listenerPort(listener);
+
+    // A safe token is echoed verbatim.
+    const ok = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { "x-request-id": "req-123_ABC.def" },
+    });
+    assert.equal(ok.headers.get("x-request-id"), "req-123_ABC.def");
+
+    // An unsafe value (would carry injection payloads into headers/logs) is
+    // rejected and replaced with a fresh UUID.
+    const evil = "spoof log injection";
+    const bad = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { "x-request-id": evil },
+    });
+    const echoed = bad.headers.get("x-request-id");
+    assert.notEqual(echoed, evil);
+    assert.match(
+      echoed ?? "",
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    );
+  } finally {
+    await listener.close();
+  }
+});
+
 test("listener serializes concurrent management mutations without clobbering the overlay", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-management-race-"));
   const statePath = join(dir, "overlay.json");
@@ -9268,6 +9380,39 @@ test("RuntimeEventStore recent errors ignores downstream tool result failures", 
   });
 
   assert.equal(store.stats().recentErrors, 1);
+});
+
+test("RuntimeEventStore recent errors counter decrements as errors are evicted", () => {
+  const store = new RuntimeEventStore(1);
+  store.append({
+    type: "tool_call",
+    timestamp: new Date(0).toISOString(),
+    tool: "github__add_issue_comment",
+    toolKind: "downstream",
+    operation: "direct",
+    callmuxToolCalls: 0,
+    realToolCalls: 1,
+    downstreamTargets: [{ server: "github", tool: "add_issue_comment", count: 1 }],
+    durationMs: 1,
+    status: "error",
+    success: false,
+    error: "timed out",
+  });
+  assert.equal(store.stats().recentErrors, 1);
+
+  // A second event pushes the error out of the single-slot ring; the counter
+  // must follow what is actually retained, not what was ever appended.
+  store.append({
+    type: "http_request",
+    timestamp: new Date(1).toISOString(),
+    requestId: "ok",
+    method: "GET",
+    path: "/health",
+    status: 200,
+    durationMs: 1,
+  });
+  assert.equal(store.stats().eventCount, 1);
+  assert.equal(store.stats().recentErrors, 0);
 });
 
 test("RuntimeEventStore recent errors ignores routine transport disconnects", () => {

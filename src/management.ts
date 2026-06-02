@@ -22,6 +22,7 @@ export interface NormalizedManagementConfig {
   statePath?: string;
   auth?: BearerAuthConfig;
   allowUnauthenticatedRead: boolean;
+  allowAuthenticatedRead: boolean;
 }
 
 function normalizePath(path: string | undefined): string {
@@ -50,6 +51,7 @@ export function normalizeManagementConfig(
     ...(statePath ? { statePath } : {}),
     ...(config?.auth ? { auth: config.auth } : {}),
     allowUnauthenticatedRead: config?.allowUnauthenticatedRead ?? false,
+    allowAuthenticatedRead: config?.allowAuthenticatedRead ?? false,
   };
 }
 

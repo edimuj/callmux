@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { UpstreamManager } from "./upstream.js";
+import type { PreparedToolCall, UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
 import type { ResponseStore } from "./response-store.js";
 import type { SchemaCompressionDiagnostics } from "./schema-compression.js";
@@ -246,12 +246,20 @@ function contextWithSafeRetry(
   };
 }
 
+interface ResolvedCall {
+  args: Record<string, unknown> | undefined;
+  server: string | undefined;
+  // Present when prepareToolCall ran; lets callers reuse the resolution via
+  // callPrepared() instead of triggering a second prepare inside callTool.
+  preparedCall?: PreparedToolCall;
+}
+
 async function prepareResolvedCacheKey(
   upstream: UpstreamManager,
   tool: string,
   args: Record<string, unknown> | undefined,
   server: string | undefined
-): Promise<{ args: Record<string, unknown> | undefined; server: string | undefined } | CallToolResult> {
+): Promise<ResolvedCall | CallToolResult> {
   const maybePrepare = upstream as UpstreamManager & {
     prepareToolCall?: (
       toolName: string,
@@ -268,7 +276,26 @@ async function prepareResolvedCacheKey(
   return {
     args: prepared.resolvedArguments,
     server: prepared.server,
+    preparedCall: prepared,
   };
+}
+
+/**
+ * Invoke an already-resolved call, reusing prepareToolCall's work when present
+ * and falling back to the full callTool path for harnesses that lack it.
+ */
+function invokeResolved(
+  upstream: UpstreamManager,
+  tool: string,
+  resolved: ResolvedCall,
+  context: ToolCallContext | undefined
+): Promise<CallToolResult> {
+  // Reuse the prepared resolution when the upstream exposes callPrepared;
+  // fall back to callTool for harnesses/mocks that only implement callTool.
+  if (resolved.preparedCall && typeof upstream.callPrepared === "function") {
+    return upstream.callPrepared(resolved.preparedCall, context, resolved.server);
+  }
+  return upstream.callTool(tool, resolved.args, resolved.server, context);
 }
 
 const TEXT_ARGUMENT_FIELDS = new Set([
@@ -1043,10 +1070,10 @@ export async function handleParallel(
         return { call, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(
+      const result = await invokeResolved(
+        upstream,
         call.tool,
-        prepared.args,
-        prepared.server,
+        prepared,
         contextWithSafeRetry(cache, call.tool, prepared.server, callContext)
       );
       cache.set(call.tool, prepared.args, result, prepared.server, cacheScope);
@@ -1151,10 +1178,10 @@ export async function handleBatch(
         return { index, result: unwrapResult(cached), durationMs: Date.now() - callStart };
       }
 
-      const result = await upstream.callTool(
+      const result = await invokeResolved(
+        upstream,
         tool,
-        prepared.args,
-        prepared.server,
+        prepared,
         contextWithSafeRetry(cache, tool, prepared.server, callContext)
       );
       cache.set(tool, prepared.args, result, prepared.server, cacheScope);
@@ -1301,10 +1328,10 @@ export async function handlePipeline(
       }
       const cacheScope = cacheScopeForCall(upstream, step.tool, prepared.server, callContext);
       const cached = cache.get(step.tool, prepared.args, prepared.server, cacheScope);
-      const result = cached ?? await upstream.callTool(
+      const result = cached ?? await invokeResolved(
+        upstream,
         step.tool,
-        prepared.args,
-        prepared.server,
+        prepared,
         contextWithSafeRetry(cache, step.tool, prepared.server, callContext)
       );
 
@@ -1552,7 +1579,7 @@ export async function handleCall(
   const cached = cache.get(tool, prepared.args, prepared.server, cacheScope);
   if (cached) return formatResultIfStructured(cached, outputFormat);
 
-  const result = await upstream.callTool(tool, prepared.args, prepared.server, {
+  const result = await invokeResolved(upstream, tool, prepared, {
     ...contextWithSafeRetry(cache, tool, prepared.server, callContext),
     forceReconnect,
   });

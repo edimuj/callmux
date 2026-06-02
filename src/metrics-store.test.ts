@@ -119,6 +119,20 @@ test("tier retention prunes oldest minute buckets", () => {
   assert.equal(json.aggregate.calls, 200);
 });
 
+test("tier retention keeps the newest buckets and drops the oldest", () => {
+  const store = new MetricsStore(T0);
+  // 200 distinct minute buckets, retain is 120 → oldest 80 evicted.
+  for (let i = 0; i < 200; i++) {
+    store.record({ at: T0 + i * 60_000, server: "a" });
+  }
+  const buckets = store.toJSON().tiers.minute.buckets;
+  assert.equal(buckets.length, 120);
+  // Buckets are serialized ascending by key; the retained window is the most
+  // recent 120 (i = 80..199), not an arbitrary subset.
+  assert.equal(buckets[0][0], T0 + 80 * 60_000);
+  assert.equal(buckets[buckets.length - 1][0], T0 + 199 * 60_000);
+});
+
 test("toJSON / fromJSON round-trips state", () => {
   const store = new MetricsStore(T0);
   store.record({ at: T0, server: "github", meta: false, bytesOut: 123, format: "json" });
