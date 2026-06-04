@@ -1127,6 +1127,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   }
 
   const tools = parseStringArray(value.tools, `servers.${serverName}.tools`);
+  const alwaysLoad = parseStringArray(value.alwaysLoad, `servers.${serverName}.alwaysLoad`);
   const cachePolicy = parseCachePolicy(
     value.cachePolicy,
     `servers.${serverName}.cachePolicy`
@@ -1156,6 +1157,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
 
   const shared = {
     ...(tools ? { tools } : {}),
+    ...(alwaysLoad ? { alwaysLoad } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
     ...(responseShield ? { responseShield } : {}),
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),

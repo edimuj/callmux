@@ -12,6 +12,8 @@ export interface StdioServerConfig {
   cwdMode?: "global" | "session";
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
+  /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
+  alwaysLoad?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
@@ -34,6 +36,8 @@ export interface HttpServerConfig {
   headers?: Record<string, string>;
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
+  /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
+  alwaysLoad?: string[];
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */

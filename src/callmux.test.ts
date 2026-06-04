@@ -5381,6 +5381,100 @@ test("loadConfig parses schema compression settings from file", async () => {
   }
 });
 
+test("loadConfig parses per-server alwaysLoad from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-alwaysload-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          tokenlean: {
+            command: "node",
+            args: ["server.js"],
+            alwaysLoad: ["tl_symbols", "tl_pack"],
+          },
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.deepEqual(
+      (config.servers.tokenlean as StdioServerConfig).alwaysLoad,
+      ["tl_symbols", "tl_pack"]
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("alwaysLoad sets _meta anthropic/alwaysLoad on matching tools", () => {
+  const upstream = createMockUpstream([
+    { server: "tokenlean", tool: mockTool("tl_symbols", "Find symbols") },
+    { server: "tokenlean", tool: mockTool("tl_run", "Run command") },
+    { server: "tokenlean", tool: mockTool("tl_pack", "Pack context") },
+  ]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {
+        tokenlean: {
+          command: "tokenlean-mcp",
+          alwaysLoad: ["tl_symbols", "tl_pack"],
+        },
+      },
+    },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const tools = (listener as any).currentTools() as Tool[];
+  const symbols = tools.find((t) => t.name === "tl_symbols")!;
+  const run = tools.find((t) => t.name === "tl_run")!;
+  const pack = tools.find((t) => t.name === "tl_pack")!;
+
+  assert.equal(symbols._meta?.["anthropic/alwaysLoad"], true);
+  assert.equal(pack._meta?.["anthropic/alwaysLoad"], true);
+  assert.equal(run._meta?.["anthropic/alwaysLoad"], undefined);
+});
+
+test("alwaysLoad preserves existing _meta fields on tools", () => {
+  const toolWithMeta: Tool = {
+    name: "tl_symbols",
+    description: "Find symbols",
+    inputSchema: { type: "object" },
+    _meta: { "custom/flag": "hello" },
+  };
+  const upstream = createMockUpstream([
+    { server: "tokenlean", tool: toolWithMeta },
+  ]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {
+        tokenlean: {
+          command: "tokenlean-mcp",
+          alwaysLoad: ["tl_symbols"],
+        },
+      },
+    },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const tools = (listener as any).currentTools() as Tool[];
+  const symbols = tools.find((t) => t.name === "tl_symbols")!;
+  assert.equal(symbols._meta?.["anthropic/alwaysLoad"], true);
+  assert.equal(symbols._meta?.["custom/flag"], "hello");
+});
+
 test("loadConfig parses startup timeout settings from file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-timeout-"));
   const configPath = join(dir, "config.json");

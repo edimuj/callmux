@@ -1710,13 +1710,18 @@ export class CallmuxListener {
       compressToolForExposure(tool, this.options.config.schemaCompression)
     );
     if (this.options.config.metaOnly) return metaTools;
-    const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, server, tool }) =>
-      compressToolForExposure(
-        { ...tool, name: qualifiedName },
+    const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, server, tool }) => {
+      const serverCfg = this.options.config.servers[server];
+      const eager = serverCfg?.alwaysLoad;
+      const base = eager?.includes(tool.name)
+        ? { ...tool, name: qualifiedName, _meta: { ...tool._meta, "anthropic/alwaysLoad": true } }
+        : { ...tool, name: qualifiedName };
+      return compressToolForExposure(
+        base,
         this.options.config.schemaCompression,
-        this.options.config.servers[server]?.schemaCompression
-      )
-    );
+        serverCfg?.schemaCompression
+      );
+    });
     return [...proxiedTools, ...metaTools];
   }
 
