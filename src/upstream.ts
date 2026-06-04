@@ -1894,9 +1894,20 @@ export class UpstreamManager {
 
       const exposedTools = this.exposedToolsByServer.get(serverHint);
       const qualifiedPrefix = `${serverHint}__`;
+      // The public name may carry the server's configured prefix alias (e.g.
+      // "gh__issue_read") rather than the real server prefix ("github__"), so
+      // strip whichever one matches before checking the exposed-tool set.
+      const aliasPrefix = (() => {
+        const alias = config?.prefix;
+        return alias !== undefined && alias.length > 0 && alias !== serverHint
+          ? `${alias}__`
+          : undefined;
+      })();
       const actualName = toolName.startsWith(qualifiedPrefix)
         ? toolName.slice(qualifiedPrefix.length)
-        : toolName;
+        : aliasPrefix && toolName.startsWith(aliasPrefix)
+          ? toolName.slice(aliasPrefix.length)
+          : toolName;
 
       const removed = this.removedToolErrorFor(actualName, serverHint);
       if (removed) return { error: removed };

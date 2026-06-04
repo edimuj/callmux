@@ -5567,6 +5567,55 @@ test("per-server prefix shortens and drops flattened tool names", async () => {
   ]);
 });
 
+test("aliased tool names resolve when a server hint is supplied", async () => {
+  // The listener resolves the server first, then re-calls callTool with the
+  // public (aliased) name plus the resolved server hint. The hint path must
+  // strip the alias prefix, not only the real server prefix.
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const toolName = name === "tokenlean" ? "tl_diff" : "search_code";
+    const tool = mockTool(toolName);
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult(`${name}:${toolName}`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({
+    tokenlean: { command: "tokenlean-mcp", prefix: "" },
+    github: { command: "gh-mcp", prefix: "gh" },
+  });
+
+  // Shortened alias + real-server hint (the github__ -> gh__ regression).
+  assert.deepEqual(
+    (await upstream.callTool("gh__search_code", {}, "github")).content,
+    [{ type: "text", text: "github:search_code" }]
+  );
+  // Dropped prefix: the bare name already equals the actual tool name.
+  assert.deepEqual(
+    (await upstream.callTool("tl_diff", {}, "tokenlean")).content,
+    [{ type: "text", text: "tokenlean:tl_diff" }]
+  );
+  // Original server-qualified form + hint still works.
+  assert.deepEqual(
+    (await upstream.callTool("github__search_code", {}, "github")).content,
+    [{ type: "text", text: "github:search_code" }]
+  );
+});
+
 test("colliding dropped prefixes fall back to full server names", async () => {
   const upstream = new UpstreamManager();
   const harness = upstream as unknown as {
