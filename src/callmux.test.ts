@@ -5475,6 +5475,201 @@ test("alwaysLoad preserves existing _meta fields on tools", () => {
   assert.equal(symbols._meta?.["custom/flag"], "hello");
 });
 
+test("loadConfig parses per-server prefix override including empty string", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-prefix-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          tokenlean: { command: "tokenlean-mcp", prefix: "" },
+          github: { command: "gh-mcp", prefix: "gh" },
+        },
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal((config.servers.tokenlean as StdioServerConfig).prefix, "");
+    assert.equal((config.servers.github as StdioServerConfig).prefix, "gh");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects prefixes with non-identifier characters", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-prefix-bad-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({ servers: { x: { command: "x", prefix: "no spaces" } } })
+    );
+    await assert.rejects(
+      loadConfig(configPath),
+      /prefix must contain only letters, digits, and underscores/
+    );
+
+    await writeFile(
+      configPath,
+      JSON.stringify({ servers: { x: { command: "x", prefix: 5 } } })
+    );
+    await assert.rejects(loadConfig(configPath), /prefix must be a string/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("per-server prefix shortens and drops flattened tool names", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const toolName = name === "tokenlean" ? "tl_diff" : "search_code";
+    const tool = mockTool(toolName);
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult(`${name}:${toolName}`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({
+    tokenlean: { command: "tokenlean-mcp", prefix: "" },
+    github: { command: "gh-mcp", prefix: "gh" },
+  });
+
+  const names = upstream.getTools().map((t) => t.qualifiedName).sort();
+  assert.deepEqual(names, ["gh__search_code", "tl_diff"]);
+
+  // Emitted (aliased) names resolve.
+  assert.deepEqual((await upstream.callTool("tl_diff")).content, [
+    { type: "text", text: "tokenlean:tl_diff" },
+  ]);
+  assert.deepEqual((await upstream.callTool("gh__search_code")).content, [
+    { type: "text", text: "github:search_code" },
+  ]);
+  // Original server-name-qualified form still resolves (forgiving fallback).
+  assert.deepEqual((await upstream.callTool("github__search_code")).content, [
+    { type: "text", text: "github:search_code" },
+  ]);
+});
+
+test("colliding dropped prefixes fall back to full server names", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const tool = mockTool("status");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult(`${name}:status`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({
+    alpha: { command: "alpha", prefix: "" },
+    beta: { command: "beta", prefix: "" },
+  });
+
+  // Both wanted bare "status"; collision forces both back to full prefixes.
+  const names = upstream.getTools().map((t) => t.qualifiedName).sort();
+  assert.deepEqual(names, ["alpha__status", "beta__status"]);
+
+  assert.deepEqual((await upstream.callTool("alpha__status")).content, [
+    { type: "text", text: "alpha:status" },
+  ]);
+});
+
+test("prefix alias cannot bypass an authorization rule on the real server name", async () => {
+  const upstream = new UpstreamManager();
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const toolName = name === "github" ? "search_code" : "ping";
+    const tool = mockTool(toolName);
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          return textResult(`${name}:${toolName}`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      allTools: [tool],
+      tools: [tool],
+    };
+  };
+
+  await upstream.connect({
+    github: { command: "gh-mcp", prefix: "gh" },
+    other: { command: "other-mcp" },
+  });
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: {
+        github: { command: "gh-mcp", prefix: "gh" },
+        other: { command: "other-mcp" },
+      },
+      authorization: {
+        defaultEffect: "allow",
+        rules: [
+          {
+            id: "deny-search",
+            effect: "deny",
+            tools: ["github__search_code"],
+          },
+        ],
+      },
+    },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  const principal = { kind: "bearer", id: "ops", scopes: [], groups: [] };
+  // The aliased name must canonicalize to github__search_code and be denied.
+  const aliased = (listener as any).authorizeToolCall("gh__search_code", {}, principal);
+  assert.equal(aliased.allowed, false);
+  // The original qualified form is denied too.
+  const original = (listener as any).authorizeToolCall("github__search_code", {}, principal);
+  assert.equal(original.allowed, false);
+  // An unrelated tool stays allowed.
+  const allowed = (listener as any).authorizeToolCall("other__ping", {}, principal);
+  assert.equal(allowed.allowed, true);
+});
+
 test("loadConfig parses startup timeout settings from file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "callmux-timeout-"));
   const configPath = join(dir, "config.json");

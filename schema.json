@@ -162,6 +162,16 @@
           "items": { "type": "string" },
           "description": "Whitelist of tool names to expose (omit to expose all)"
         },
+        "alwaysLoad": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names eagerly loaded by the MCP client (sets _meta anthropic/alwaysLoad)"
+        },
+        "prefix": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]*$",
+          "description": "Override the multi-server sub-prefix for this server's tools (default: the server key). \"\" drops the prefix entirely. Ignored in single-server mode."
+        },
         "cachePolicy": { "$ref": "#/$defs/cachePolicy" },
         "maxConcurrency": {
           "type": "integer",
@@ -212,6 +222,16 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Whitelist of tool names to expose (omit to expose all)"
+        },
+        "alwaysLoad": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tool names eagerly loaded by the MCP client (sets _meta anthropic/alwaysLoad)"
+        },
+        "prefix": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]*$",
+          "description": "Override the multi-server sub-prefix for this server's tools (default: the server key). \"\" drops the prefix entirely. Ignored in single-server mode."
         },
         "cachePolicy": { "$ref": "#/$defs/cachePolicy" },
         "maxConcurrency": {

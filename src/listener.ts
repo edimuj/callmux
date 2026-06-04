@@ -2433,17 +2433,20 @@ export class CallmuxListener {
         return `${serverHint}__${actualName}`;
       }
 
-      if (toolName.includes("__")) {
-        return toolName;
-      }
-
       const resolved = this.options.upstream.resolveServer(toolName);
       if (!resolved || "error" in resolved) {
+        // Canonicalization failed. For an already-qualified name, fall back to
+        // the literal so explicit server__tool rules still match disconnected
+        // servers; otherwise propagate the resolution outcome.
+        if (toolName.includes("__")) return toolName;
         if (!resolved) return null;
         const message = extractStructuredErrorMessage(resolved.error);
         if (message.includes("ambiguous")) return undefined;
         return null;
       }
+      // Always canonicalize to the real server key so a prefix alias (e.g.
+      // gh__search_code) can't dodge an authorization rule written against the
+      // real name (github__search_code).
       return `${resolved.server}__${resolved.actualName}`;
     };
 

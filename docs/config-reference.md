@@ -73,6 +73,8 @@ Local process servers use `command` to launch:
 | `cwd` | string | - | Working directory |
 | `cwdMode` | `"global"` or `"session"` | - | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
+| `alwaysLoad` | string[] | - | Tool names the MCP client should eagerly load (sets `_meta` `anthropic/alwaysLoad`) |
+| `prefix` | string | - | Override the multi-server sub-prefix for this server's tools (default = server key; `""` drops it). See [Multi-Server Tool Naming](#multi-server-tool-naming) |
 | `maxConcurrency` | integer | - | Max concurrent calls to this server |
 | `callTimeoutMs` | integer | - | Timeout for tool calls to this server (omit = global) |
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
@@ -92,6 +94,8 @@ Remote servers use `url` instead of `command`:
 | `transport` | string | - | `"streamable-http"` or `"sse"` (auto-detected if omitted) |
 | `headers` | object | - | HTTP headers (e.g. authorization) |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
+| `alwaysLoad` | string[] | - | Tool names the MCP client should eagerly load (sets `_meta` `anthropic/alwaysLoad`) |
+| `prefix` | string | - | Override the multi-server sub-prefix for this server's tools (default = server key; `""` drops it). See [Multi-Server Tool Naming](#multi-server-tool-naming) |
 | `maxConcurrency` | integer | - | Max concurrent calls to this server |
 | `callTimeoutMs` | integer | - | Timeout for tool calls to this server (omit = global) |
 | `requestBodyMaxBytes` | integer | - | Inbound payload cap for calls targeting this server (`0` = unlimited, omit = global) |
@@ -459,6 +463,41 @@ The `server` field in meta-tool calls lets you target specific servers:
   ]
 }
 ```
+
+### Shortening the sub-server prefix
+
+The namespaced segment defaults to the server key, which can be redundant — every
+tokenlean tool already starts with `tl_`, so `tokenlean__tl_diff` encodes "tokenlean"
+twice. Set a per-server `prefix` to shorten or drop it (multi-server mode only;
+single-server tools always keep their original names):
+
+```jsonc
+{
+  "servers": {
+    "tokenlean": { "command": "tokenlean-mcp", "prefix": "" },   // -> tl_diff
+    "github":    { "command": "gh-mcp",        "prefix": "gh" }  // -> gh__search_code
+  }
+}
+```
+
+`prefix` accepts letters, digits, and underscores (or `""` to drop the prefix entirely).
+Both forms resolve when calling a tool — the emitted name (`tl_diff`, `gh__search_code`)
+and the original server-qualified form (`tokenlean__tl_diff`, `github__search_code`) — so
+existing recipes and `server`-qualified calls keep working. Authorization rules are always
+evaluated against the canonical `server__tool` name, so a shortened prefix cannot dodge a
+policy written against the real server key.
+
+**Collision safety:** if shortening would make two tools collide (e.g. two servers both
+exposing `status` with `prefix: ""`), callmux keeps both reachable by falling back to the
+full `server__tool` names for the clashing tools and logs a warning to stderr — it never
+silently shadows a tool.
+
+### The `mcp__<key>__` prefix is client-controlled
+
+Claude Code builds the leading `mcp__callmux__` segment from **your client's** MCP server
+key (the key under `mcpServers` in `.mcp.json`), not from anything callmux emits. callmux
+cannot change it. To shorten it (e.g. `mcp__cx__tl_diff`), rename the key in your client
+config — there is no callmux setting for this.
 
 ---
 

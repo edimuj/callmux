@@ -727,16 +727,62 @@ export class UpstreamManager {
     return config.transport ?? "streamable-http";
   }
 
+  /** Configured sub-server prefix for a server (default: the server key). */
+  private displayPrefix(server: string): string {
+    const configured = this.serverConfigs.get(server)?.prefix;
+    return configured !== undefined ? configured : server;
+  }
+
+  /** Flattened tool name honoring the server's configured prefix override. */
+  private aliasedName(server: string, toolName: string): string {
+    const prefix = this.displayPrefix(server);
+    return prefix === "" ? toolName : `${prefix}__${toolName}`;
+  }
+
   private rebuildToolIndexes(): void {
     this.toolMap.clear();
     this.unqualifiedToolMap.clear();
     const multiServer = this.serverConfigs.size > 1;
 
+    // First pass: tally desired (alias-honoring) names so we can detect when a
+    // shortened/dropped prefix would make two distinct tools collide.
+    const desiredCounts = new Map<string, number>();
+    if (multiServer) {
+      for (const [server, tools] of this.toolsByServer) {
+        for (const tool of tools) {
+          const name = this.aliasedName(server, tool.name);
+          desiredCounts.set(name, (desiredCounts.get(name) ?? 0) + 1);
+        }
+      }
+    }
+
+    // Second pass: assign names. Contested aliases fall back to the full
+    // server-name prefix (always unique) so we never silently shadow a tool.
     for (const [server, tools] of this.toolsByServer) {
       for (const tool of tools) {
-        const qualifiedName = multiServer
-          ? `${server}__${tool.name}`
+        let qualifiedName = multiServer
+          ? this.aliasedName(server, tool.name)
           : tool.name;
+        const fullName = `${server}__${tool.name}`;
+        if (
+          multiServer &&
+          (desiredCounts.get(qualifiedName) ?? 0) > 1 &&
+          qualifiedName !== fullName
+        ) {
+          process.stderr.write(
+            `[callmux] tool-name collision on "${qualifiedName}"; ` +
+              `falling back to full prefix "${fullName}" for server "${server}"\n`
+          );
+          qualifiedName = fullName;
+        }
+        const existing = this.toolMap.get(qualifiedName);
+        if (existing && (existing.server !== server || existing.tool.name !== tool.name)) {
+          process.stderr.write(
+            `[callmux] tool-name collision on "${qualifiedName}" between ` +
+              `"${existing.server}" and "${server}"; skipping the latter to avoid shadowing\n`
+          );
+          continue;
+        }
         this.toolMap.set(qualifiedName, { server, tool });
         this.indexUnqualifiedTool(server, tool);
       }
@@ -1514,8 +1560,19 @@ export class UpstreamManager {
   private splitKnownQualifiedToolName(
     toolName: string
   ): { server: string; actualName: string } | undefined {
-    for (const server of this.getKnownServerNames().sort((a, b) => b.length - a.length)) {
-      const prefix = `${server}__`;
+    // Match against both real server keys and configured prefix aliases so a
+    // client can address a tool by either its emitted (aliased) name or its
+    // original server-name-qualified form. Longest prefix wins.
+    const candidates: Array<{ prefix: string; server: string }> = [];
+    for (const server of this.getKnownServerNames()) {
+      candidates.push({ prefix: `${server}__`, server });
+      const alias = this.serverConfigs.get(server)?.prefix;
+      if (alias !== undefined && alias.length > 0 && alias !== server) {
+        candidates.push({ prefix: `${alias}__`, server });
+      }
+    }
+    candidates.sort((a, b) => b.prefix.length - a.prefix.length);
+    for (const { prefix, server } of candidates) {
       if (toolName.startsWith(prefix)) {
         return { server, actualName: toolName.slice(prefix.length) };
       }

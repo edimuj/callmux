@@ -94,6 +94,24 @@ function parseStringArray(
   return value;
 }
 
+function parseToolPrefix(
+  value: unknown,
+  optionName: string
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`${optionName} must be a string`);
+  }
+  // "" is valid (drops the prefix). Non-empty prefixes must keep emitted tool
+  // names within the MCP charset so the harness can't silently reject them.
+  if (value.length > 0 && !/^[A-Za-z0-9_]+$/.test(value)) {
+    throw new Error(
+      `${optionName} must contain only letters, digits, and underscores (or "" to drop the prefix)`
+    );
+  }
+  return value;
+}
+
 function parseStringRecord(
   value: unknown,
   optionName: string
@@ -1128,6 +1146,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
 
   const tools = parseStringArray(value.tools, `servers.${serverName}.tools`);
   const alwaysLoad = parseStringArray(value.alwaysLoad, `servers.${serverName}.alwaysLoad`);
+  const prefix = parseToolPrefix(value.prefix, `servers.${serverName}.prefix`);
   const cachePolicy = parseCachePolicy(
     value.cachePolicy,
     `servers.${serverName}.cachePolicy`
@@ -1158,6 +1177,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
   const shared = {
     ...(tools ? { tools } : {}),
     ...(alwaysLoad ? { alwaysLoad } : {}),
+    ...(prefix !== undefined ? { prefix } : {}),
     ...(cachePolicy ? { cachePolicy } : {}),
     ...(responseShield ? { responseShield } : {}),
     ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),

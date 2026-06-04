@@ -14,6 +14,13 @@ export interface StdioServerConfig {
   tools?: string[];
   /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
   alwaysLoad?: string[];
+  /**
+   * Override the sub-server prefix used when flattening this server's tools in
+   * multi-server mode (default: the server key). "" drops the prefix entirely
+   * (e.g. tokenlean's tl_diff -> tl_diff). Alphanumeric + underscore only.
+   * Ignored in single-server mode, where tools keep their original names.
+   */
+  prefix?: string;
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
@@ -38,6 +45,13 @@ export interface HttpServerConfig {
   tools?: string[];
   /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
   alwaysLoad?: string[];
+  /**
+   * Override the sub-server prefix used when flattening this server's tools in
+   * multi-server mode (default: the server key). "" drops the prefix entirely
+   * (e.g. tokenlean's tl_diff -> tl_diff). Alphanumeric + underscore only.
+   * Ignored in single-server mode, where tools keep their original names.
+   */
+  prefix?: string;
   /** Optional per-server cache policy; supports exact names or "*" wildcards */
   cachePolicy?: CachePolicyConfig;
   /** Max concurrent calls to this server (omit to use global maxConcurrency) */
