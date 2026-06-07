@@ -98,6 +98,21 @@ export interface PreparedToolCall {
   server: string;
   actualName: string;
   resolvedArguments?: Record<string, unknown>;
+  /**
+   * Argument paths the MCP client would JSON-stringify on the wire because the
+   * target field is string-typed but received a structured value. Only set when
+   * prepareToolCall is invoked with `modelClientCoercion` (dry run). See #43.
+   */
+  clientCoercions?: string[];
+}
+
+export interface PrepareToolCallOptions {
+  /**
+   * Reproduce the MCP client's wire coercion (structured value → JSON string on
+   * a string-typed field) before resolving file references, so a dry run models
+   * the real wire path instead of the idealized object path.
+   */
+  modelClientCoercion?: boolean;
 }
 
 interface ScopedClient {
@@ -369,6 +384,94 @@ function coerceValueForSchema(value: unknown, schema: unknown): unknown {
   }
 
   return changed ? coerced : value;
+}
+
+/** Collect every primitive `type` a schema (incl. allOf/anyOf/oneOf branches) permits. */
+function schemaPermittedTypes(
+  schema: Record<string, unknown>,
+  types: Set<string> = new Set()
+): Set<string> {
+  const declared = schema.type;
+  if (typeof declared === "string") {
+    types.add(declared);
+  } else if (Array.isArray(declared)) {
+    for (const entry of declared) {
+      if (typeof entry === "string") types.add(entry);
+    }
+  }
+  for (const branch of [
+    ...schemaArrayField(schema, "allOf"),
+    ...schemaArrayField(schema, "anyOf"),
+    ...schemaArrayField(schema, "oneOf"),
+  ]) {
+    schemaPermittedTypes(branch, types);
+  }
+  return types;
+}
+
+/** True when the schema accepts a string but not a structured (object/array) value. */
+function schemaExpectsStringNotStructured(schema: Record<string, unknown>): boolean {
+  const types = schemaPermittedTypes(schema);
+  return types.has("string") && !types.has("object") && !types.has("array");
+}
+
+/**
+ * Model the MCP client's wire coercion. When the model emits a structured value
+ * (object/array) onto a field the schema types as a string, the client
+ * JSON-stringifies it before the call ever reaches callmux — so a literal
+ * `{ "$file": "..." }` arrives as the string `'{"$file":"..."}'`. dry_run
+ * receives arguments as a free-form object and would otherwise resolve the
+ * idealized object path, diverging silently from the real wire (see #43). This
+ * reproduces the client step so the resolution that follows matches production.
+ * Returns the coerced value and records the paths it stringified.
+ */
+function simulateClientStringCoercion(
+  value: unknown,
+  schema: unknown,
+  path: string,
+  coercions: string[]
+): unknown {
+  if (!isPlainObject(schema)) return value;
+
+  if (
+    (isPlainObject(value) || Array.isArray(value)) &&
+    schemaExpectsStringNotStructured(schema)
+  ) {
+    coercions.push(path);
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    const items = schema.items;
+    if (!isPlainObject(items)) return value;
+    let changed = false;
+    const next = value.map((item, index) => {
+      const coerced = simulateClientStringCoercion(item, items, `${path}[${index}]`, coercions);
+      if (coerced !== item) changed = true;
+      return coerced;
+    });
+    return changed ? next : value;
+  }
+
+  if (!isPlainObject(value)) return value;
+
+  const properties = isPlainObject(schema.properties) ? schema.properties : undefined;
+  const additionalProperties = isPlainObject(schema.additionalProperties)
+    ? schema.additionalProperties
+    : undefined;
+  if (!properties && !additionalProperties) return value;
+
+  let changed = false;
+  const next: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    const propertySchema = properties?.[key] ?? additionalProperties;
+    const coerced = propertySchema
+      ? simulateClientStringCoercion(nested, propertySchema, `${path}.${key}`, coercions)
+      : nested;
+    if (coerced !== nested) changed = true;
+    next[key] = coerced;
+  }
+  return changed ? next : value;
 }
 
 async function withTimeout<T>(
@@ -1829,7 +1932,8 @@ export class UpstreamManager {
   async prepareToolCall(
     toolName: string,
     args?: Record<string, unknown>,
-    serverHint?: string
+    serverHint?: string,
+    options?: PrepareToolCallOptions
   ): Promise<PreparedToolCall | { error: CallToolResult }> {
     const resolved = this.resolveServer(toolName, serverHint);
     if (!resolved) {
@@ -1840,8 +1944,18 @@ export class UpstreamManager {
     }
 
     try {
-      const resolvedArguments = await this.resolveToolArguments(args);
       const tool = this.resolvedTool(resolved.server, resolved.actualName);
+      let inputArguments = args;
+      const clientCoercions: string[] = [];
+      if (options?.modelClientCoercion && args && tool?.inputSchema) {
+        inputArguments = simulateClientStringCoercion(
+          args,
+          tool.inputSchema,
+          "arguments",
+          clientCoercions
+        ) as Record<string, unknown>;
+      }
+      const resolvedArguments = await this.resolveToolArguments(inputArguments);
       const coercedArguments = resolvedArguments && tool?.inputSchema
         ? coerceValueForSchema(resolvedArguments, tool.inputSchema) as Record<string, unknown>
         : resolvedArguments;
@@ -1850,6 +1964,7 @@ export class UpstreamManager {
         server: resolved.server,
         actualName: resolved.actualName,
         ...(coercedArguments ? { resolvedArguments: coercedArguments } : {}),
+        ...(clientCoercions.length > 0 ? { clientCoercions } : {}),
       };
     } catch (error) {
       return {

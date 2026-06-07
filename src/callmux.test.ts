@@ -4469,6 +4469,126 @@ test("handleDryRun warns when text fields resolve to structured values", async (
   });
 });
 
+test("prepareToolCall models the client's structured→string wire coercion under modelClientCoercion", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-dry-coerce-"));
+  const bodyPath = join(dir, "body.md");
+  await writeFile(bodyPath, "# Body from file\n");
+
+  const inputSchema = {
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      body: { type: "string" },
+      labels: { type: "array", items: { type: "string" } },
+      metadata: { type: "object" },
+    },
+  };
+
+  const upstream = new UpstreamManager() as unknown as {
+    toolMap: Map<string, { server: string; tool: { name: string; inputSchema?: unknown } }>;
+    toolsByServer: Map<string, Array<{ name: string; inputSchema?: unknown }>>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    prepareToolCall: (
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string,
+      options?: { modelClientCoercion?: boolean }
+    ) => Promise<{ resolvedArguments?: Record<string, unknown>; clientCoercions?: string[]; error?: unknown }>;
+  };
+  upstream.toolMap = new Map([
+    ["create_issue", { server: "github", tool: { name: "create_issue", inputSchema } }],
+  ]);
+  upstream.toolsByServer = new Map([["github", [{ name: "create_issue", inputSchema }]]]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["create_issue"])]]);
+
+  try {
+    // A lone {$file} object on a string field resolves to file content — exactly
+    // what the real wire produces after the client stringifies it.
+    const lone = await upstream.prepareToolCall(
+      "create_issue",
+      { body: { $file: bodyPath } },
+      undefined,
+      { modelClientCoercion: true }
+    );
+    assert.equal((lone as { error?: unknown }).error, undefined);
+    assert.deepEqual(lone.resolvedArguments, { body: "# Body from file\n" });
+    assert.deepEqual(lone.clientCoercions, ["arguments.body"]);
+
+    // A non-ref object on a string field becomes literal JSON text on the wire.
+    const literal = await upstream.prepareToolCall(
+      "create_issue",
+      { body: { foo: "bar" } },
+      undefined,
+      { modelClientCoercion: true }
+    );
+    assert.deepEqual(literal.resolvedArguments, { body: '{"foo":"bar"}' });
+    assert.deepEqual(literal.clientCoercions, ["arguments.body"]);
+
+    // Object-typed fields stay structured; string arrays are untouched.
+    const structured = await upstream.prepareToolCall(
+      "create_issue",
+      { title: "T", labels: ["a", "b"], metadata: { ok: true } },
+      undefined,
+      { modelClientCoercion: true }
+    );
+    assert.deepEqual(structured.resolvedArguments, {
+      title: "T",
+      labels: ["a", "b"],
+      metadata: { ok: true },
+    });
+    assert.equal(structured.clientCoercions, undefined);
+
+    // Without the option the idealized object path is preserved (back-compat).
+    const objectPath = await upstream.prepareToolCall("create_issue", {
+      body: { foo: "bar" },
+    });
+    assert.deepEqual(objectPath.resolvedArguments, { body: { foo: "bar" } });
+    assert.equal(objectPath.clientCoercions, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("handleDryRun warns that the client stringifies structured values on string fields", async () => {
+  const upstream = {
+    async prepareToolCall(
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) {
+      // Mimic prepareToolCall under modelClientCoercion: body's object is
+      // stringified and the coerced path is reported back.
+      return {
+        toolName: tool,
+        server: server ?? "github",
+        actualName: tool,
+        resolvedArguments: { ...args, body: JSON.stringify((args as { body: unknown }).body) },
+        clientCoercions: ["arguments.body"],
+      };
+    },
+  };
+
+  const result = await handleDryRun(upstream as never, new CallCache(0), {
+    tool: "create_issue",
+    arguments: { body: { some: "object" } },
+  });
+
+  assert.equal(result.isError, undefined);
+  const content = result.structuredContent as {
+    items: Array<{
+      resolvedArguments?: Record<string, unknown>;
+      warnings?: Array<{ code: string; path: string }>;
+    }>;
+    summary: { warningCount: number };
+  };
+  assert.deepEqual(content.items[0].resolvedArguments, { body: '{"some":"object"}' });
+  const coercionWarning = content.items[0].warnings?.find(
+    (warning) => warning.code === "client_stringifies_structured_value"
+  );
+  assert.ok(coercionWarning, "expected a client-coercion warning");
+  assert.equal(coercionWarning?.path, "arguments.body");
+});
+
 test("handleDryRun warns that pipeline inputMapping is not evaluated", async () => {
   const upstream = {
     async prepareToolCall(

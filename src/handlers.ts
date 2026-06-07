@@ -1420,7 +1420,8 @@ export async function handleDryRun(
     const prepare = await upstream.prepareToolCall(
       call.tool,
       call.arguments,
-      call.server
+      call.server,
+      { modelClientCoercion: true }
     );
 
     if ("error" in prepare) {
@@ -1455,6 +1456,17 @@ export async function handleDryRun(
     const warnings = resolvedArguments
       ? collectArgumentWarnings(resolvedArguments)
       : [];
+    for (const path of prepare.clientCoercions ?? []) {
+      warnings.push({
+        code: "client_stringifies_structured_value",
+        canonicalCode: "structured_value_coerced_to_string_on_wire",
+        path,
+        message:
+          "The MCP client JSON-stringifies this object/array before callmux receives it because the target field is typed as a string. Dry run models that wire coercion so it matches the real call.",
+        recommendation:
+          'A lone {"$file":"…"} object still resolves to file content; any other structured value is forwarded as literal JSON text, not a parsed object.',
+      });
+    }
     if (call.source.mode === "pipeline" && call.source.hasInputMapping) {
       warnings.push({
         code: "pipeline_mapping_not_evaluated_in_dry_run",
