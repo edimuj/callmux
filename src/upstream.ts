@@ -214,6 +214,25 @@ function classifyToolCallFailure(text: string): ToolCallFailureCategory {
   ) {
     return "protocol";
   }
+  // Session checks run before authorization/transport: a downstream may report
+  // an expired session as "401: invalid session", but re-initializing the
+  // connection (not re-auth) is what actually recovers it. Keep the patterns
+  // server-agnostic — any session-based MCP server should land here (#55).
+  if (
+    lower.includes("invalid session") ||
+    lower.includes("session not found") ||
+    lower.includes("unknown session") ||
+    lower.includes("no valid session") ||
+    lower.includes("session is invalid") ||
+    lower.includes("session closed") ||
+    lower.includes("session expired") ||
+    lower.includes("session has expired") ||
+    lower.includes("bad session") ||
+    lower.includes("missing session") ||
+    lower.includes("mcp-session-id")
+  ) {
+    return "session";
+  }
   if (
     lower.includes("unauthorized") ||
     lower.includes("forbidden") ||
@@ -232,14 +251,6 @@ function classifyToolCallFailure(text: string): ToolCallFailureCategory {
     lower.includes("ehostunreach")
   ) {
     return "transport";
-  }
-  if (
-    lower.includes("session not found") ||
-    lower.includes("unknown session") ||
-    lower.includes("session closed") ||
-    lower.includes("session expired")
-  ) {
-    return "session";
   }
   return "unknown";
 }
@@ -269,6 +280,22 @@ function isRetryableToolCallFailure(category: ToolCallFailureCategory): boolean 
     category === "protocol"
   );
 }
+
+/**
+ * Failures the downstream rejects before dispatching to the tool handler, so a
+ * single reconnect-and-retry is side-effect-safe even for a mutating call. A
+ * session error means the server refused the request at the session layer and
+ * never executed it — unlike a timeout/transport drop, which may have run. This
+ * lets writes (e.g. add_issue_comment) recover from an expired session without
+ * the idempotency gate that protects them from double execution. See #55.
+ */
+function isPreExecutionFailure(category: ToolCallFailureCategory): boolean {
+  return category === "session";
+}
+
+const SESSION_REAUTH_HINT =
+  "The downstream session was invalid; callmux reconnected and retried once. " +
+  "If this persists, the upstream server likely needs re-authentication or a fresh credential.";
 
 function normalizeToolCallFailure(error: unknown): NormalizedToolCallFailure {
   const rawMessages = collectErrorMessages(error);
@@ -2158,6 +2185,11 @@ export class UpstreamManager {
       return result;
     } catch (error) {
       const normalized = normalizeToolCallFailure(error);
+      // A session rejection happens before the tool runs downstream, so retrying
+      // it once is safe even for a mutating call that the read-only gate
+      // (retryOnReconnect) would otherwise refuse to retry. See #55.
+      const retrySafe =
+        context?.retryOnReconnect || isPreExecutionFailure(normalized.category);
       if (normalized.retryable) {
         this.retireFailedCallClient(
           prepared.server,
@@ -2166,7 +2198,7 @@ export class UpstreamManager {
           normalized.message,
           scopedKey
         );
-        if (context?.retryOnReconnect) {
+        if (retrySafe) {
           const reconnected = await this.reconnectServer(prepared.server, "call");
           if (reconnected) {
             try {
@@ -2203,6 +2235,9 @@ export class UpstreamManager {
                 rootCause: retryNormalized.rootCause,
                 retryable: retryNormalized.retryable,
                 retryAttempted: true,
+                ...(retryNormalized.category === "session"
+                  ? { hint: SESSION_REAUTH_HINT }
+                  : {}),
               });
             }
           }
@@ -2214,7 +2249,8 @@ export class UpstreamManager {
         category: normalized.category,
         rootCause: normalized.rootCause,
         retryable: normalized.retryable,
-        ...(context?.retryOnReconnect ? { retryAttempted: true } : {}),
+        ...(retrySafe ? { retryAttempted: true } : {}),
+        ...(normalized.category === "session" ? { hint: SESSION_REAUTH_HINT } : {}),
       });
     } finally {
       if (scopedKey) {

@@ -2888,6 +2888,90 @@ test("handleCall retries safe tools once after reconnect but not mutating tools"
   );
 });
 
+test("UpstreamManager reconnects and retries a mutating call once after an invalid-session error (#55)", async () => {
+  const upstream = new UpstreamManager();
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    const currentConnect = connectCount;
+    const tool = mockTool("add_issue_comment");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          // A session rejection is pre-execution, so retrying a write is safe.
+          if (currentConnect === 1) {
+            throw new Error("HTTP 400: Invalid session");
+          }
+          return textResult(`client-${currentConnect}`);
+        },
+        async close() {},
+      },
+      transport: { async close() {} },
+      resolvedTransport: "streamable-http",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  try {
+    const recovered = await upstream.callTool(
+      "add_issue_comment",
+      { body: "ship it" },
+      "github"
+    );
+    assert.equal(connectCount, 2, "expected exactly one reconnect for the session error");
+    assert.equal(recovered.isError, undefined);
+    assert.deepEqual(recovered.content, [{ type: "text", text: "client-2" }]);
+  } finally {
+    await upstream.close();
+  }
+});
+
+test("UpstreamManager surfaces an actionable hint when a session error cannot be recovered (#55)", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: () => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (
+      toolName: string,
+      args?: Record<string, unknown>,
+      serverHint?: string
+    ) => Promise<CallToolResult>;
+  };
+  upstream.clients = new Map([
+    ["remote", { async callTool() { throw new Error("HTTP 400: Invalid session"); } }],
+  ]);
+  upstream.toolMap = new Map([
+    ["add_issue_comment", { server: "remote", tool: { name: "add_issue_comment" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["remote", new Set(["add_issue_comment"])]]);
+
+  const result = await upstream.callTool("add_issue_comment", { body: "x" });
+  const structured = result.structuredContent as {
+    error: { code: string; details?: Record<string, unknown> };
+  };
+  assert.equal(result.isError, true);
+  assert.equal(structured.error.code, "tool_call_failed");
+  // "Invalid session" must classify as a recoverable session error, even though
+  // the literal string matches none of the older session patterns.
+  assert.equal(structured.error.details?.category, "session");
+  assert.equal(structured.error.details?.retryable, true);
+  // A mutating tool is now retry-eligible for session errors despite failing the
+  // read-only safety gate, and the terminal error carries a re-auth hint.
+  assert.equal(structured.error.details?.retryAttempted, true);
+  assert.match(
+    String(structured.error.details?.hint),
+    /re-authentication|reconnected/i
+  );
+});
+
 test("fan-out meta-tools retry safe child calls once after reconnect", async () => {
   async function run(
     mode: "parallel" | "batch" | "pipeline"
