@@ -11253,6 +11253,116 @@ test("stdio bridge emits tool list changed notification when refreshed tools dif
   }
 });
 
+test("stdio bridge sends tool list changed on reconnect when tools differ", async () => {
+  const bridge = new CallmuxBridge({
+    url: "http://127.0.0.1:1/mcp",
+    cwd: process.cwd(),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  let tools = [mockTool("alpha")];
+  const notifications: Array<{ error: Error | null; tools: Tool[] | null }> = [];
+  const bridgeClient = new Client(
+    { name: "bridge-reconnect-refresh-test", version: "1.0" },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 0,
+          onChanged(error, changedTools) {
+            notifications.push({ error, tools: changedTools });
+          },
+        },
+      },
+    }
+  );
+
+  const fakeClient = {
+    async listTools() { return { tools }; },
+    async close() {},
+  };
+  (bridge as any).client = fakeClient;
+
+  try {
+    await (bridge as any).server.connect(serverTransport);
+    await bridgeClient.connect(clientTransport);
+
+    const first = await bridgeClient.listTools();
+    assert.deepEqual(first.tools.map((t: Tool) => t.name), ["alpha"]);
+    assert.equal(notifications.length, 0);
+
+    // Simulate reconnect: tools changed on upstream
+    tools = [mockTool("alpha"), mockTool("beta")];
+    (bridge as any).client = undefined;
+    // connectUpstream would set this.client — simulate that
+    (bridge as any).connectUpstream = async () => {
+      (bridge as any).client = fakeClient;
+      (bridge as any).lastConnectError = undefined;
+    };
+    await (bridge as any).reconnectUpstream();
+
+    // Bridge should have proactively sent toolListChanged
+    await waitFor(async () => notifications.length === 1);
+    assert.equal(notifications[0].error, null);
+  } finally {
+    await bridgeClient.close().catch(() => undefined);
+    await bridge.close();
+  }
+});
+
+test("stdio bridge skips notification on reconnect when tools unchanged", async () => {
+  const bridge = new CallmuxBridge({
+    url: "http://127.0.0.1:1/mcp",
+    cwd: process.cwd(),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const tools = [mockTool("stable")];
+  const notifications: Array<{ error: Error | null; tools: Tool[] | null }> = [];
+  const bridgeClient = new Client(
+    { name: "bridge-reconnect-nochange-test", version: "1.0" },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 0,
+          onChanged(error, changedTools) {
+            notifications.push({ error, tools: changedTools });
+          },
+        },
+      },
+    }
+  );
+
+  const fakeClient = {
+    async listTools() { return { tools }; },
+    async close() {},
+  };
+  (bridge as any).client = fakeClient;
+
+  try {
+    await (bridge as any).server.connect(serverTransport);
+    await bridgeClient.connect(clientTransport);
+
+    await bridgeClient.listTools();
+
+    // Simulate reconnect with same tools
+    (bridge as any).client = undefined;
+    (bridge as any).connectUpstream = async () => {
+      (bridge as any).client = fakeClient;
+      (bridge as any).lastConnectError = undefined;
+    };
+    await (bridge as any).reconnectUpstream();
+
+    // Give it a moment — no notification should fire
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(notifications.length, 0);
+  } finally {
+    await bridgeClient.close().catch(() => undefined);
+    await bridge.close();
+  }
+});
+
 test("stdio bridge preserves per-call cwd metadata for shared listener", async () => {
   const upstream = new UpstreamManager();
   const rootA = await mkdtemp(join(tmpdir(), "callmux-bridge-meta-a-"));

@@ -173,12 +173,26 @@ export class CallmuxBridge {
         await this.closeUpstream();
         await this.connectUpstream();
         this.reconnectAttempts = 0;
+        await this.refreshToolList();
       })().finally(() => {
         this.reconnectPromise = undefined;
       });
     }
 
     await this.reconnectPromise;
+  }
+
+  private async refreshToolList(): Promise<void> {
+    if (!this.client || !this.hasReturnedTools) return;
+    try {
+      const result = await this.client.listTools();
+      if (!sameToolList(result.tools, this.cachedTools)) {
+        this.cachedTools = result.tools;
+        await this.server.sendToolListChanged().catch(() => undefined);
+      }
+    } catch {
+      // Non-fatal — next tools/list call will pick up changes
+    }
   }
 
   private scheduleReconnect(): void {
