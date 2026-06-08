@@ -386,6 +386,10 @@ export class CallmuxListener {
         byServer,
         items: scopedClients,
       },
+      ...((): { unresolvedSessionCwd?: Record<string, number> } => {
+        const counts = this.options.upstream.getUnresolvedSessionCwdCounts();
+        return counts ? { unresolvedSessionCwd: counts } : {};
+      })(),
     };
   }
 

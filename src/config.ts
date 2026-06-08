@@ -1225,6 +1225,13 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
         : (() => {
             throw new Error(`servers.${serverName}.cwdMode must be "global" or "session"`);
           })();
+  if (
+    value.requireSessionCwd !== undefined &&
+    typeof value.requireSessionCwd !== "boolean"
+  ) {
+    throw new Error(`servers.${serverName}.requireSessionCwd must be a boolean`);
+  }
+  const requireSessionCwd = value.requireSessionCwd as boolean | undefined;
 
   return {
     command: value.command as string,
@@ -1232,6 +1239,7 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
     ...(env ? { env } : {}),
     ...(cwd ? { cwd } : {}),
     ...(cwdMode ? { cwdMode } : {}),
+    ...(requireSessionCwd ? { requireSessionCwd } : {}),
     ...shared,
   };
 }

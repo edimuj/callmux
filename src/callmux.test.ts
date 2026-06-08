@@ -2728,6 +2728,69 @@ test("UpstreamManager applies server and per-call timeout overrides", async () =
   assert.deepEqual(observedTimeouts, [60_000, 5_000]);
 });
 
+test("UpstreamManager refuses a requireSessionCwd call when no session cwd resolved", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: () => Promise<CallToolResult> }>;
+    serverConfigs: Map<string, ServerConfig>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string, context?: { cwd?: string }) => Promise<CallToolResult>;
+    getUnresolvedSessionCwdCounts: () => Record<string, number> | undefined;
+  };
+  let invoked = 0;
+
+  upstream.clients = new Map([
+    ["tokenlean", { async callTool() { invoked++; return textResult("ok"); } }],
+  ]);
+  upstream.serverConfigs = new Map([
+    ["tokenlean", { command: "tl-mcp", cwd: "/srv/callmux", requireSessionCwd: true }],
+  ]);
+  upstream.toolMap = new Map([
+    ["tl_symbols", { server: "tokenlean", tool: { name: "tl_symbols" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["tokenlean", new Set(["tl_symbols"])]]);
+
+  const refused = await upstream.callTool("tl_symbols", { files: "src/x.ts" }, "tokenlean");
+
+  assert.equal(invoked, 0, "downstream client must not run when cwd is unresolved");
+  assert.equal(refused.isError, true);
+  const structured = refused.structuredContent as {
+    error: { code: string; message: string; details?: Record<string, unknown> };
+  };
+  assert.equal(structured.error.code, "session_cwd_unresolved");
+  assert.equal(structured.error.details?.callmuxCwd, "/srv/callmux");
+  assert.match(String(structured.error.details?.hint), /absolute paths/i);
+  assert.deepEqual(upstream.getUnresolvedSessionCwdCounts(), { tokenlean: 1 });
+});
+
+test("UpstreamManager counts but allows unresolved cwd when requireSessionCwd is off", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: () => Promise<CallToolResult> }>;
+    serverConfigs: Map<string, ServerConfig>;
+    toolMap: Map<string, { server: string; tool: { name: string } }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+    getUnresolvedSessionCwdCounts: () => Record<string, number> | undefined;
+  };
+  let invoked = 0;
+
+  upstream.clients = new Map([
+    ["tokenlean", { async callTool() { invoked++; return textResult("ok"); } }],
+  ]);
+  // Default (no requireSessionCwd, no cwdMode) → still session-cwd, but lenient.
+  upstream.serverConfigs = new Map([["tokenlean", { command: "tl-mcp" }]]);
+  upstream.toolMap = new Map([
+    ["tl_run", { server: "tokenlean", tool: { name: "tl_run" } }],
+  ]);
+  upstream.exposedToolsByServer = new Map([["tokenlean", new Set(["tl_run"])]]);
+
+  const result = await upstream.callTool("tl_run", { command: "go test ./..." }, "tokenlean");
+
+  assert.equal(invoked, 1, "lenient mode still runs the call");
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(upstream.getUnresolvedSessionCwdCounts(), { tokenlean: 1 });
+});
+
 test("UpstreamManager enforces hard call timeout when client ignores SDK timeout", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
@@ -6097,6 +6160,32 @@ test("loadConfig parses stdio cwdMode from file", async () => {
     const config = await loadConfig(configPath);
     assert.equal((config.servers.tokenlean as StdioServerConfig).cwdMode, "session");
     assert.equal((config.servers.github as StdioServerConfig).cwdMode, "global");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses and validates requireSessionCwd", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-require-cwd-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { tokenlean: { command: "tl-mcp", requireSessionCwd: true } },
+      })
+    );
+    const config = await loadConfig(configPath);
+    assert.equal((config.servers.tokenlean as StdioServerConfig).requireSessionCwd, true);
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { tokenlean: { command: "tl-mcp", requireSessionCwd: "yes" } },
+      })
+    );
+    await assert.rejects(loadConfig(configPath), /requireSessionCwd must be a boolean/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

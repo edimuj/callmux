@@ -106,6 +106,12 @@ export function assertServerConfig(value: unknown, field = "config"): asserts va
   ) {
     throw new Error(`${field}.cwdMode must be "global" or "session"`);
   }
+  if (
+    value.requireSessionCwd !== undefined &&
+    typeof value.requireSessionCwd !== "boolean"
+  ) {
+    throw new Error(`${field}.requireSessionCwd must be a boolean`);
+  }
 }
 
 export async function loadManagementOverlay(

@@ -72,6 +72,7 @@ Local process servers use `command` to launch:
 | `env` | object | - | Environment variables for the process |
 | `cwd` | string | - | Working directory |
 | `cwdMode` | `"global"` or `"session"` | - | Listener-mode cwd behavior. Omit for session/project cwd when available; use `"global"` to force configured/process cwd |
+| `requireSessionCwd` | boolean | `false` | For session-cwd servers (path-sensitive tools like tokenlean): refuse a call with an actionable error when the caller's working directory can't be resolved (no roots, no `x-callmux-cwd` header, no `_meta.callmux.cwd`), instead of silently running relative paths against callmux's own cwd (`$HOME` for a daemon). Unresolved calls are always counted under `unresolvedSessionCwd` in runtime diagnostics regardless of this flag |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
 | `alwaysLoad` | string[] | - | Tool names the MCP client should eagerly load (sets `_meta` `anthropic/alwaysLoad`) |
 | `prefix` | string | - | Override the multi-server sub-prefix for this server's tools (default = server key; `""` drops it). See [Multi-Server Tool Naming](#multi-server-tool-naming) |

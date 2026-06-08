@@ -10,6 +10,15 @@ export interface StdioServerConfig {
   cwd?: string;
   /** Working directory behavior. Listener mode defaults to "session"; stdio mode defaults to "global". */
   cwdMode?: "global" | "session";
+  /**
+   * When this server uses session cwd but callmux cannot resolve the caller's
+   * working directory (no roots, no x-callmux-cwd header, no _meta.callmux.cwd),
+   * refuse the call with an actionable error instead of silently running it in
+   * callmux's own process cwd (which for a daemon is typically $HOME). Default
+   * false: fall back to the global client but warn. Ignored when cwdMode is
+   * "global". See issue #33.
+   */
+  requireSessionCwd?: boolean;
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
   /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
@@ -393,6 +402,13 @@ export interface ListenerRuntimeDiagnostics {
       idle: boolean;
     }>;
   };
+  /**
+   * Count of tool calls per server that hit a session-cwd server without a
+   * resolvable session cwd, so they ran (or were refused) against callmux's own
+   * cwd instead of the caller's. A non-zero entry means relative-path tools may
+   * be resolving against the wrong directory for some sessions. See issue #33.
+   */
+  unresolvedSessionCwd?: Record<string, number>;
 }
 
 // ─── Meta-tool call shapes ─────────────────────────────────────

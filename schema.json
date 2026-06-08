@@ -157,6 +157,10 @@
           "enum": ["global", "session"],
           "description": "Working directory behavior for listener mode stdio calls. Omit to use per-session cwd when available; set global to always use the configured/process cwd."
         },
+        "requireSessionCwd": {
+          "type": "boolean",
+          "description": "For session-cwd (path-sensitive) servers: refuse a call with an actionable error when the caller's working directory cannot be resolved, instead of silently running relative paths against callmux's own cwd. Default false."
+        },
         "tools": {
           "type": "array",
           "items": { "type": "string" },

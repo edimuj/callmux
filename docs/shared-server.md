@@ -152,6 +152,8 @@ Session-cwd stdio clients are reused per `server + cwd` pair and retired after `
 
 If a stdio server should always run from the configured/process cwd regardless of client session, set `cwdMode: "global"` for that server.
 
+Some clients (headless/dashboard-spawned sessions, or any MCP client that advertises no filesystem root) supply no working directory by any channel — no `roots`, no `x-callmux-cwd` header, no `_meta.callmux.cwd`. A session-cwd server then falls back to the global client, which inherits callmux's own cwd (`$HOME` for a daemon), so relative-path tools silently resolve against the wrong directory. callmux always counts these calls under `unresolvedSessionCwd` in runtime diagnostics. For path-sensitive servers (e.g. tokenlean), set `requireSessionCwd: true` to refuse such calls with an actionable error instead of running them in the wrong place — the caller should pass absolute paths, advertise a root, or run through `callmux bridge --cwd "$PWD"`.
+
 ---
 
 ## Endpoints

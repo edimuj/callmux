@@ -297,6 +297,12 @@ const SESSION_REAUTH_HINT =
   "The downstream session was invalid; callmux reconnected and retried once. " +
   "If this persists, the upstream server likely needs re-authentication or a fresh credential.";
 
+const SESSION_CWD_UNRESOLVED_HINT =
+  "callmux could not determine your session's working directory. Either pass " +
+  "absolute paths, or have your MCP client advertise a filesystem root / send the " +
+  "x-callmux-cwd header (the `callmux bridge --cwd` wrapper does this), or call " +
+  "with an explicit cwd argument on parallel/batch/pipeline.";
+
 function normalizeToolCallFailure(error: unknown): NormalizedToolCallFailure {
   const rawMessages = collectErrorMessages(error);
   const joined = rawMessages.join(" | ");
@@ -565,6 +571,8 @@ export class UpstreamManager {
     fastFailDuringBackoff: true,
   };
   private sessionCwdIdleTtlMs = DEFAULT_SESSION_CWD_IDLE_TTL_SECONDS * 1000;
+  private unresolvedSessionCwdCounts = new Map<string, number>();
+  private unresolvedSessionCwdWarned = new Set<string>();
   private closing = false;
   private lifecycleGeneration = 0;
 
@@ -1311,6 +1319,59 @@ export class UpstreamManager {
   private serverUsesSessionCwd(server: string): boolean {
     const config = this.serverConfigs.get(server);
     return Boolean(config && isStdioServerConfig(config) && config.cwdMode !== "global");
+  }
+
+  /**
+   * True when a session-cwd server is configured to refuse calls that arrive
+   * without a resolvable session cwd, rather than silently running them in
+   * callmux's own cwd. See issue #33.
+   */
+  private serverRequiresSessionCwd(server: string): boolean {
+    const config = this.serverConfigs.get(server);
+    return Boolean(
+      config &&
+        isStdioServerConfig(config) &&
+        config.cwdMode !== "global" &&
+        config.requireSessionCwd
+    );
+  }
+
+  /** The cwd a session-cwd server's global fallback client actually inherits. */
+  private globalCwdFor(server: string): string {
+    const config = this.serverConfigs.get(server);
+    const configured = config && isStdioServerConfig(config) ? config.cwd : undefined;
+    return configured ?? process.cwd();
+  }
+
+  /**
+   * Record (and, for enforced servers, warn once per session about) a call to a
+   * session-cwd server that arrived without a resolvable session cwd. Keeps the
+   * silent-$HOME fallback diagnosable instead of invisible. See issue #33.
+   */
+  private noteUnresolvedSessionCwd(
+    server: string,
+    context: ToolCallContext | undefined,
+    warn: boolean
+  ): void {
+    this.unresolvedSessionCwdCounts.set(
+      server,
+      (this.unresolvedSessionCwdCounts.get(server) ?? 0) + 1
+    );
+    if (!warn) return;
+    const key = `${context?.sessionId ?? "?"}\0${server}`;
+    if (this.unresolvedSessionCwdWarned.has(key)) return;
+    this.unresolvedSessionCwdWarned.add(key);
+    process.stderr.write(
+      `[callmux] "${server}" uses session cwd but none was resolved for this session ` +
+        `(no roots, no x-callmux-cwd header, no _meta.callmux.cwd); ` +
+        `refusing rather than running relative paths against ${this.globalCwdFor(server)}. ` +
+        `See issue #33.\n`
+    );
+  }
+
+  getUnresolvedSessionCwdCounts(): Record<string, number> | undefined {
+    if (this.unresolvedSessionCwdCounts.size === 0) return undefined;
+    return Object.fromEntries(this.unresolvedSessionCwdCounts);
   }
 
   private shouldUseSessionCwd(server: string, context?: ToolCallContext): context is ToolCallContext & { cwd: string } {
@@ -2148,6 +2209,29 @@ export class UpstreamManager {
     serverHint?: string
   ): Promise<CallToolResult> {
     const toolName = prepared.toolName;
+    // A session-cwd server with no resolvable cwd would otherwise route to the
+    // global client, which inherits callmux's own cwd ($HOME for a daemon) and
+    // silently resolves relative paths against the wrong directory. Surface it
+    // instead of swallowing it. See issue #33.
+    if (this.serverUsesSessionCwd(prepared.server) && !context?.cwd) {
+      const enforced = this.serverRequiresSessionCwd(prepared.server);
+      this.noteUnresolvedSessionCwd(prepared.server, context, enforced);
+      if (enforced) {
+        return errorResult(
+          "session_cwd_unresolved",
+          `callmux could not resolve this session's working directory for server ` +
+            `"${prepared.server}", so relative paths would resolve against ` +
+            `${this.globalCwdFor(prepared.server)} (callmux's own cwd), not your project.`,
+          {
+            tool: toolName,
+            ...(serverHint ? { server: serverHint } : {}),
+            retryable: false,
+            callmuxCwd: this.globalCwdFor(prepared.server),
+            hint: SESSION_CWD_UNRESOLVED_HINT,
+          }
+        );
+      }
+    }
     const scopedKey = this.shouldUseSessionCwd(prepared.server, context)
       ? this.sessionClientKey(prepared.server, context.cwd)
       : undefined;
