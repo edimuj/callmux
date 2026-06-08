@@ -2761,6 +2761,21 @@ test("UpstreamManager refuses a requireSessionCwd call when no session cwd resol
   assert.equal(structured.error.details?.callmuxCwd, "/srv/callmux");
   assert.match(String(structured.error.details?.hint), /absolute paths/i);
   assert.deepEqual(upstream.getUnresolvedSessionCwdCounts(), { tokenlean: 1 });
+
+  // A call that carries its own absolute cwd arg has no relative-path hazard, so
+  // it must pass through even with requireSessionCwd and no session cwd (#33).
+  const allowed = await upstream.callTool(
+    "tl_symbols",
+    { files: "src/x.ts", cwd: "/home/edimuj/proj" },
+    "tokenlean"
+  );
+  assert.equal(invoked, 1, "explicit-cwd call must reach the downstream client");
+  assert.equal(allowed.isError, undefined);
+  assert.deepEqual(
+    upstream.getUnresolvedSessionCwdCounts(),
+    { tokenlean: 1 },
+    "explicit-cwd call must not count as unresolved"
+  );
 });
 
 test("UpstreamManager counts but allows unresolved cwd when requireSessionCwd is off", async () => {

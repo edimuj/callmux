@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { ChildProcess } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -1336,6 +1337,18 @@ export class UpstreamManager {
     );
   }
 
+  /**
+   * True when the downstream call already carries its own absolute working
+   * directory (tokenlean and most path-tools expose a `cwd` arg). In that case
+   * there's no relative-path-vs-$HOME hazard even without a session cwd, so the
+   * requireSessionCwd guard must let it through. See issue #33.
+   */
+  private callCarriesExplicitCwd(args: Record<string, unknown> | undefined): boolean {
+    if (!args) return false;
+    const candidate = args.cwd ?? args.workingDirectory;
+    return typeof candidate === "string" && isAbsolute(candidate.trim());
+  }
+
   /** The cwd a session-cwd server's global fallback client actually inherits. */
   private globalCwdFor(server: string): string {
     const config = this.serverConfigs.get(server);
@@ -2212,8 +2225,13 @@ export class UpstreamManager {
     // A session-cwd server with no resolvable cwd would otherwise route to the
     // global client, which inherits callmux's own cwd ($HOME for a daemon) and
     // silently resolves relative paths against the wrong directory. Surface it
-    // instead of swallowing it. See issue #33.
-    if (this.serverUsesSessionCwd(prepared.server) && !context?.cwd) {
+    // instead of swallowing it — unless the call already carries its own
+    // absolute cwd arg, in which case there's no hazard. See issue #33.
+    if (
+      this.serverUsesSessionCwd(prepared.server) &&
+      !context?.cwd &&
+      !this.callCarriesExplicitCwd(prepared.resolvedArguments)
+    ) {
       const enforced = this.serverRequiresSessionCwd(prepared.server);
       this.noteUnresolvedSessionCwd(prepared.server, context, enforced);
       if (enforced) {

@@ -372,14 +372,20 @@ export class CallmuxListener {
       activeToolCallCount: this.activeToolCalls.size,
       activeToolCalls: this.activeToolCallDiagnostics(),
       sessions: Array.from(this.sessions.entries())
-        .map(([id, session]) => ({
-          id,
-          transport: this.transportName(session.transport),
-          ...(session.cwd ? { cwd: session.cwd } : {}),
-          ...(session.cwdSource ? { cwdSource: session.cwdSource } : {}),
-          ...(session.clientKind ? { clientKind: session.clientKind } : {}),
-          rootsAttempted: session.rootsAttempted === true,
-        }))
+        .map(([id, session]) => {
+          const clientName = session.server.getClientVersion()?.name;
+          const clientRoots = Boolean(session.server.getClientCapabilities()?.roots);
+          return {
+            id,
+            transport: this.transportName(session.transport),
+            ...(session.cwd ? { cwd: session.cwd } : {}),
+            ...(session.cwdSource ? { cwdSource: session.cwdSource } : {}),
+            ...(session.clientKind ? { clientKind: session.clientKind } : {}),
+            ...(clientName ? { client: clientName } : {}),
+            clientRoots,
+            rootsAttempted: session.rootsAttempted === true,
+          };
+        })
         .sort((left, right) => left.id.localeCompare(right.id)),
       scopedStdioClients: {
         total: scopedClients.length,

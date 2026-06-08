@@ -390,6 +390,10 @@ export interface ListenerRuntimeDiagnostics {
     cwd?: string;
     cwdSource?: "header" | "meta" | "roots";
     clientKind?: "stdio-bridge";
+    /** Reported MCP client name (clientInfo.name), when the client supplied one. */
+    client?: string;
+    /** Whether the client advertised the `roots` capability — the channel callmux uses to learn a session's cwd when no header/_meta is present. */
+    clientRoots?: boolean;
     rootsAttempted: boolean;
   }>;
   scopedStdioClients: {
