@@ -367,8 +367,24 @@ function coercePrimitiveForSchema(value: unknown, schema: Record<string, unknown
   return value;
 }
 
-function coerceValueForSchema(value: unknown, schema: unknown): unknown {
+function coerceValueForSchema(value: unknown, schema: unknown, inUnionBranch = false): unknown {
   if (!isPlainObject(schema)) return value;
+
+  // A structured value (array/object) the client JSON-stringified onto a field
+  // it failed to recognize as structured — e.g. an `anyOf: [number, number[]]`
+  // union with no top-level `type: array`, where the client emits `"[1,2]"`
+  // instead of `[1,2]`. Reverse it only when the *whole* node accepts the
+  // structured shape but NOT a string, so a genuine string branch is never
+  // touched. Skipped inside a union branch: the decision belongs to the parent
+  // node, which can see every sibling branch (a lone `{type: array}` branch in
+  // isolation would wrongly parse a value the union also accepts as a string).
+  // See #35.
+  if (!inUnionBranch) {
+    const structured = parseStringifiedStructure(value, schema);
+    if (structured !== value) {
+      return coerceValueForSchema(structured, schema);
+    }
+  }
 
   const allOf = schemaArrayField(schema, "allOf");
   if (allOf.length > 0) {
@@ -379,7 +395,7 @@ function coerceValueForSchema(value: unknown, schema: unknown): unknown {
     ...schemaArrayField(schema, "anyOf"),
     ...schemaArrayField(schema, "oneOf"),
   ]) {
-    const coerced = coerceValueForSchema(value, nestedSchema);
+    const coerced = coerceValueForSchema(value, nestedSchema, true);
     if (coerced !== value) return coerced;
   }
 
@@ -447,6 +463,40 @@ function schemaPermittedTypes(
 function schemaExpectsStringNotStructured(schema: Record<string, unknown>): boolean {
   const types = schemaPermittedTypes(schema);
   return types.has("string") && !types.has("object") && !types.has("array");
+}
+
+/** True when the schema accepts a structured (object/array) value but not a string. */
+function schemaExpectsStructuredNotString(schema: Record<string, unknown>): boolean {
+  const types = schemaPermittedTypes(schema);
+  return !types.has("string") && (types.has("array") || types.has("object"));
+}
+
+/**
+ * Reverse the client's wire coercion: when a structured value was
+ * JSON-stringified onto a field the schema types as structured-but-not-string,
+ * parse it back to the matching shape. Returns the original value unchanged when
+ * the schema permits a string (ambiguous), the string isn't JSON, or the parsed
+ * type doesn't match what the schema accepts.
+ */
+function parseStringifiedStructure(value: unknown, schema: Record<string, unknown>): unknown {
+  if (typeof value !== "string") return value;
+  if (!schemaExpectsStructuredNotString(schema)) return value;
+
+  const trimmed = value.trim();
+  const first = trimmed[0];
+  if (first !== "[" && first !== "{") return value;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return value; // ordinary string that happens to start with a bracket
+  }
+
+  const types = schemaPermittedTypes(schema);
+  if (Array.isArray(parsed) && types.has("array")) return parsed;
+  if (isPlainObject(parsed) && types.has("object")) return parsed;
+  return value;
 }
 
 /**

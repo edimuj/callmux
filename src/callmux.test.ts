@@ -4711,6 +4711,69 @@ test("prepareToolCall models the client's structured→string wire coercion unde
   }
 });
 
+test("prepareToolCall parses a JSON-stringified array back onto a structured-only union field (#35)", async () => {
+  // Mirrors tokenlean's tl_gh_issue_read `number`: a union that accepts a number
+  // or a number[], with no top-level `type: array`. Clients that fail to
+  // recognize the anyOf as array-typed JSON-stringify the array before it ever
+  // reaches callmux, so the wrapped server saw `"[113, 114]"` and rejected it.
+  const inputSchema = {
+    type: "object",
+    properties: {
+      number: {
+        anyOf: [{ type: "number" }, { type: "array", items: { type: "number" } }],
+      },
+      // A field that legitimately accepts BOTH string and array stays ambiguous —
+      // we must not parse it, or genuine string input breaks.
+      ambiguous: {
+        anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+      },
+      // A plain object-typed field, stringified by the client.
+      filter: { type: "object" },
+    },
+  };
+
+  const upstream = new UpstreamManager() as unknown as {
+    toolMap: Map<string, { server: string; tool: { name: string; inputSchema?: unknown } }>;
+    toolsByServer: Map<string, Array<{ name: string; inputSchema?: unknown }>>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    prepareToolCall: (
+      tool: string,
+      args?: Record<string, unknown>,
+      server?: string
+    ) => Promise<{ resolvedArguments?: Record<string, unknown>; error?: unknown }>;
+  };
+  upstream.toolMap = new Map([
+    ["read_issue", { server: "tokenlean", tool: { name: "read_issue", inputSchema } }],
+  ]);
+  upstream.toolsByServer = new Map([["tokenlean", [{ name: "read_issue", inputSchema }]]]);
+  upstream.exposedToolsByServer = new Map([["tokenlean", new Set(["read_issue"])]]);
+
+  // The stringified array is parsed back, and its items coerced to numbers.
+  const arrayArg = await upstream.prepareToolCall("read_issue", { number: "[113, 114]" });
+  assert.equal((arrayArg as { error?: unknown }).error, undefined);
+  assert.deepEqual(arrayArg.resolvedArguments, { number: [113, 114] });
+
+  // A real array passes straight through (the github `labels` case).
+  const realArray = await upstream.prepareToolCall("read_issue", { number: [113, 114] });
+  assert.deepEqual(realArray.resolvedArguments, { number: [113, 114] });
+
+  // A scalar (or its stringified form) still coerces to a number.
+  const scalar = await upstream.prepareToolCall("read_issue", { number: "114" });
+  assert.deepEqual(scalar.resolvedArguments, { number: 114 });
+
+  // A stringified object on an object-typed field is parsed back.
+  const objField = await upstream.prepareToolCall("read_issue", { filter: '{"open":true}' });
+  assert.deepEqual(objField.resolvedArguments, { filter: { open: true } });
+
+  // A field that also accepts a string is left untouched — never guess.
+  const ambiguous = await upstream.prepareToolCall("read_issue", { ambiguous: "[1, 2]" });
+  assert.deepEqual(ambiguous.resolvedArguments, { ambiguous: "[1, 2]" });
+
+  // A non-JSON string on a structured field is left as-is (no false parse).
+  const notJson = await upstream.prepareToolCall("read_issue", { filter: "not json {" });
+  assert.deepEqual(notJson.resolvedArguments, { filter: "not json {" });
+});
+
 test("handleDryRun warns that the client stringifies structured values on string fields", async () => {
   const upstream = {
     async prepareToolCall(
