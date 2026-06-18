@@ -91,7 +91,7 @@ Parallel calls:
 }
 ```
 
-`timeoutMs` is optional. When set on a meta-tool call, it overrides the server/global timeout for that downstream call.
+`timeoutMs` is optional. When set on a meta-tool call, it overrides the server/global timeout for that downstream call. If no meta `timeoutMs` is set, callmux also honors a downstream argument named `timeoutMs` or `timeout` as that call's timeout budget, while still forwarding the argument to the downstream tool.
 `cwd` is optional and must be an absolute path. For session-cwd stdio servers, it overrides request/session cwd for that downstream call.
 
 If a downstream response is too large, callmux returns a `_callmux.ref` with a compact preview. Page through the full stored result with:

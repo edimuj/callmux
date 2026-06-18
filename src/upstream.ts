@@ -344,6 +344,58 @@ function schemaArrayField(schema: Record<string, unknown>, field: string): Recor
   return value.filter(isPlainObject);
 }
 
+function schemaProperties(schema: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(schema) || !isPlainObject(schema.properties)) return undefined;
+  return schema.properties;
+}
+
+function schemaHasProperty(schema: unknown, property: string): boolean {
+  const properties = schemaProperties(schema);
+  return Boolean(properties && property in properties);
+}
+
+function schemaPropertyIncludesType(
+  schema: unknown,
+  property: string,
+  type: string
+): boolean {
+  const propertySchema = schemaProperties(schema)?.[property];
+  return isPlainObject(propertySchema) && schemaTypeIncludes(propertySchema, type);
+}
+
+function normalizeToolArgumentsForSchema(
+  args: Record<string, unknown> | undefined,
+  schema: unknown
+): Record<string, unknown> | undefined {
+  if (!args) return args;
+
+  let normalized = args;
+  if (
+    isPlainObject(normalized.params) &&
+    !schemaHasProperty(schema, "params") &&
+    Object.keys(normalized).every((key) => key === "method" || key === "params")
+  ) {
+    normalized = { ...normalized.params };
+  }
+
+  if (
+    schemaPropertyIncludesType(schema, "issues", "array") &&
+    !("issues" in normalized)
+  ) {
+    for (const alias of ["issue", "issue_number", "number"]) {
+      if (!(alias in normalized) || schemaHasProperty(schema, alias)) continue;
+      const { [alias]: value, ...rest } = normalized;
+      normalized = {
+        ...rest,
+        issues: Array.isArray(value) ? value : [value],
+      };
+      break;
+    }
+  }
+
+  return normalized;
+}
+
 function coercePrimitiveForSchema(value: unknown, schema: Record<string, unknown>): unknown {
   if (typeof value !== "string") return value;
 
@@ -2107,9 +2159,12 @@ export class UpstreamManager {
         ) as Record<string, unknown>;
       }
       const resolvedArguments = await this.resolveToolArguments(inputArguments);
-      const coercedArguments = resolvedArguments && tool?.inputSchema
-        ? coerceValueForSchema(resolvedArguments, tool.inputSchema) as Record<string, unknown>
+      const normalizedArguments = tool?.inputSchema
+        ? normalizeToolArgumentsForSchema(resolvedArguments, tool.inputSchema)
         : resolvedArguments;
+      const coercedArguments = normalizedArguments && tool?.inputSchema
+        ? coerceValueForSchema(normalizedArguments, tool.inputSchema) as Record<string, unknown>
+        : normalizedArguments;
       return {
         toolName,
         server: resolved.server,

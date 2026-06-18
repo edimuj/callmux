@@ -3724,6 +3724,161 @@ test("UpstreamManager resolves $text line composition with custom join", async (
   assert.equal(capturedArguments?.body, "a | b | c");
 });
 
+test("UpstreamManager unwraps accidental method/params envelopes before forwarding arguments", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: Tool }>;
+    toolsByServer: Map<string, Tool[]>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    [
+      "github",
+      {
+        async callTool(params: { name: string; arguments?: Record<string, unknown> }) {
+          capturedArguments = params.arguments;
+          return textResult("ok");
+        },
+      },
+    ],
+  ]);
+  const commentTool: Tool = {
+    name: "add_issue_comment",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        issue_number: { type: "integer" },
+        body: { type: "string" },
+      },
+    },
+  };
+  upstream.toolMap = new Map([
+    [
+      "gh__add_issue_comment",
+      {
+        server: "github",
+        tool: commentTool,
+      },
+    ],
+  ]);
+  upstream.toolsByServer = new Map([["github", [commentTool]]]);
+  upstream.exposedToolsByServer = new Map([["github", new Set(["add_issue_comment"])]]);
+
+  const result = await upstream.callTool("gh__add_issue_comment", {
+    method: "create",
+    params: {
+      owner: "edimuj",
+      repo: "agent-relay",
+      issue_number: 42,
+      body: "done",
+    },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(capturedArguments, {
+    owner: "edimuj",
+    repo: "agent-relay",
+    issue_number: 42,
+    body: "done",
+  });
+});
+
+test("UpstreamManager keeps params when the downstream schema owns that field", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: Tool }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    ["remote", { async callTool(params) { capturedArguments = params.arguments; return textResult("ok"); } }],
+  ]);
+  upstream.toolMap = new Map([
+    [
+      "remote__rpc",
+      {
+        server: "remote",
+        tool: {
+          name: "rpc",
+          inputSchema: {
+            type: "object",
+            properties: {
+              method: { type: "string" },
+              params: { type: "object" },
+            },
+          },
+        },
+      },
+    ],
+  ]);
+  upstream.exposedToolsByServer = new Map([["remote", new Set(["rpc"])]]);
+
+  const result = await upstream.callTool("remote__rpc", {
+    method: "create",
+    params: { owner: "edimuj" },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(capturedArguments, {
+    method: "create",
+    params: { owner: "edimuj" },
+  });
+});
+
+test("UpstreamManager maps singular issue aliases to an issues array when the schema expects it", async () => {
+  const upstream = new UpstreamManager() as unknown as {
+    clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
+    toolMap: Map<string, { server: string; tool: Tool }>;
+    exposedToolsByServer: Map<string, Set<string>>;
+    callTool: (toolName: string, args?: Record<string, unknown>, serverHint?: string) => Promise<CallToolResult>;
+  };
+
+  let capturedArguments: Record<string, unknown> | undefined;
+  upstream.clients = new Map([
+    ["tokenlean", { async callTool(params) { capturedArguments = params.arguments; return textResult("ok"); } }],
+  ]);
+  upstream.toolMap = new Map([
+    [
+      "tokenlean__tl_gh_issue_close",
+      {
+        server: "tokenlean",
+        tool: {
+          name: "tl_gh_issue_close",
+          inputSchema: {
+            type: "object",
+            properties: {
+              owner: { type: "string" },
+              repo: { type: "string" },
+              issues: { type: "array", items: { type: "integer" } },
+            },
+          },
+        },
+      },
+    ],
+  ]);
+  upstream.exposedToolsByServer = new Map([["tokenlean", new Set(["tl_gh_issue_close"])]]);
+
+  const result = await upstream.callTool("tokenlean__tl_gh_issue_close", {
+    owner: "edimuj",
+    repo: "agent-relay",
+    issue: 481,
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(capturedArguments, {
+    owner: "edimuj",
+    repo: "agent-relay",
+    issues: [481],
+  });
+});
+
 test("UpstreamManager validates $text reference shape and returns structured errors", async () => {
   const upstream = new UpstreamManager() as unknown as {
     clients: Map<string, { callTool: (params: { name: string; arguments?: Record<string, unknown> }) => Promise<CallToolResult> }>;
@@ -7379,6 +7534,23 @@ test("meta tool cwd overrides must be absolute paths", async () => {
 
 test("stdio bridge derives meta-call request timeout from child timeouts", () => {
   assert.deepEqual(
+    deriveBridgeCallOptions("tokenlean__tl_run", { command: "npm test", timeout: 600_000 }, 120_000),
+    { timeout: 605_000 }
+  );
+
+  assert.deepEqual(
+    deriveBridgeCallOptions(
+      "callmux_call",
+      {
+        tool: "tl_run",
+        arguments: { command: "npm test", timeout: 600_000 },
+      },
+      120_000
+    ),
+    { timeout: 605_000 }
+  );
+
+  assert.deepEqual(
     deriveBridgeCallOptions(
       "callmux_parallel",
       {
@@ -7428,6 +7600,76 @@ test("stdio bridge derives meta-call request timeout from child timeouts", () =>
   );
 });
 
+test("meta tools derive downstream timeout overrides from child arguments", async () => {
+  const observed: Array<{ timeoutMs?: number }> = [];
+  const upstream = {
+    resolveServer() {
+      return { server: "tokenlean", actualName: "tl_run" };
+    },
+    getServerConcurrency() {
+      return undefined;
+    },
+    getServerNames() {
+      return ["tokenlean"];
+    },
+    getServerTools() {
+      return ["tl_run"];
+    },
+    async prepareToolCall(tool: string, args?: Record<string, unknown>, server?: string) {
+      return {
+        server: server ?? "tokenlean",
+        actualName: tool,
+        resolvedArguments: args,
+      };
+    },
+    async callTool(
+      _tool: string,
+      _args?: Record<string, unknown>,
+      _server?: string,
+      context?: { timeoutMs?: number }
+    ) {
+      observed.push({
+        ...(context?.timeoutMs !== undefined ? { timeoutMs: context.timeoutMs } : {}),
+      });
+      return textResult("ok");
+    },
+  };
+
+  await handleCall(upstream as never, new CallCache(0), {
+    server: "tokenlean",
+    tool: "tl_run",
+    arguments: { command: "npm test", timeout: 600_000 },
+  });
+  await handleParallel(upstream as never, new CallCache(0), {
+    calls: [{
+      server: "tokenlean",
+      tool: "tl_run",
+      arguments: { command: "npm test", timeoutMs: 700_000 },
+    }],
+  }, 1);
+  await handleBatch(upstream as never, new CallCache(0), {
+    server: "tokenlean",
+    tool: "tl_run",
+    items: [
+      { arguments: { command: "npm test", timeout: 800_000 } },
+    ],
+  }, 1);
+  await handlePipeline(upstream as never, new CallCache(0), {
+    steps: [{
+      server: "tokenlean",
+      tool: "tl_run",
+      arguments: { command: "npm test", timeout: 900_000 },
+    }],
+  });
+
+  assert.deepEqual(observed, [
+    { timeoutMs: 600_000 },
+    { timeoutMs: 700_000 },
+    { timeoutMs: 800_000 },
+    { timeoutMs: 900_000 },
+  ]);
+});
+
 test("listener derives parallel timeout budget from queued child waves", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },
@@ -7455,6 +7697,41 @@ test("listener derives parallel timeout budget from queued child waves", () => {
   });
 
   assert.equal(budget, 301_000);
+});
+
+test("listener derives direct and meta timeout budgets from child arguments", () => {
+  const upstream = createMockUpstream([
+    { server: "tokenlean", tool: mockTool("tl_run") },
+  ]) as unknown as UpstreamManager;
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      callTimeoutMs: 120_000,
+      servers: { tokenlean: { command: "ignored" } },
+    },
+    upstream,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 1,
+  });
+
+  const budget = (listener as unknown as {
+    toolCallTimeoutBudgetMs: (tool: string, args: unknown) => number | undefined;
+  }).toolCallTimeoutBudgetMs;
+
+  assert.equal(
+    budget.call(listener, "tokenlean__tl_run", { command: "npm test", timeout: 600_000 }),
+    600_000
+  );
+  assert.equal(
+    budget.call(listener, "callmux_call", {
+      tool: "tl_run",
+      server: "tokenlean",
+      arguments: { command: "npm test", timeout: 700_000 },
+    }),
+    700_000
+  );
 });
 
 // ─── Pipeline error mid-chain tests ──────────────────────────

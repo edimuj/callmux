@@ -1536,9 +1536,18 @@ export class CallmuxListener {
           this.recordToolCallEvent(name, target, denied, startedAt, false, args);
           return denied;
         }
-        const toolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
+        const baseToolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
           ? await this.resolveToolCallContext(session, server, extra)
           : this.bareToolCallContext(extra);
+        const directArgumentTimeoutMs = name.startsWith("callmux_")
+          ? undefined
+          : downstreamArgumentTimeoutMs(args);
+        const toolContext: ToolCallContext = {
+          ...baseToolContext,
+          ...(directArgumentTimeoutMs !== undefined
+            ? { timeoutMs: directArgumentTimeoutMs }
+            : {}),
+        };
         this.updateActiveToolCall(active.id, {
           ...(toolContext.cwd ? { cwd: toolContext.cwd } : {}),
         });
@@ -1812,9 +1821,16 @@ export class CallmuxListener {
   }
 
   private toolCallTimeoutBudgetMs(tool: string, args: unknown): number | undefined {
-    const downstreamTimeout = (targetTool: unknown, server: unknown, override?: unknown) => {
+    const downstreamTimeout = (
+      targetTool: unknown,
+      server: unknown,
+      override?: unknown,
+      targetArgs?: unknown
+    ) => {
       const explicit = positiveTimeoutMs(override);
       if (explicit !== undefined) return explicit;
+      const argumentTimeout = downstreamArgumentTimeoutMs(targetArgs);
+      if (argumentTimeout !== undefined) return argumentTimeout;
       if (typeof targetTool !== "string") return this.defaultToolCallTimeoutMs();
 
       const serverHint = typeof server === "string" ? server : undefined;
@@ -1829,7 +1845,7 @@ export class CallmuxListener {
 
     if (tool === "callmux_call") {
       if (!isRecord(args) || isCallmuxGetResultCall(args)) return undefined;
-      return downstreamTimeout(args.tool, args.server, args.timeoutMs);
+      return downstreamTimeout(args.tool, args.server, args.timeoutMs, args.arguments);
     }
 
     if (tool === "callmux_parallel") {
@@ -1837,7 +1853,9 @@ export class CallmuxListener {
       return sumDefined(
         ...args.calls
           .filter(isRecord)
-          .map((call) => downstreamTimeout(call.tool, call.server, call.timeoutMs))
+          .map((call) =>
+            downstreamTimeout(call.tool, call.server, call.timeoutMs, call.arguments)
+          )
       );
     }
 
@@ -1847,7 +1865,11 @@ export class CallmuxListener {
       return sumDefined(
         ...args.items
           .filter(isRecord)
-          .map((item) => positiveTimeoutMs(item.timeoutMs) ?? batchTimeout)
+          .map((item) =>
+            positiveTimeoutMs(item.timeoutMs) ??
+            downstreamArgumentTimeoutMs(item.arguments) ??
+            batchTimeout
+          )
       );
     }
 
@@ -1856,7 +1878,9 @@ export class CallmuxListener {
       return sumDefined(
         ...args.steps
           .filter(isRecord)
-          .map((step) => downstreamTimeout(step.tool, step.server, step.timeoutMs))
+          .map((step) =>
+            downstreamTimeout(step.tool, step.server, step.timeoutMs, step.arguments)
+          )
       );
     }
 
@@ -1883,7 +1907,7 @@ export class CallmuxListener {
       return undefined;
     }
 
-    return downstreamTimeout(tool, undefined);
+    return downstreamTimeout(tool, undefined, undefined, args);
   }
 
   private defaultToolCallTimeoutMs(): number {
@@ -2892,6 +2916,11 @@ function positiveTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
+}
+
+function downstreamArgumentTimeoutMs(args: unknown): number | undefined {
+  if (!isRecord(args)) return undefined;
+  return positiveTimeoutMs(args.timeoutMs) ?? positiveTimeoutMs(args.timeout);
 }
 
 function sumDefined(...values: Array<number | undefined>): number | undefined {

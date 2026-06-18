@@ -98,7 +98,7 @@ The bridge is a lightweight local process that Codex talks to over stdio. It con
 
 2. **Resilient reconnection** - Because Codex stays attached to the local stdio bridge, temporary shared-listener restarts, MCP session/transport failures, or downstream server hiccups can recover on the next tool call. The bridge reconnects and retries the request once. Without the bridge, Codex would need a full session restart to re-establish MCP connectivity, something Codex users frequently complain about.
 
-For callmux meta-tools, the bridge derives the forwarded MCP request timeout from the downstream child timeouts plus overhead, so a long `callmux_parallel`, `callmux_batch`, or `callmux_pipeline` call is not cut off by the bridge before callmux can return the child result or timeout.
+For callmux meta-tools, the bridge derives the forwarded MCP request timeout from the downstream child timeouts plus overhead, so a long `callmux_parallel`, `callmux_batch`, or `callmux_pipeline` call is not cut off by the bridge before callmux can return the child result or timeout. For direct proxied tools and meta-tool children, a downstream argument named `timeoutMs` or `timeout` also raises the bridge/listener budget when no explicit meta `timeoutMs` is set.
 
 ### Claude Desktop
 
