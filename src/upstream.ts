@@ -107,7 +107,7 @@ export interface PreparedToolCall {
   clientCoercions?: string[];
 }
 
-export interface PrepareToolCallOptions {
+interface PrepareToolCallOptions {
   /**
    * Reproduce the MCP client's wire coercion (structured value → JSON string on
    * a string-typed field) before resolving file references, so a dry run models

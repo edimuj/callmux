@@ -18,7 +18,7 @@ const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
 /** Counter fields tracked per time bucket and in the all-time aggregate. */
-export interface MetricsCounters {
+interface MetricsCounters {
   /** Inbound tool calls received (one per completed tool_call). */
   calls: number;
   /** callmux_* meta-tool calls. */
@@ -58,7 +58,7 @@ const COUNTER_KEYS: (keyof MetricsCounters)[] = [
 ];
 
 /** A normalized sample recorded for a single completed tool call. */
-export interface ToolCallSample {
+interface ToolCallSample {
   /** Epoch ms the call completed (defaults to now). */
   at?: number;
   /** Server the call targeted, when known (passthrough downstream). */
@@ -85,7 +85,7 @@ export interface ToolCallSample {
   toonSaved?: number;
 }
 
-export interface PerServerCounters {
+interface PerServerCounters {
   calls: number;
   errors: number;
   downstream: number;
@@ -96,12 +96,12 @@ export interface PerServerCounters {
 
 export type MetricsRange = "1h" | "today" | "yesterday" | "7d" | "30d";
 
-export interface MetricsSeriesPoint extends MetricsCounters {
+interface MetricsSeriesPoint extends MetricsCounters {
   /** Bucket start, epoch ms. */
   t: number;
 }
 
-export interface MetricsSeries {
+interface MetricsSeries {
   range: MetricsRange;
   bucketMs: number;
   from: number;
@@ -122,7 +122,7 @@ interface SerializedTier {
   buckets: [number, Partial<MetricsCounters>][];
 }
 
-export interface SerializedMetrics {
+interface SerializedMetrics {
   version: 1;
   startedAt: number;
   aggregate: MetricsCounters;
