@@ -1539,14 +1539,8 @@ export class CallmuxListener {
         const baseToolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
           ? await this.resolveToolCallContext(session, server, extra)
           : this.bareToolCallContext(extra);
-        const directArgumentTimeoutMs = name.startsWith("callmux_")
-          ? undefined
-          : downstreamArgumentTimeoutMs(args);
         const toolContext: ToolCallContext = {
           ...baseToolContext,
-          ...(directArgumentTimeoutMs !== undefined
-            ? { timeoutMs: directArgumentTimeoutMs }
-            : {}),
         };
         this.updateActiveToolCall(active.id, {
           ...(toolContext.cwd ? { cwd: toolContext.cwd } : {}),
@@ -1829,8 +1823,6 @@ export class CallmuxListener {
     ) => {
       const explicit = positiveTimeoutMs(override);
       if (explicit !== undefined) return explicit;
-      const argumentTimeout = downstreamArgumentTimeoutMs(targetArgs);
-      if (argumentTimeout !== undefined) return argumentTimeout;
       if (typeof targetTool !== "string") return this.defaultToolCallTimeoutMs();
 
       const serverHint = typeof server === "string" ? server : undefined;
@@ -1867,7 +1859,6 @@ export class CallmuxListener {
           .filter(isRecord)
           .map((item) =>
             positiveTimeoutMs(item.timeoutMs) ??
-            downstreamArgumentTimeoutMs(item.arguments) ??
             batchTimeout
           )
       );
@@ -2916,11 +2907,6 @@ function positiveTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
-}
-
-function downstreamArgumentTimeoutMs(args: unknown): number | undefined {
-  if (!isRecord(args)) return undefined;
-  return positiveTimeoutMs(args.timeoutMs) ?? positiveTimeoutMs(args.timeout);
 }
 
 function sumDefined(...values: Array<number | undefined>): number | undefined {

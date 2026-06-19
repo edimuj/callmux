@@ -272,7 +272,6 @@ function derivedMetaToolRequestTimeoutMs(
   if (toolName === "callmux_call") {
     return addTimeoutOverhead(
       positiveTimeoutMs(args.timeoutMs) ??
-        downstreamArgumentTimeoutMs(args.arguments) ??
         defaultChildTimeoutMs
     );
   }
@@ -282,7 +281,6 @@ function derivedMetaToolRequestTimeoutMs(
       .filter(isRecord)
       .map((call) =>
         positiveTimeoutMs(call.timeoutMs) ??
-        downstreamArgumentTimeoutMs(call.arguments) ??
         defaultChildTimeoutMs
       );
     return addTimeoutOverhead(sumDefined(...childTimeouts));
@@ -294,7 +292,6 @@ function derivedMetaToolRequestTimeoutMs(
       .filter(isRecord)
       .map((item) =>
         positiveTimeoutMs(item.timeoutMs) ??
-        downstreamArgumentTimeoutMs(item.arguments) ??
         batchTimeout
       )
       .reduce<number | undefined>((total, timeout) => {
@@ -309,7 +306,6 @@ function derivedMetaToolRequestTimeoutMs(
       .filter(isRecord)
       .map((step) =>
         positiveTimeoutMs(step.timeoutMs) ??
-        downstreamArgumentTimeoutMs(step.arguments) ??
         defaultChildTimeoutMs
       )
       .reduce<number | undefined>((total, timeout) => {
@@ -319,18 +315,13 @@ function derivedMetaToolRequestTimeoutMs(
     return addTimeoutOverhead(totalChildTimeout);
   }
 
-  return addTimeoutOverhead(downstreamArgumentTimeoutMs(args));
+  return undefined;
 }
 
 function positiveTimeoutMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
-}
-
-function downstreamArgumentTimeoutMs(args: unknown): number | undefined {
-  if (!isRecord(args)) return undefined;
-  return positiveTimeoutMs(args.timeoutMs) ?? positiveTimeoutMs(args.timeout);
 }
 
 function maxDefined(...values: Array<number | undefined>): number | undefined {

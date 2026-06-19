@@ -38,17 +38,6 @@ import {
 } from "./schema-compression.js";
 import { VERSION } from "./version.js";
 
-function positiveTimeoutMs(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : undefined;
-}
-
-function downstreamArgumentTimeoutMs(args?: Record<string, unknown>): number | undefined {
-  if (!args) return undefined;
-  return positiveTimeoutMs(args.timeoutMs) ?? positiveTimeoutMs(args.timeout);
-}
-
 export class CallmuxProxy {
   private server: Server;
   private upstream: UpstreamManager;
@@ -383,9 +372,7 @@ export class CallmuxProxy {
     const cached = this.cache.get(name, cacheArgs, cacheServer, cacheScope);
     if (cached) return this.shieldResult(target, cached);
 
-    const downstreamTimeoutMs = downstreamArgumentTimeoutMs(cacheArgs);
     const result = await this.upstream.callTool(name, cacheArgs, cacheServer, {
-      ...(downstreamTimeoutMs !== undefined ? { timeoutMs: downstreamTimeoutMs } : {}),
       retryOnReconnect: this.cache.isSafeToRetry(name, cacheServer),
     });
     this.cache.set(name, cacheArgs, result, cacheServer, cacheScope);

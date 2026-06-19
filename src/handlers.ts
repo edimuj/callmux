@@ -190,19 +190,6 @@ function validateTimeoutMs(
   return validatePositiveInteger(value, field, Number.MAX_SAFE_INTEGER);
 }
 
-function positiveTimeoutArgument(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : undefined;
-}
-
-function downstreamArgumentTimeoutMs(
-  args: Record<string, unknown> | undefined
-): number | undefined {
-  if (!args) return undefined;
-  return positiveTimeoutArgument(args.timeoutMs) ?? positiveTimeoutArgument(args.timeout);
-}
-
 function validateCwd(
   value: unknown,
   field: string
@@ -1065,7 +1052,7 @@ export async function handleParallel(
     const callStart = Date.now();
     try {
       const callContext = contextWithCallOverrides(context, {
-        timeoutMs: call.timeoutMs ?? downstreamArgumentTimeoutMs(call.arguments),
+        timeoutMs: call.timeoutMs,
         cwd: call.cwd,
       });
       const prepared = await prepareResolvedCacheKey(
@@ -1170,7 +1157,7 @@ export async function handleBatch(
     const callStart = Date.now();
     try {
       const callContext = contextWithCallOverrides(context, {
-        timeoutMs: item.timeoutMs ?? downstreamArgumentTimeoutMs(item.arguments) ?? timeoutMs,
+        timeoutMs: item.timeoutMs ?? timeoutMs,
         cwd: item.cwd ?? cwd,
       });
       const prepared = await prepareResolvedCacheKey(
@@ -1313,7 +1300,7 @@ export async function handlePipeline(
 
     try {
       const callContext = contextWithCallOverrides(context, {
-        timeoutMs: step.timeoutMs ?? downstreamArgumentTimeoutMs(step.arguments),
+        timeoutMs: step.timeoutMs,
         cwd: step.cwd,
       });
       const prepared = await prepareResolvedCacheKey(
@@ -1594,9 +1581,8 @@ export async function handleCall(
   }
   if ("error" in resolved) return resolved.error;
 
-  const effectiveTimeoutMs = timeoutMs ?? downstreamArgumentTimeoutMs(parsedArgs);
   const callContext = contextWithCallOverrides(context, {
-    ...(typeof effectiveTimeoutMs === "number" ? { timeoutMs: effectiveTimeoutMs } : {}),
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
     ...(typeof cwd === "string" ? { cwd } : {}),
   });
   const prepared = await prepareResolvedCacheKey(upstream, tool, parsedArgs, server);

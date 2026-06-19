@@ -7532,10 +7532,10 @@ test("meta tool cwd overrides must be absolute paths", async () => {
   assert.match((result.content[0] as { text: string }).text, /cwd must be an absolute path/);
 });
 
-test("stdio bridge derives meta-call request timeout from child timeouts", () => {
+test("stdio bridge budgets only explicit callmux timeoutMs overrides", () => {
   assert.deepEqual(
     deriveBridgeCallOptions("tokenlean__tl_run", { command: "npm test", timeout: 600_000 }, 120_000),
-    { timeout: 605_000 }
+    { timeout: 120_000 }
   );
 
   assert.deepEqual(
@@ -7544,6 +7544,19 @@ test("stdio bridge derives meta-call request timeout from child timeouts", () =>
       {
         tool: "tl_run",
         arguments: { command: "npm test", timeout: 600_000 },
+      },
+      120_000
+    ),
+    { timeout: 125_000 }
+  );
+
+  assert.deepEqual(
+    deriveBridgeCallOptions(
+      "callmux_call",
+      {
+        tool: "tl_run",
+        timeoutMs: 600_000,
+        arguments: { command: "npm test", timeout: 1 },
       },
       120_000
     ),
@@ -7600,7 +7613,7 @@ test("stdio bridge derives meta-call request timeout from child timeouts", () =>
   );
 });
 
-test("meta tools derive downstream timeout overrides from child arguments", async () => {
+test("meta tools ignore downstream timeout payload fields", async () => {
   const observed: Array<{ timeoutMs?: number }> = [];
   const upstream = {
     resolveServer() {
@@ -7663,10 +7676,10 @@ test("meta tools derive downstream timeout overrides from child arguments", asyn
   });
 
   assert.deepEqual(observed, [
-    { timeoutMs: 600_000 },
-    { timeoutMs: 700_000 },
-    { timeoutMs: 800_000 },
-    { timeoutMs: 900_000 },
+    {},
+    {},
+    {},
+    {},
   ]);
 });
 
@@ -7699,7 +7712,7 @@ test("listener derives parallel timeout budget from queued child waves", () => {
   assert.equal(budget, 301_000);
 });
 
-test("listener derives direct and meta timeout budgets from child arguments", () => {
+test("listener budgets only explicit callmux timeoutMs overrides", () => {
   const upstream = createMockUpstream([
     { server: "tokenlean", tool: mockTool("tl_run") },
   ]) as unknown as UpstreamManager;
@@ -7722,13 +7735,22 @@ test("listener derives direct and meta timeout budgets from child arguments", ()
 
   assert.equal(
     budget.call(listener, "tokenlean__tl_run", { command: "npm test", timeout: 600_000 }),
-    600_000
+    120_000
   );
   assert.equal(
     budget.call(listener, "callmux_call", {
       tool: "tl_run",
       server: "tokenlean",
       arguments: { command: "npm test", timeout: 700_000 },
+    }),
+    120_000
+  );
+  assert.equal(
+    budget.call(listener, "callmux_call", {
+      tool: "tl_run",
+      server: "tokenlean",
+      timeoutMs: 700_000,
+      arguments: { command: "npm test", timeout: 1 },
     }),
     700_000
   );
