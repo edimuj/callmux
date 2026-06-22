@@ -348,6 +348,7 @@ export function applyServerMutation(
       url: server.url,
       ...(server.transport ? { transport: server.transport } : {}),
       ...(server.headers ? { headers: server.headers } : {}),
+      ...(server.forwardHeaders ? { forwardHeaders: server.forwardHeaders } : {}),
       ...(tools ? { tools } : {}),
       ...(cachePolicy ? { cachePolicy } : {}),
       ...(mutation.clearCallTimeoutMs
@@ -439,6 +440,7 @@ export function serializeServers(config: CallmuxConfig): Array<{
         url: server.url,
         ...(server.transport ? { transport: server.transport } : {}),
         ...(server.tools ? { tools: server.tools } : {}),
+        ...(server.forwardHeaders ? { forwardHeaders: server.forwardHeaders } : {}),
         ...(server.cachePolicy ? { cachePolicy: server.cachePolicy } : {}),
         ...(server.callTimeoutMs !== undefined
           ? { callTimeoutMs: server.callTimeoutMs }
@@ -482,6 +484,7 @@ export function formatServerList(config: CallmuxConfig): string {
       if (isHttpServerConfig(server)) {
         lines.push(`  url: ${redactUrl(server.url)}`);
         if (server.transport) lines.push(`  transport: ${server.transport}`);
+        if (server.forwardHeaders) lines.push(`  forward headers: ${formatValueList(server.forwardHeaders)}`);
       } else {
         lines.push(`  command: ${formatCommand(server)}`);
         if (server.cwd) lines.push(`  cwd: ${server.cwd}`);

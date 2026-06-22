@@ -94,6 +94,7 @@ Remote servers use `url` instead of `command`:
 | `url` | string | yes | URL of the remote MCP server |
 | `transport` | string | - | `"streamable-http"` or `"sse"` (auto-detected if omitted) |
 | `headers` | object | - | HTTP headers (e.g. authorization) |
+| `forwardHeaders` | string[] | - | Incoming listener headers to pass through per client session (opaque; no validation/authz by callmux) |
 | `tools` | string[] | - | Whitelist of tool names to expose (omit = all) |
 | `alwaysLoad` | string[] | - | Tool names the MCP client should eagerly load (sets `_meta` `anthropic/alwaysLoad`) |
 | `prefix` | string | - | Override the multi-server sub-prefix for this server's tools (default = server key; `""` drops it). See [Multi-Server Tool Naming](#multi-server-tool-naming) |
@@ -519,7 +520,8 @@ config — there is no callmux setting for this.
     "remote-api": {
       "url": "https://mcp.example.com/mcp",
       "headers": { "Authorization": "Bearer sk-..." },
-      "transport": "streamable-http"
+      "transport": "streamable-http",
+      "forwardHeaders": ["authorization"]
     }
   },
   "recipes": {

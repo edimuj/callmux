@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -121,6 +122,10 @@ interface ScopedClient {
   transport: Transport;
   tools: Set<string>;
   activeCalls: number;
+  kind: "stdio-cwd" | "http-forward-headers";
+  server: string;
+  label: string;
+  cwd?: string;
   idleTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -854,10 +859,35 @@ export class UpstreamManager {
     });
   }
 
-  private createHttpTransport(config: HttpServerConfig): Transport {
+  private staticHeadersSansForwarded(
+    headers: Record<string, string> | undefined,
+    forwardedHeaders: Record<string, string> | undefined
+  ): Record<string, string> {
+    const forwardedNames = new Set(Object.keys(forwardedHeaders ?? {}).map((name) => name.toLowerCase()));
+    return Object.fromEntries(
+      Object.entries(headers ?? {}).filter(([name]) => !forwardedNames.has(name.toLowerCase()))
+    );
+  }
+
+  private mergedHttpHeaders(
+    config: HttpServerConfig,
+    forwardedHeaders?: Record<string, string>
+  ): Record<string, string> | undefined {
+    const headers = {
+      ...this.staticHeadersSansForwarded(config.headers, forwardedHeaders),
+      ...(forwardedHeaders ?? {}),
+    };
+    return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
+  private createHttpTransport(
+    config: HttpServerConfig,
+    forwardedHeaders?: Record<string, string>
+  ): Transport {
     const url = new URL(config.url);
-    const opts = config.headers
-      ? { requestInit: { headers: config.headers } }
+    const headers = this.mergedHttpHeaders(config, forwardedHeaders);
+    const opts = headers
+      ? { requestInit: { headers } }
       : undefined;
 
     if (config.transport === "sse") {
@@ -870,10 +900,11 @@ export class UpstreamManager {
   private async connectWithFallback(
     name: string,
     config: HttpServerConfig,
-    connectTimeoutMs: number
+    connectTimeoutMs: number,
+    forwardedHeaders?: Record<string, string>
   ): Promise<{ transport: Transport; client: Client; resolvedTransport: "streamable-http" | "sse" }> {
     if (config.transport) {
-      const transport = this.createHttpTransport(config);
+      const transport = this.createHttpTransport(config, forwardedHeaders);
       const client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
       await withTimeout(
         client.connect(transport),
@@ -886,10 +917,11 @@ export class UpstreamManager {
     // Try streamable-http first, fall back to SSE
     let transport: Transport | undefined;
     let client: Client | undefined;
+    const headers = this.mergedHttpHeaders(config, forwardedHeaders);
     try {
       transport = new StreamableHTTPClientTransport(
         new URL(config.url),
-        config.headers ? { requestInit: { headers: config.headers } } : undefined
+        headers ? { requestInit: { headers } } : undefined
       );
       client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
       await withTimeout(
@@ -903,7 +935,7 @@ export class UpstreamManager {
       process.stderr.write(`[callmux] "${name}": streamable-http failed, trying SSE fallback\n`);
       const sseTransport = new SSEClientTransport(
         new URL(config.url),
-        config.headers ? { requestInit: { headers: config.headers } } : undefined
+        headers ? { requestInit: { headers } } : undefined
       );
       const sseClient = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
       await withTimeout(
@@ -1415,8 +1447,47 @@ export class UpstreamManager {
     );
   }
 
-  private sessionClientKey(server: string, cwd: string): string {
-    return `${server}\0${cwd}`;
+  private sessionClientKey(server: string, scope: string): string {
+    return `${server}\0${scope}`;
+  }
+
+  private forwardedHeaderFingerprint(headers: Record<string, string>): string {
+    return Object.entries(headers)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => {
+        const digest = createHash("sha256").update(value).digest("hex");
+        return `${name}=sha256:${digest}`;
+      })
+      .join("&");
+  }
+
+  private forwardedHeadersForServer(
+    server: string,
+    context?: ToolCallContext
+  ): Record<string, string> | undefined {
+    const config = this.serverConfigs.get(server);
+    if (!config || !isHttpServerConfig(config) || !config.forwardHeaders?.length) {
+      return undefined;
+    }
+
+    const forwarded: Record<string, string> = {};
+    for (const header of config.forwardHeaders) {
+      const value = context?.forwardedHeaders?.[header.toLowerCase()];
+      if (value !== undefined) {
+        forwarded[header] = value;
+      }
+    }
+
+    return Object.keys(forwarded).length > 0 ? forwarded : undefined;
+  }
+
+  private forwardedHeaderScope(
+    server: string,
+    context?: ToolCallContext
+  ): string | undefined {
+    const headers = this.forwardedHeadersForServer(server, context);
+    if (!headers) return undefined;
+    return `headers:${this.forwardedHeaderFingerprint(headers)}`;
   }
 
   private serverUsesSessionCwd(server: string): boolean {
@@ -1504,20 +1575,27 @@ export class UpstreamManager {
     serverHint?: string,
     context?: ToolCallContext
   ): string | undefined {
-    return context?.cwd && this.usesSessionCwd(toolName, serverHint)
-      ? context.cwd
-      : undefined;
+    const resolved = this.resolveServer(toolName, serverHint);
+    if (!resolved || "error" in resolved) return undefined;
+
+    const scopeParts: string[] = [];
+    if (context?.cwd && this.serverUsesSessionCwd(resolved.server)) {
+      scopeParts.push(`cwd:${context.cwd}`);
+    }
+    const forwardedScope = this.forwardedHeaderScope(resolved.server, context);
+    if (forwardedScope) scopeParts.push(forwardedScope);
+    return scopeParts.length > 0 ? scopeParts.join("\0") : undefined;
   }
 
   getScopedStdioClientDiagnostics(): ListenerRuntimeDiagnostics["scopedStdioClients"]["items"] {
     return Array.from(this.sessionClients.entries())
+      .filter(([, scoped]) => scoped.kind === "stdio-cwd")
       .map(([key, scoped]) => {
         const separator = key.indexOf("\0");
         const server = separator === -1 ? key : key.slice(0, separator);
-        const cwd = separator === -1 ? "" : key.slice(separator + 1);
         return {
           server,
-          cwd,
+          cwd: scoped.cwd ?? (separator === -1 ? "" : key.slice(separator + 1)),
           activeCalls: scoped.activeCalls,
           idle: scoped.activeCalls === 0,
         };
@@ -1532,7 +1610,7 @@ export class UpstreamManager {
   private refreshSessionClientIdleTimer(
     key: string,
     server: string,
-    cwd: string,
+    label: string,
     scoped: ScopedClient
   ): void {
     if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
@@ -1543,7 +1621,7 @@ export class UpstreamManager {
       if (scoped.activeCalls > 0) return;
       this.sessionClients.delete(key);
       void this.closeQuietly(scoped.client, scoped.transport);
-      process.stderr.write(`[callmux] Session-scoped server "${server}" idle timeout (${cwd})\n`);
+      process.stderr.write(`[callmux] Session-scoped server "${server}" idle timeout (${label})\n`);
     }, this.sessionCwdIdleTtlMs);
     scoped.idleTimer.unref?.();
   }
@@ -1596,7 +1674,7 @@ export class UpstreamManager {
     const config = this.serverConfigs.get(server);
     if (!config || !isStdioServerConfig(config)) return null;
 
-    const key = this.sessionClientKey(server, cwd);
+    const key = this.sessionClientKey(server, `cwd:${cwd}`);
     const existing = this.sessionClients.get(key);
     if (existing) {
       this.acquireSessionClient(existing);
@@ -1625,7 +1703,16 @@ export class UpstreamManager {
           `"${server}" listTools (${cwd})`
         );
         const tools = this.validateSessionToolSurface(server, cwd, allTools);
-        const scoped: ScopedClient = { client, transport, tools, activeCalls: 0 };
+        const scoped: ScopedClient = {
+          client,
+          transport,
+          tools,
+          activeCalls: 0,
+          kind: "stdio-cwd",
+          server,
+          label: cwd,
+          cwd,
+        };
         this.sessionClients.set(key, scoped);
 
         client.onclose = () => {
@@ -1652,11 +1739,93 @@ export class UpstreamManager {
     return scoped;
   }
 
+  private async getForwardedHeaderClient(
+    server: string,
+    forwardedHeaders: Record<string, string>
+  ): Promise<ScopedClient | null> {
+    const config = this.serverConfigs.get(server);
+    if (!config || !isHttpServerConfig(config)) return null;
+
+    const scope = this.forwardedHeaderFingerprint(forwardedHeaders);
+    const key = this.sessionClientKey(server, `headers:${scope}`);
+    const existing = this.sessionClients.get(key);
+    if (existing) {
+      this.acquireSessionClient(existing);
+      return existing;
+    }
+
+    const connecting = this.sessionClientConnects.get(key);
+    if (connecting) {
+      const scoped = await connecting;
+      this.acquireSessionClient(scoped);
+      return scoped;
+    }
+
+    const label = `forwarded headers: ${Object.keys(forwardedHeaders).sort().join(", ")}`;
+    const promise = (async () => {
+      let transport: Transport | undefined;
+      let client: Client | undefined;
+      try {
+        const connected = await this.connectWithFallback(
+          server,
+          config,
+          this.connectTimeoutMs,
+          forwardedHeaders
+        );
+        transport = connected.transport;
+        client = connected.client;
+        const { tools: allTools } = await withTimeout(
+          client.listTools(),
+          this.connectTimeoutMs,
+          `"${server}" listTools (${label})`
+        );
+        const tools = this.validateSessionToolSurface(server, label, allTools);
+        const scoped: ScopedClient = {
+          client,
+          transport,
+          tools,
+          activeCalls: 0,
+          kind: "http-forward-headers",
+          server,
+          label,
+        };
+        this.sessionClients.set(key, scoped);
+
+        client.onclose = () => {
+          if (scoped.idleTimer) clearTimeout(scoped.idleTimer);
+          this.sessionClients.delete(key);
+          process.stderr.write(`[callmux] Session-scoped server "${server}" disconnected (${label})\n`);
+        };
+        client.onerror = (err) => {
+          process.stderr.write(`[callmux] Session-scoped server "${server}" error (${label}): ${err.message}\n`);
+        };
+
+        return scoped;
+      } catch (error) {
+        await this.closeQuietly(client, transport);
+        throw error;
+      } finally {
+        this.sessionClientConnects.delete(key);
+      }
+    })();
+
+    this.sessionClientConnects.set(key, promise);
+    const scoped = await promise;
+    this.acquireSessionClient(scoped);
+    return scoped;
+  }
+
   private async clientForCall(
     server: string,
     toolName: string,
     context?: ToolCallContext
   ): Promise<Client | { error: CallToolResult } | undefined> {
+    const forwardedHeaders = this.forwardedHeadersForServer(server, context);
+    if (forwardedHeaders) {
+      const scoped = await this.getForwardedHeaderClient(server, forwardedHeaders);
+      if (scoped) return scoped.client;
+    }
+
     if (this.shouldUseSessionCwd(server, context)) {
       const scoped = await this.getSessionClient(server, context.cwd);
       if (scoped) return scoped.client;
@@ -2355,9 +2524,12 @@ export class UpstreamManager {
         );
       }
     }
-    const scopedKey = this.shouldUseSessionCwd(prepared.server, context)
-      ? this.sessionClientKey(prepared.server, context.cwd)
-      : undefined;
+    const forwardedScope = this.forwardedHeaderScope(prepared.server, context);
+    const scopedKey = forwardedScope
+      ? this.sessionClientKey(prepared.server, forwardedScope)
+      : this.shouldUseSessionCwd(prepared.server, context)
+        ? this.sessionClientKey(prepared.server, `cwd:${context.cwd}`)
+        : undefined;
     let callClient: Client | undefined;
 
     try {
@@ -2406,7 +2578,9 @@ export class UpstreamManager {
           scopedKey
         );
         if (retrySafe) {
-          const reconnected = await this.reconnectServer(prepared.server, "call");
+          const reconnected = scopedKey
+            ? true
+            : await this.reconnectServer(prepared.server, "call");
           if (reconnected) {
             try {
               return await (async () => {
@@ -2470,7 +2644,7 @@ export class UpstreamManager {
             this.refreshSessionClientIdleTimer(
               scopedKey,
               prepared.server,
-              context?.cwd ?? "",
+              scoped.label,
               scoped
             );
           }

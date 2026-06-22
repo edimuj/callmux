@@ -50,6 +50,11 @@ export interface HttpServerConfig {
   url: string;
   transport?: "streamable-http" | "sse";
   headers?: Record<string, string>;
+  /**
+   * Incoming listener headers to forward to this downstream per client session.
+   * Values are opaque: callmux does not parse, validate, or authorize them.
+   */
+  forwardHeaders?: string[];
   /** Whitelist of tool names to expose (omit to expose all) */
   tools?: string[];
   /** Tool names that should be eagerly loaded by the MCP client (sets _meta "anthropic/alwaysLoad") */
@@ -346,6 +351,8 @@ export interface ToolCallContext {
   cwd?: string;
   /** Client session identifier when available */
   sessionId?: string;
+  /** Opaque incoming headers captured for per-session downstream forwarding */
+  forwardedHeaders?: Record<string, string>;
   /** Force reconnect immediately even when the server is in a scheduled backoff window */
   forceReconnect?: boolean;
   /** Retry once after reconnect when a safe/read-only call hits retryable transport failure */

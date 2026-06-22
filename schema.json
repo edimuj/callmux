@@ -222,6 +222,14 @@
           "additionalProperties": { "type": "string" },
           "description": "HTTP headers sent with requests (e.g. authorization)"
         },
+        "forwardHeaders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+          },
+          "description": "Incoming listener headers to forward to this downstream per client session (opaque passthrough)"
+        },
         "tools": {
           "type": "array",
           "items": { "type": "string" },

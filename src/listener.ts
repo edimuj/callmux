@@ -31,7 +31,7 @@ import {
   handleCacheClear,
   handleStatus,
 } from "./handlers.js";
-import type { CallmuxConfig } from "./types.js";
+import { isHttpServerConfig, type CallmuxConfig } from "./types.js";
 import type { ToolCallContext } from "./types.js";
 import type { ListenerRuntimeDiagnostics } from "./types.js";
 import { isOutputFormat, type OutputFormat } from "./output-format.js";
@@ -117,6 +117,7 @@ interface SessionEntry {
   server: Server;
   cwd?: string;
   cwdSource?: "header" | "meta" | "roots";
+  forwardedHeaders?: Record<string, string>;
   clientKind?: "stdio-bridge";
   rootsAttempted?: boolean;
 }
@@ -1137,6 +1138,7 @@ export class CallmuxListener {
           return;
         }
         this.setSessionCwdFromHeader(session, req);
+        this.setSessionForwardedHeadersFromRequest(session, req);
         await session.transport.handleRequest(req, res);
         return;
       }
@@ -1195,6 +1197,7 @@ export class CallmuxListener {
         return;
       }
       this.setSessionCwdFromHeader(session, req);
+      this.setSessionForwardedHeadersFromRequest(session, req);
       await session.transport.handleRequest(req, res, parsed);
       return;
     }
@@ -1220,6 +1223,7 @@ export class CallmuxListener {
             transport,
             server,
             ...this.sessionCwdFromHeader(req),
+            ...this.sessionForwardedHeadersFromRequest(req),
           });
         },
       });
@@ -1264,6 +1268,7 @@ export class CallmuxListener {
       transport,
       server,
       ...this.sessionCwdFromHeader(req),
+      ...this.sessionForwardedHeadersFromRequest(req),
     });
 
     res.on("close", () => {
@@ -1297,6 +1302,7 @@ export class CallmuxListener {
       return;
     }
     this.setSessionCwdFromHeader(session, req);
+    this.setSessionForwardedHeadersFromRequest(session, req);
 
     const requestedLimit = this.parsePerRequestLimitOverride(req);
     const readLimit = requestedLimit === undefined
@@ -1351,6 +1357,46 @@ export class CallmuxListener {
     }
   }
 
+  private configuredForwardHeaderNames(): Set<string> {
+    const names = new Set<string>();
+    for (const config of Object.values(this.options.config.servers)) {
+      if (!isHttpServerConfig(config)) continue;
+      for (const header of config.forwardHeaders ?? []) {
+        names.add(header.toLowerCase());
+      }
+    }
+    return names;
+  }
+
+  private sessionForwardedHeadersFromRequest(
+    req: IncomingMessage
+  ): Pick<SessionEntry, "forwardedHeaders"> {
+    const configured = this.configuredForwardHeaderNames();
+    if (configured.size === 0) return {};
+
+    const forwardedHeaders: Record<string, string> = {};
+    for (const header of configured) {
+      const value = headerValue(req.headers[header]);
+      if (value !== undefined) {
+        forwardedHeaders[header] = value;
+      }
+    }
+
+    return Object.keys(forwardedHeaders).length > 0 ? { forwardedHeaders } : {};
+  }
+
+  private setSessionForwardedHeadersFromRequest(
+    session: SessionEntry,
+    req: IncomingMessage
+  ): void {
+    const next = this.sessionForwardedHeadersFromRequest(req).forwardedHeaders;
+    if (!next) return;
+    session.forwardedHeaders = {
+      ...(session.forwardedHeaders ?? {}),
+      ...next,
+    };
+  }
+
   private cwdFromMeta(meta: unknown): string | undefined {
     if (!isRecord(meta)) return undefined;
     const callmux = isRecord(meta.callmux) ? meta.callmux : undefined;
@@ -1379,6 +1425,7 @@ export class CallmuxListener {
   ): Promise<ToolCallContext> {
     const context: ToolCallContext = {
       ...(extra.sessionId ? { sessionId: extra.sessionId } : {}),
+      ...(session?.forwardedHeaders ? { forwardedHeaders: session.forwardedHeaders } : {}),
     };
 
     const metaCwd = this.cwdFromMeta(extra._meta);
@@ -1409,9 +1456,13 @@ export class CallmuxListener {
     return context;
   }
 
-  private bareToolCallContext(extra: { sessionId?: string }): ToolCallContext {
+  private bareToolCallContext(
+    session: SessionEntry | undefined,
+    extra: { sessionId?: string }
+  ): ToolCallContext {
     return {
       ...(extra.sessionId ? { sessionId: extra.sessionId } : {}),
+      ...(session?.forwardedHeaders ? { forwardedHeaders: session.forwardedHeaders } : {}),
     };
   }
 
@@ -1538,7 +1589,7 @@ export class CallmuxListener {
         }
         const baseToolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
           ? await this.resolveToolCallContext(session, server, extra)
-          : this.bareToolCallContext(extra);
+          : this.bareToolCallContext(session, extra);
         const toolContext: ToolCallContext = {
           ...baseToolContext,
         };

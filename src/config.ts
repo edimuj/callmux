@@ -129,6 +129,21 @@ function parseStringRecord(
   return Object.fromEntries(entries) as Record<string, string>;
 }
 
+function parseHeaderNames(
+  value: unknown,
+  optionName: string
+): string[] | undefined {
+  const headers = parseStringArray(value, optionName);
+  if (!headers) return undefined;
+  const normalized = headers.map((header) => header.trim().toLowerCase());
+  for (const [index, header] of normalized.entries()) {
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(header)) {
+      throw new Error(`${optionName}[${index}] must be a valid HTTP header name`);
+    }
+  }
+  return Array.from(new Set(normalized));
+}
+
 function parseCachePolicy(
   value: unknown,
   optionName: string
@@ -1194,11 +1209,16 @@ function parseServerConfig(value: unknown, serverName: string): ServerConfig {
         ? value.transport as "streamable-http" | "sse"
         : (() => { throw new Error(`servers.${serverName}.transport must be "streamable-http" or "sse"`); })());
     const headers = parseStringRecord(value.headers, `servers.${serverName}.headers`);
+    const forwardHeaders = parseHeaderNames(
+      value.forwardHeaders,
+      `servers.${serverName}.forwardHeaders`
+    );
 
     return {
       url: value.url as string,
       ...(transport ? { transport } : {}),
       ...(headers ? { headers } : {}),
+      ...(forwardHeaders ? { forwardHeaders } : {}),
       ...shared,
     };
   }

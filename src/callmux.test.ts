@@ -4314,6 +4314,7 @@ test("loadConfig parses HTTP server config from file", async () => {
             url: "https://mcp.example.com/mcp",
             transport: "streamable-http",
             headers: { "X-Api-Key": "secret" },
+            forwardHeaders: ["Authorization"],
             tools: ["search"],
           },
         },
@@ -4326,6 +4327,7 @@ test("loadConfig parses HTTP server config from file", async () => {
       url: "https://mcp.example.com/mcp",
       transport: "streamable-http",
       headers: { "X-Api-Key": "secret" },
+      forwardHeaders: ["authorization"],
       tools: ["search"],
     });
   } finally {
@@ -9206,6 +9208,9 @@ test("unwrap preserves error info from upstream", async () => {
 // ─── Listener tests ─────────────────────────────────────────────
 
 import { CallmuxListener, readBody } from "./listener.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 function listenerPort(listener: CallmuxListener): number {
   const address = (listener as any).httpServer?.address();
@@ -12821,6 +12826,284 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
     await waitFor(async () => (listener as any).getRuntimeDiagnostics().activeSessions === 0);
   } finally {
     await listener.close();
+  }
+});
+
+test("listener forwards configured headers to remote downstream per session without credential bleed", async () => {
+  const downstreamRequests: Array<{
+    rpc?: string;
+    authorization?: string;
+  }> = [];
+  let downstreamSessionCounter = 0;
+  const downstream = createServer(async (req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(405).end();
+      return;
+    }
+    if (req.method === "DELETE") {
+      res.writeHead(200).end();
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    downstreamRequests.push({
+      rpc: message.method,
+      authorization: req.headers.authorization,
+    });
+
+    if (message.method === "initialize") {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "mcp-session-id": `downstream-${++downstreamSessionCounter}`,
+      });
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {} },
+          serverInfo: { name: "header-recorder", version: "1.0.0" },
+        },
+      }));
+      return;
+    }
+
+    if (message.method === "notifications/initialized") {
+      res.writeHead(202).end();
+      return;
+    }
+
+    if (message.method === "tools/list") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: [{
+            name: "whoami",
+            description: "Return forwarded authorization header",
+            inputSchema: { type: "object", properties: {} },
+          }],
+        },
+      }));
+      return;
+    }
+
+    if (message.method === "tools/call") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: textResult(req.headers.authorization ?? ""),
+      }));
+      return;
+    }
+
+    res.writeHead(202).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    downstream.listen(0, "127.0.0.1", resolve);
+    downstream.once("error", reject);
+  });
+  const downstreamAddress = downstream.address();
+  assert.ok(downstreamAddress && typeof downstreamAddress !== "string");
+
+  const remoteConfig = {
+    url: `http://127.0.0.1:${downstreamAddress.port}/mcp`,
+    transport: "streamable-http" as const,
+    forwardHeaders: ["authorization"],
+  };
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(60, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    await upstream.connect({ remote: remoteConfig });
+    const allTools = upstream.getTools().map(({ qualifiedName, tool }) => ({
+      ...tool,
+      name: qualifiedName,
+    }));
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { remote: remoteConfig } },
+      upstream,
+      cache,
+      allTools,
+      maxConcurrency: 10,
+    });
+    await listener.start();
+    const port = listenerPort(listener);
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+    const initialize = async (authorization: string, id: number): Promise<string> => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { ...mcpHeaders, Authorization: authorization },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+          },
+          id,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const sessionId = res.headers.get("mcp-session-id");
+      assert.ok(sessionId);
+      return sessionId;
+    };
+    const callWhoami = async (
+      sessionId: string,
+      authorization: string,
+      id: number
+    ): Promise<string> => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { ...mcpHeaders, "mcp-session-id": sessionId, Authorization: authorization },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: { name: "whoami", arguments: { id: 1 } },
+          id,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = await parseMcpResponseBody(res);
+      return body.result.content[0].text;
+    };
+
+    const tokenA = "Bearer SESSION_A_TOKEN";
+    const tokenB = "Bearer SESSION_B_TOKEN";
+    const sessionA = await initialize(tokenA, 1);
+    const sessionB = await initialize(tokenB, 2);
+    assert.equal(await callWhoami(sessionA, tokenA, 3), tokenA);
+    assert.equal(await callWhoami(sessionB, tokenB, 4), tokenB);
+
+    const downstreamToolCalls = downstreamRequests
+      .filter((request) => request.rpc === "tools/call")
+      .map((request) => request.authorization);
+    assert.deepEqual(downstreamToolCalls, [tokenA, tokenB]);
+    assert.equal(downstreamToolCalls.includes("Bearer STATIC-CONFIG-TOKEN"), false);
+  } finally {
+    await listener?.close();
+    await upstream.close();
+    await new Promise<void>((resolve) => downstream.close(() => resolve()));
+  }
+});
+
+test("UpstreamManager forwards configured headers to remote SSE scoped clients", async () => {
+  const downstreamRequests: Array<{
+    rpc?: string;
+    authorization?: string;
+  }> = [];
+  const transports = new Map<string, SSEServerTransport>();
+  const servers: Server[] = [];
+  const latestPostAuthorization = new Map<string, string | undefined>();
+  const downstream = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+    if (req.method === "GET" && url.pathname === "/sse") {
+      downstreamRequests.push({
+        rpc: "sse/connect",
+        authorization: req.headers.authorization,
+      });
+      const transport = new SSEServerTransport("/messages", res);
+      const server = new Server(
+        { name: "sse-header-recorder", version: "1.0.0" },
+        { capabilities: { tools: {} } }
+      );
+      transports.set(transport.sessionId, transport);
+      servers.push(server);
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [{
+          name: "whoami",
+          description: "Return forwarded authorization header",
+          inputSchema: { type: "object", properties: {} },
+        }],
+      }));
+      server.setRequestHandler(CallToolRequestSchema, async () =>
+        textResult(latestPostAuthorization.get(transport.sessionId) ?? "")
+      );
+      res.on("close", () => {
+        transports.delete(transport.sessionId);
+      });
+      await server.connect(transport);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/messages") {
+      const sessionId = url.searchParams.get("sessionId");
+      const transport = sessionId ? transports.get(sessionId) : undefined;
+      if (!sessionId || !transport) {
+        res.writeHead(404).end();
+        return;
+      }
+      const { body } = await readBody(req);
+      const parsed = JSON.parse(body);
+      downstreamRequests.push({
+        rpc: parsed.method,
+        authorization: req.headers.authorization,
+      });
+      latestPostAuthorization.set(sessionId, req.headers.authorization);
+      await transport.handlePostMessage(req, res, parsed);
+      return;
+    }
+
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    downstream.listen(0, "127.0.0.1", resolve);
+    downstream.once("error", reject);
+  });
+  const downstreamAddress = downstream.address();
+  assert.ok(downstreamAddress && typeof downstreamAddress !== "string");
+
+  const upstream = new UpstreamManager();
+  const remoteConfig = {
+    url: `http://127.0.0.1:${downstreamAddress.port}/sse`,
+    transport: "sse" as const,
+    forwardHeaders: ["authorization"],
+  };
+
+  try {
+    await upstream.connect({ remote: remoteConfig });
+    const tokenA = "Bearer SSE_SESSION_A_TOKEN";
+    const tokenB = "Bearer SSE_SESSION_B_TOKEN";
+    const resultA = await upstream.callTool(
+      "whoami",
+      { id: 1 },
+      "remote",
+      { forwardedHeaders: { authorization: tokenA } }
+    );
+    const resultB = await upstream.callTool(
+      "whoami",
+      { id: 1 },
+      "remote",
+      { forwardedHeaders: { authorization: tokenB } }
+    );
+
+    assert.equal(resultA.content[0].type === "text" ? resultA.content[0].text : "", tokenA);
+    assert.equal(resultB.content[0].type === "text" ? resultB.content[0].text : "", tokenB);
+    assert.deepEqual(
+      downstreamRequests
+        .filter((request) => request.rpc === "tools/call")
+        .map((request) => request.authorization),
+      [tokenA, tokenB]
+    );
+  } finally {
+    await upstream.close();
+    await Promise.all(servers.map((server) => server.close().catch(() => undefined)));
+    await new Promise<void>((resolve) => downstream.close(() => resolve()));
   }
 });
 

@@ -90,6 +90,7 @@ export function assertServerConfig(value: unknown, field = "config"): asserts va
     if (value.headers !== undefined && !isRecord(value.headers)) {
       throw new Error(`${field}.headers must be an object`);
     }
+    assertStringArray(value.forwardHeaders, `${field}.forwardHeaders`);
     return;
   }
   assertStringArray(value.args, `${field}.args`);

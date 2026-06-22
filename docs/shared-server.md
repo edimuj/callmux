@@ -238,6 +238,35 @@ callmux can connect to remote MCP servers over HTTP alongside local stdio proces
 }
 ```
 
+If a remote downstream needs the caller's own credential instead of a shared
+config-time header, declare the incoming headers to pass through:
+
+```json
+{
+  "servers": {
+    "relay": {
+      "url": "https://relay.example.com/mcp",
+      "transport": "streamable-http",
+      "forwardHeaders": ["authorization"]
+    }
+  }
+}
+```
+
+`forwardHeaders` is per downstream and works for both Streamable HTTP and legacy
+SSE remotes. For each listener MCP session, callmux captures the configured
+incoming header values and creates downstream HTTP clients keyed by that opaque
+header scope, so a request carrying token B never reuses a downstream client
+created with token A. Cache entries for read tools are partitioned by the same
+scope.
+
+callmux stays a dumb forwarder here: it does not parse, validate, authorize, or
+turn the forwarded value into a principal. The downstream remote remains the
+only authorization boundary. If a forwarded header has the same name as a static
+`headers` entry, the forwarded session value wins for that scoped downstream
+client; non-passthrough servers continue using only their configured static
+headers.
+
 **Inline mode** for a single remote server:
 
 ```bash
