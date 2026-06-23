@@ -50,6 +50,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
 | `metaOnly` | boolean | `false` | Hide proxied tools, expose only meta-tools ([details](meta-only-mode.md)) |
+| `exposeMetaTools` | boolean | `true` | Expose `callmux_*` meta-tools in `tools/list`; set `false` to list only proxied downstream tools |
 | `descriptionMaxLength` | integer | - | Default max chars for tool descriptions in `callmux_status` |
 | `outputFormat` | `"json"`, `"toon"`, or `"auto"` | `"json"` | Model-facing text format for callmux-owned structured results |
 | `responseShield` | object | enabled | Response truncation, stored-result refs, and per-tool shielding rules |
@@ -57,6 +58,8 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 
 Tool-call timeout precedence is: meta-tool `timeoutMs`, then `servers.<name>.callTimeoutMs`, then global `callTimeoutMs`, then the built-in default.
 Session-cwd precedence is: explicit meta-tool `cwd`, request `_meta` cwd, existing session cwd/header, then MCP roots when no session cwd exists.
+
+`metaOnly` and `exposeMetaTools` control opposite halves of the exposed tool list. `metaOnly: true` hides proxied downstream tools and keeps meta-tools. `exposeMetaTools: false` hides meta-tools and keeps proxied downstream tools. Setting both would expose no tools, so config loading rejects that combination.
 
 `outputFormat` controls the model-facing text for callmux-owned structured results. JSON mode keeps `structuredContent`; when `"toon"` or `"auto"` actually emits non-JSON TOON text, callmux omits final `structuredContent` so clients do not display the JSON payload instead. Cache keys, stored results, dashboard state, and pipeline `$json` mapping stay JSON-native internally. Use `"toon"` for explicit TOON rendering, or `"auto"` to choose TOON only for larger tabular payloads where it is materially smaller than pretty JSON.
 
@@ -576,6 +579,7 @@ config — there is no callmux setting for this.
   "callTimeoutMs": 180000,
   "strictStartup": false,
   "metaOnly": false,
+  "exposeMetaTools": true,
   "descriptionMaxLength": 80,
   "outputFormat": "json",
   "responseShield": {

@@ -5889,6 +5889,33 @@ test("meta-only proxy exposes only meta-tools", async () => {
   assert.ok(META_TOOLS.some((t) => t.name === "callmux_recipe_run"));
 });
 
+test("proxy exposes meta-tools by default", () => {
+  const proxy = new CallmuxProxy({
+    servers: { github: { command: "ignored" } },
+  });
+  (proxy as unknown as { upstream: UpstreamManager }).upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as UpstreamManager;
+
+  const tools = proxy.getTools().map((tool) => tool.name);
+  assert.ok(tools.includes("get_issue"));
+  assert.ok(tools.includes("callmux_status"));
+});
+
+test("proxy suppresses meta-tools when exposeMetaTools is false", () => {
+  const proxy = new CallmuxProxy({
+    servers: { github: { command: "ignored" } },
+    exposeMetaTools: false,
+  });
+  (proxy as unknown as { upstream: UpstreamManager }).upstream = createMockUpstream([
+    { server: "github", tool: mockTool("get_issue") },
+  ]) as unknown as UpstreamManager;
+
+  const tools = proxy.getTools().map((tool) => tool.name);
+  assert.ok(tools.includes("get_issue"));
+  assert.ok(!tools.some((name) => name.startsWith("callmux_")));
+});
+
 test("configFromArgs parses --meta-only flag", () => {
   const config = configFromArgs(["--meta-only", "--", "node", "server.js"]);
   assert.equal(config.metaOnly, true);
@@ -5935,8 +5962,31 @@ test("loadConfig parses metaOnly, descriptionMaxLength, and outputFormat from fi
 
     const config = await loadConfig(configPath);
     assert.equal(config.metaOnly, true);
+    assert.equal(config.exposeMetaTools, undefined);
     assert.equal(config.descriptionMaxLength, 80);
     assert.equal(config.outputFormat, "auto");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig parses exposeMetaTools from file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-expose-meta-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: {
+          github: { command: "node", args: ["server.js"] },
+        },
+        exposeMetaTools: false,
+      })
+    );
+
+    const config = await loadConfig(configPath);
+    assert.equal(config.exposeMetaTools, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -7270,6 +7320,48 @@ test("loadConfig rejects invalid metaOnly type", async () => {
     );
 
     await assert.rejects(loadConfig(configPath), /metaOnly must be a boolean/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects invalid exposeMetaTools type", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-expose-meta-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        exposeMetaTools: "no",
+      })
+    );
+
+    await assert.rejects(loadConfig(configPath), /exposeMetaTools must be a boolean/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects metaOnly with exposeMetaTools false", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-expose-meta-"));
+  const configPath = join(dir, "config.json");
+
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        servers: { github: { command: "node", args: ["server.js"] } },
+        metaOnly: true,
+        exposeMetaTools: false,
+      })
+    );
+
+    await assert.rejects(
+      loadConfig(configPath),
+      /metaOnly and exposeMetaTools:false are mutually exclusive/
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

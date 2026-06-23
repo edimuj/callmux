@@ -1334,6 +1334,16 @@ async function parseConfigDocument(
 }> {
   const configBaseDir = sourcePath ? dirname(resolve(sourcePath)) : undefined;
   const parseSharedFields = async () => {
+    const metaOnly = parseBooleanOption(parsed.metaOnly, "metaOnly");
+    const exposeMetaTools = parseBooleanOption(
+      parsed.exposeMetaTools,
+      "exposeMetaTools"
+    );
+    if (metaOnly === true && exposeMetaTools === false) {
+      throw new Error(
+        "metaOnly and exposeMetaTools:false are mutually exclusive - that would expose no tools"
+      );
+    }
     const cachePolicy = parseCachePolicy(parsed.cachePolicy, "cachePolicy");
     const responseShield = parseResponseShieldConfig(
       parsed.responseShield,
@@ -1421,12 +1431,10 @@ async function parseConfigDocument(
           }
         : {}),
       ...(parsed.metaOnly !== undefined
-        ? {
-            metaOnly:
-              typeof parsed.metaOnly === "boolean"
-                ? parsed.metaOnly
-                : (() => { throw new Error("metaOnly must be a boolean"); })(),
-          }
+        ? { metaOnly }
+        : {}),
+      ...(parsed.exposeMetaTools !== undefined
+        ? { exposeMetaTools }
         : {}),
       ...(parsed.descriptionMaxLength !== undefined
         ? {

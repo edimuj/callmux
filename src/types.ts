@@ -317,6 +317,8 @@ export interface CallmuxConfig {
   maxCacheEntries?: number;
   /** Hide proxied tools, expose only meta-tools (callmux_call, parallel, batch, etc.) */
   metaOnly?: boolean;
+  /** Expose callmux meta-tools in tools/list (default: true) */
+  exposeMetaTools?: boolean;
   /** Default max chars for tool descriptions in callmux_status (0 or omit = no limit) */
   descriptionMaxLength?: number;
   /** Model-facing text output format for callmux-owned structured results */

@@ -156,6 +156,8 @@ callmux daemon install --start --enable
 
 [Full guide ->](docs/meta-only-mode.md)
 
+Set `exposeMetaTools: false` when you want the opposite shape: list only proxied downstream tools and hide the `callmux_*` meta-tools.
+
 ### Schema Compression: Sensible Tool Defaults
 
 Balanced schema compression is enabled by default. It minimizes verbose MCP tool and parameter descriptions before they enter the client context, while preserving names, types, required fields, enums, defaults, and bounds. Configure it globally or per server when a downstream MCP server needs more or less description.
@@ -214,7 +216,7 @@ Large structured tool results can render as TOON with `outputFormat: "toon"` or 
 
 ## Meta-Tools
 
-These tools are exposed to your agent alongside (or instead of) the proxied tools:
+These tools are exposed to your agent alongside (or instead of) the proxied tools. Set `exposeMetaTools: false` in config to suppress them from `tools/list`.
 
 | Tool | Purpose |
 |:-----|:--------|

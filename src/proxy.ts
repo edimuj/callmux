@@ -58,6 +58,7 @@ export class CallmuxProxy {
     const fingerprint = {
       serverFingerprint,
       metaOnly: config.metaOnly ?? false,
+      exposeMetaTools: config.exposeMetaTools ?? true,
       strictStartup: config.strictStartup ?? false,
       cwd: process.cwd(),
     };
@@ -146,10 +147,16 @@ export class CallmuxProxy {
     const totalTools = proxiedTools.length;
     const serverCount = connections.length;
 
+    const exposeMetaTools = this.config.exposeMetaTools ?? true;
     if (this.config.metaOnly) {
-      this.allTools = [...META_TOOLS];
+      this.allTools = exposeMetaTools ? [...META_TOOLS] : [];
       process.stderr.write(
         `[callmux] Meta-only mode: ${META_TOOLS.length} meta-tools (${totalTools} tools available via callmux_call/parallel/batch from ${serverCount} server(s))\n`
+      );
+    } else if (!exposeMetaTools) {
+      this.allTools = [...proxiedTools];
+      process.stderr.write(
+        `[callmux] Proxying ${totalTools} tools from ${serverCount} server(s); meta-tools hidden\n`
       );
     } else {
       this.allTools = [...proxiedTools, ...META_TOOLS];
@@ -173,9 +180,12 @@ export class CallmuxProxy {
   getConfig(): CallmuxConfig { return this.config; }
 
   private currentTools(): Tool[] {
-    const metaTools = META_TOOLS.map((tool) =>
-      compressToolForExposure(tool, this.config.schemaCompression)
-    );
+    const exposeMetaTools = this.config.exposeMetaTools ?? true;
+    const metaTools = exposeMetaTools
+      ? META_TOOLS.map((tool) =>
+          compressToolForExposure(tool, this.config.schemaCompression)
+        )
+      : [];
     if (this.config.metaOnly) return metaTools;
     const proxiedTools = this.upstream.getTools().map(({ qualifiedName, server, tool }) => {
       const serverCfg = this.config.servers[server];

@@ -8,12 +8,14 @@ Every tool definition in the system prompt costs tokens on every API turn. With 
 
 **Meta-only mode** hides all proxied tools and exposes only the 11 callmux meta-tools. The agent discovers available tools via `callmux_search_tools` or `callmux_status` and invokes them through `callmux_call`, recipes, or the batch/parallel meta-tools.
 
+This is the inverse of `exposeMetaTools: false`. Use `metaOnly: true` when you want only `callmux_*` meta-tools listed. Use `exposeMetaTools: false` when you want only proxied downstream tools listed. Config loading rejects `metaOnly: true` together with `exposeMetaTools: false` because that would expose no tools.
+
 | | Standard Mode | Meta-Only Mode |
 |:---|:---|:---|
 | Tools in listing | All downstream + 11 meta-tools | 11 meta-tools only |
 | Single tool call | Direct by name | `callmux_call` |
 | Tool discovery | Automatic (in listing) | `callmux_search_tools` or `callmux_status` with `descriptions: true` |
-| System prompt size | Grows with server count | Fixed at 9 tools |
+| System prompt size | Grows with server count | Fixed at 11 tools |
 
 ---
 

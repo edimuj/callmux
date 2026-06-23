@@ -14,6 +14,17 @@
       "not": { "required": ["servers"] }
     }
   ],
+  "allOf": [
+    {
+      "not": {
+        "required": ["metaOnly", "exposeMetaTools"],
+        "properties": {
+          "metaOnly": { "const": true },
+          "exposeMetaTools": { "const": false }
+        }
+      }
+    }
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -81,6 +92,11 @@
       "type": "boolean",
       "default": false,
       "description": "Hide proxied tools, expose only meta-tools (callmux_call, parallel, batch, etc.)"
+    },
+    "exposeMetaTools": {
+      "type": "boolean",
+      "default": true,
+      "description": "Expose callmux_* meta-tools in tools/list. Set false to expose only proxied downstream tools."
     },
     "descriptionMaxLength": {
       "type": "integer",

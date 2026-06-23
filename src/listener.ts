@@ -1902,9 +1902,12 @@ export class CallmuxListener {
   }
 
   private currentTools(): Tool[] {
-    const metaTools = META_TOOLS.map((tool) =>
-      compressToolForExposure(tool, this.options.config.schemaCompression)
-    );
+    const exposeMetaTools = this.options.config.exposeMetaTools ?? true;
+    const metaTools = exposeMetaTools
+      ? META_TOOLS.map((tool) =>
+          compressToolForExposure(tool, this.options.config.schemaCompression)
+        )
+      : [];
     if (this.options.config.metaOnly) return metaTools;
     const proxiedTools = this.options.upstream.getTools().map(({ qualifiedName, server, tool }) => {
       const serverCfg = this.options.config.servers[server];
