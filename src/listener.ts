@@ -226,6 +226,7 @@ export class CallmuxListener {
   private metricsStore = new MetricsStore();
   private metricsPath: string | undefined;
   private metricsDirty = false;
+  private metricsFlushInFlight: Promise<void> | undefined;
   private metricsFlushTimer: ReturnType<typeof setInterval> | undefined;
   private metricsLoaded = false;
   private activeToolCalls = new Map<string, ActiveToolCallEntry>();
@@ -1066,7 +1067,25 @@ export class CallmuxListener {
 
   /** Persist metrics atomically (temp file + rename) so a crash can't corrupt it. */
   private async flushMetrics(): Promise<void> {
-    if (!this.metricsPath || !this.metricsDirty) return;
+    if (!this.metricsPath) return;
+    if (this.metricsFlushInFlight) {
+      await this.metricsFlushInFlight;
+    }
+    if (!this.metricsDirty) return;
+
+    const flush = this.writeMetricsSnapshot();
+    this.metricsFlushInFlight = flush;
+    try {
+      await flush;
+    } finally {
+      if (this.metricsFlushInFlight === flush) {
+        this.metricsFlushInFlight = undefined;
+      }
+    }
+  }
+
+  private async writeMetricsSnapshot(): Promise<void> {
+    if (!this.metricsPath) return;
     this.metricsDirty = false;
     const payload = JSON.stringify(this.metricsStore.toJSON());
     try {

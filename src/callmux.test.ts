@@ -2847,6 +2847,79 @@ test("UpstreamManager enforces hard call timeout when client ignores SDK timeout
   assert.equal(structured.error.details?.retryable, true);
 });
 
+test("parallel fan-out returns partial promptly when one downstream hangs", async () => {
+  const upstream = new UpstreamManager(120_000);
+  let slowClosed = false;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    const tool = mockTool("get_issue");
+    return {
+      name,
+      config,
+      client: {
+        async callTool() {
+          if (name === "slow") {
+            await new Promise(() => {});
+          }
+          return textResult(`${name}:ok`);
+        },
+        async close() {
+          if (name === "slow") slowClosed = true;
+        },
+      },
+      transport: { async close() {} },
+      resolvedTransport: "stdio",
+      allTools: [tool],
+      tools: [tool],
+      connectDurationMs: 1,
+    };
+  };
+
+  await upstream.connect(
+    { slow: { command: "slow-mcp" }, good: { command: "good-mcp" } },
+    { reconnectPolicy: { initialDelayMs: 60_000, maxDelayMs: 60_000, jitterRatio: 0 } }
+  );
+
+  try {
+    const startedAt = performance.now();
+    const result = await handleParallel(
+      upstream,
+      new CallCache(0),
+      {
+        calls: [
+          { server: "slow", tool: "get_issue", timeoutMs: 20 },
+          { server: "good", tool: "get_issue", timeoutMs: 20 },
+        ],
+      },
+      2
+    );
+    const durationMs = performance.now() - startedAt;
+    const content = result.structuredContent as {
+      status: string;
+      succeeded: number;
+      failed: number;
+      failedIndexes: number[];
+      results: Array<{ result?: { error?: string; isError?: boolean } }>;
+    };
+
+    assert.equal(content.status, "partial");
+    assert.equal(content.succeeded, 1);
+    assert.equal(content.failed, 1);
+    assert.deepEqual(content.failedIndexes, [0]);
+    assert.equal(content.results[0].result?.isError, true);
+    assert.match(content.results[0].result?.error ?? "", /timed out after 20ms/i);
+    assert.equal(content.results[1].result, "good:ok");
+    assert.ok(durationMs < 500, `fan-out should not hang behind slow downstream; took ${durationMs}ms`);
+    assert.equal(slowClosed, true);
+    assert.equal(upstream.getServerInfo("slow")?.state, "reconnecting");
+  } finally {
+    await upstream.close();
+  }
+});
+
 test("UpstreamManager retires and reconnects a client after hard call timeout", async () => {
   const upstream = new UpstreamManager(5);
   let connectCount = 0;
@@ -13562,6 +13635,41 @@ test("listener dashboard metrics endpoint aggregates and persists across restart
     await listener2?.close();
     await upstream.close();
     await upstream2.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener dashboard metrics flush stays idle until metrics change", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-metrics-idle-"));
+  const configPath = join(dir, "config.json");
+  const metricsPath = join(dir, "callmux-metrics.json");
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      configPath,
+      config: { servers: {}, dashboard: { enabled: true, maxEvents: 50 } },
+      upstream,
+      cache,
+      allTools: [],
+      maxConcurrency: 10,
+    });
+
+    await listener.start();
+    await (listener as unknown as { flushMetrics: () => Promise<void> }).flushMetrics();
+    await listener.close();
+    listener = undefined;
+
+    await assert.rejects(readFile(metricsPath, "utf8"), {
+      code: "ENOENT",
+    });
+  } finally {
+    await listener?.close();
+    await upstream.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

@@ -2609,6 +2609,15 @@ export class UpstreamManager {
               })();
             } catch (retryError) {
               const retryNormalized = normalizeToolCallFailure(retryError);
+              if (retryNormalized.retryable) {
+                this.retireFailedCallClient(
+                  prepared.server,
+                  callClient,
+                  retryNormalized.category,
+                  retryNormalized.message,
+                  scopedKey
+                );
+              }
               return errorResult("tool_call_failed", retryNormalized.message, {
                 tool: toolName,
                 ...(serverHint ? { server: serverHint } : {}),
