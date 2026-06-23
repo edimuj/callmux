@@ -11,6 +11,7 @@ import type {
   CachePolicyConfig,
   CallmuxConfig,
   ConfigFormat,
+  EventStoreConfig,
   MetricsConfig,
   DashboardConfig,
   ManagementConfig,
@@ -573,6 +574,53 @@ function parseDashboardConfig(
     ...(enabled !== undefined ? { enabled } : {}),
     ...(path ? { path } : {}),
     ...(maxEvents !== undefined ? { maxEvents } : {}),
+  };
+}
+
+function parseEventStoreConfig(
+  value: unknown,
+  optionName: string
+): EventStoreConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`${optionName} must be an object`);
+  }
+
+  const enabled = parseBooleanOption(value.enabled, `${optionName}.enabled`);
+  const path =
+    value.path === undefined
+      ? undefined
+      : typeof value.path === "string" && value.path.trim().length > 0
+        ? value.path
+        : (() => {
+            throw new Error(`${optionName}.path must be a non-empty string`);
+          })();
+  const maxRows = value.maxRows !== undefined
+    ? parseNonNegativeInteger(value.maxRows, `${optionName}.maxRows`)
+    : undefined;
+  const retentionDays = value.retentionDays !== undefined
+    ? parseNonNegativeInteger(value.retentionDays, `${optionName}.retentionDays`)
+    : undefined;
+  const pruneEvery = value.pruneEvery !== undefined
+    ? parsePositiveInteger(value.pruneEvery, `${optionName}.pruneEvery`)
+    : undefined;
+
+  if (
+    enabled === undefined &&
+    path === undefined &&
+    maxRows === undefined &&
+    retentionDays === undefined &&
+    pruneEvery === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(path ? { path } : {}),
+    ...(maxRows !== undefined ? { maxRows } : {}),
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
+    ...(pruneEvery !== undefined ? { pruneEvery } : {}),
   };
 }
 
@@ -1308,6 +1356,7 @@ async function parseConfigDocument(
     const auditLog = parseAuditLogConfig(parsed.auditLog, "auditLog");
     const metrics = parseMetricsConfig(parsed.metrics, "metrics");
     const dashboard = parseDashboardConfig(parsed.dashboard, "dashboard");
+    const eventStore = parseEventStoreConfig(parsed.eventStore, "eventStore");
     const management = await parseManagementConfig(
       parsed.management,
       "management",
@@ -1419,6 +1468,7 @@ async function parseConfigDocument(
       ...(auditLog ? { auditLog } : {}),
       ...(metrics ? { metrics } : {}),
       ...(dashboard ? { dashboard } : {}),
+      ...(eventStore ? { eventStore } : {}),
       ...(management ? { management } : {}),
       ...(recipes ? { recipes } : {}),
       ...(parsed.allowInsecureRemoteListener !== undefined

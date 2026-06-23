@@ -45,6 +45,7 @@ callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you 
 | `auditLog` | object | - | Structured per-request audit logging ([details](enterprise.md#audit-logging)) |
 | `metrics` | object | - | Prometheus metrics endpoint ([details](enterprise.md#prometheus-metrics)) |
 | `dashboard` | object | disabled | Read-only listener dashboard ([details](dashboard.md)) |
+| `eventStore` | object | disabled | SQLite per-call event history ([details](observability.md)) |
 | `management` | object | disabled | Standalone listener management API |
 | `strictStartup` | boolean | `false` | Fail startup if any server fails to connect |
 | `maxCacheEntries` | integer | `1000` | Max cached entries before LRU eviction |
@@ -294,6 +295,36 @@ The dashboard is disabled by default. Enable it only for listener deployments wh
 `path` can be `/`, `/dashboard`, or a reverse-proxy prefix such as `/relay/`. Non-root trailing slashes are normalized, and the UI resolves `data` and `events` relative to the loaded page URL.
 
 When auth is configured, dashboard requests use the same listener authentication as `/mcp`.
+
+---
+
+## Event Store
+
+`eventStore` enables additive, queryable per-call history backed by Node 24's built-in `node:sqlite`. It is disabled by default; when disabled, callmux does not open SQLite and does not create a database file.
+
+```json
+{
+  "eventStore": {
+    "enabled": true,
+    "path": "/var/lib/callmux/callmux-events.sqlite",
+    "maxRows": 100000,
+    "retentionDays": 14,
+    "pruneEvery": 100
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `enabled` | boolean | `false` | Enable SQLite-backed per-call event history |
+| `path` | string | `callmux-events.sqlite` beside the config file | SQLite database path |
+| `maxRows` | integer | `100000` | Maximum retained call event rows (`0` = age-only retention) |
+| `retentionDays` | integer | `14` | Maximum retained event age (`0` = row-count-only retention) |
+| `pruneEvery` | integer | `100` | Completed calls between retention prune passes |
+
+The store uses WAL mode, `NORMAL` synchronous mode, indexed target tables for drill-down, and periodic pruning. Forwarded-header audit rows store header names, session id, principal, downstream server, and tool only; raw credential values are never stored.
+
+When the dashboard is enabled, `/dashboard/drilldown` reads this store for per-server, per-tool, per-session, and forwarded-header audit breakdowns.
 
 ---
 
@@ -588,6 +619,12 @@ config — there is no callmux setting for this.
     "enabled": true,
     "path": "/dashboard",
     "maxEvents": 500
+  },
+  "eventStore": {
+    "enabled": true,
+    "path": "/var/lib/callmux/callmux-events.sqlite",
+    "maxRows": 100000,
+    "retentionDays": 14
   }
 }
 ```

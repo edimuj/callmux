@@ -64,6 +64,14 @@ import {
 } from "./dashboard.js";
 import { MetricsStore, type MetricsRange } from "./metrics-store.js";
 import {
+  DEFAULT_EVENT_STORE_MAX_ROWS,
+  DEFAULT_EVENT_STORE_PRUNE_EVERY,
+  DEFAULT_EVENT_STORE_RETENTION_DAYS,
+  EventStore,
+  openEventStore,
+  type EventStoreCallSample,
+} from "./event-store.js";
+import {
   applyManagementOverlay,
   assertServerConfig,
   assertStringArray,
@@ -225,6 +233,8 @@ export class CallmuxListener {
   private runtimeEvents: RuntimeEventStore;
   private metricsStore = new MetricsStore();
   private metricsPath: string | undefined;
+  private eventStore: EventStore | undefined;
+  private eventStorePath: string | undefined;
   private metricsDirty = false;
   private metricsFlushInFlight: Promise<void> | undefined;
   private metricsFlushTimer: ReturnType<typeof setInterval> | undefined;
@@ -259,6 +269,7 @@ export class CallmuxListener {
     this.managementOverlay = options.managementOverlay ?? { version: 1 };
     this.runtimeEvents = new RuntimeEventStore(this.dashboardConfig.maxEvents);
     this.metricsPath = this.resolveMetricsPath(options.configPath);
+    this.eventStorePath = this.resolveEventStorePath(options.configPath, options.config);
     this.subscribeToolSuiteChanges(options.upstream);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
     this.validateSecurityPosture(options.config, this.authConfig);
@@ -301,6 +312,7 @@ export class CallmuxListener {
     this.dashboardConfig = nextDashboardConfig;
     this.managementConfig = nextManagementConfig;
     this.runtimeEvents.setMaxEvents(nextDashboardConfig.maxEvents);
+    void this.refreshEventStore(config);
     this.preReadMaxBytes = this.computePreReadMaxBytes();
   }
 
@@ -407,6 +419,7 @@ export class CallmuxListener {
     // Load persisted metrics before accepting traffic so early calls accrue
     // onto the restored history instead of a fresh empty store.
     await this.loadMetrics();
+    await this.refreshEventStore(this.options.config);
     if (this.metricsPath) {
       this.metricsFlushTimer = setInterval(() => {
         void this.flushMetrics();
@@ -448,6 +461,7 @@ export class CallmuxListener {
       this.metricsFlushTimer = undefined;
     }
     await this.flushMetrics();
+    this.closeEventStore();
     this.unsubscribeToolSuiteChanges?.();
     this.unsubscribeToolSuiteChanges = undefined;
     const sessions = Array.from(this.sessions.entries());
@@ -642,7 +656,8 @@ export class CallmuxListener {
       this.isDashboardBasePath(path, base) ||
       path === this.dashboardChildPath(base, "data") ||
       path === this.dashboardChildPath(base, "events") ||
-      path === this.dashboardChildPath(base, "series")
+      path === this.dashboardChildPath(base, "series") ||
+      path === this.dashboardChildPath(base, "drilldown")
     );
   }
 
@@ -971,6 +986,11 @@ export class CallmuxListener {
       return;
     }
 
+    if (path === this.dashboardChildPath(base, "drilldown")) {
+      this.handleDashboardDrilldown(req, res, context);
+      return;
+    }
+
     this.writeJson(res, 404, context, { error: "Not found" });
   }
 
@@ -1040,12 +1060,97 @@ export class CallmuxListener {
     });
   }
 
+  private handleDashboardDrilldown(
+    req: IncomingMessage,
+    res: ServerResponse,
+    context: RequestContext
+  ): void {
+    if (!this.eventStore) {
+      this.writeJson(res, 200, context, {
+        enabled: false,
+        reason: "eventStore.enabled is false",
+      });
+      return;
+    }
+    const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+    const rawRange = params.get("range");
+    const range: MetricsRange = METRICS_RANGES.includes(rawRange as MetricsRange)
+      ? (rawRange as MetricsRange)
+      : "1h";
+    const rawLimit = Number(params.get("limit"));
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : 25;
+    const window = this.metricsStore.series(range);
+    this.writeJson(res, 200, context, {
+      enabled: true,
+      range,
+      from: window.from,
+      to: window.to,
+      ...this.eventStore.queryDrilldown({
+        fromMs: window.from,
+        toMs: window.to,
+        limit,
+      }),
+    });
+  }
+
   private resolveMetricsPath(configPath: string | undefined): string | undefined {
     if (!this.dashboardConfig.enabled) return undefined;
     const dir = configPath
       ? dirname(resolvePath(configPath))
       : join(homedir(), ".config", "callmux");
     return join(dir, "callmux-metrics.json");
+  }
+
+  private resolveEventStorePath(
+    configPath: string | undefined,
+    config: CallmuxConfig
+  ): string | undefined {
+    if (!config.eventStore?.enabled) return undefined;
+    if (config.eventStore.path) return resolvePath(config.eventStore.path);
+    const dir = configPath
+      ? dirname(resolvePath(configPath))
+      : join(homedir(), ".config", "callmux");
+    return join(dir, "callmux-events.sqlite");
+  }
+
+  private async openEventStore(
+    path: string | undefined,
+    config: CallmuxConfig
+  ): Promise<EventStore | undefined> {
+    if (!path || !config.eventStore?.enabled) return undefined;
+    try {
+      return await openEventStore({
+        path,
+        maxRows: config.eventStore.maxRows ?? DEFAULT_EVENT_STORE_MAX_ROWS,
+        retentionDays: config.eventStore.retentionDays ?? DEFAULT_EVENT_STORE_RETENTION_DAYS,
+        pruneEvery: config.eventStore.pruneEvery ?? DEFAULT_EVENT_STORE_PRUNE_EVERY,
+      });
+    } catch (error) {
+      process.stderr.write(
+        `[callmux] could not open event store at ${path}: ${(error as Error).message}\n`
+      );
+      return undefined;
+    }
+  }
+
+  private async refreshEventStore(config: CallmuxConfig): Promise<void> {
+    const nextPath = this.resolveEventStorePath(this.options.configPath, config);
+    this.closeEventStore();
+    this.eventStorePath = nextPath;
+    this.eventStore = await this.openEventStore(nextPath, config);
+  }
+
+  private closeEventStore(): void {
+    if (!this.eventStore) return;
+    try {
+      this.eventStore.close();
+    } catch (error) {
+      process.stderr.write(
+        `[callmux] could not close event store: ${(error as Error).message}\n`
+      );
+    } finally {
+      this.eventStore = undefined;
+    }
   }
 
   private async loadMetrics(): Promise<void> {
@@ -1603,7 +1708,15 @@ export class CallmuxListener {
             ...(authz.ruleId ? { ruleId: authz.ruleId } : {}),
             ...(authz.tool ? { tool: authz.tool } : {}),
           });
-          this.recordToolCallEvent(name, target, denied, startedAt, false, args);
+          this.recordToolCallEvent(
+            name,
+            target,
+            denied,
+            startedAt,
+            false,
+            args,
+            this.bareToolCallContext(session, extra)
+          );
           return denied;
         }
         const baseToolContext = this.toolRequestNeedsSessionCwd(upstream, name, args)
@@ -1778,7 +1891,7 @@ export class CallmuxListener {
       if (name.startsWith("callmux_")) {
         result = this.finalizeOutputFormat(result, this.outputFormatFor(args));
       }
-      this.recordToolCallEvent(name, target, result, startedAt, cacheHit, args);
+      this.recordToolCallEvent(name, target, result, startedAt, cacheHit, args, toolContext);
       return result;
       } finally {
         this.completeActiveToolCall(active.id);
@@ -2134,7 +2247,8 @@ export class CallmuxListener {
     result: CallToolResult,
     startedAt: number,
     cacheHit?: boolean,
-    args?: unknown
+    args?: unknown,
+    toolContext?: ToolCallContext
   ): void {
     const summary = this.summarizeDashboardToolCall(tool, args, result, target);
     const status = classifyDashboardToolStatus(result, {
@@ -2150,6 +2264,8 @@ export class CallmuxListener {
         ? requestedFormat
         : undefined;
     const durationMs = Date.now() - startedAt;
+    const bytesIn = jsonByteLength(args);
+    const bytesOut = jsonByteLength(result);
     this.runtimeEvents.append({
       type: "tool_call",
       timestamp: new Date().toISOString(),
@@ -2172,13 +2288,78 @@ export class CallmuxListener {
         downstreamCalls: summary.totalDownstreamToolCalls,
         cacheHit: Boolean(cacheHit),
         error: status === "error",
-        bytesIn: jsonByteLength(args),
-        bytesOut: jsonByteLength(result),
+        bytesIn,
+        bytesOut,
         durationMs,
         ...(format ? { format } : {}),
       });
       this.metricsDirty = true;
     }
+    if (this.eventStore) {
+      const event: EventStoreCallSample = {
+        tool,
+        ...(target?.server ? { server: target.server } : {}),
+        ...(target?.tool ? { targetTool: target.tool } : {}),
+        ...(toolContext?.sessionId ? { sessionId: toolContext.sessionId } : {}),
+        ...(this.principalLabel(this.authzContext.getStore()) ? { principal: this.principalLabel(this.authzContext.getStore()) } : {}),
+        durationMs,
+        ok: status !== "error",
+        status,
+        ...(result.isError ? { errorClass: this.extractEventErrorClass(result) } : {}),
+        bytesIn,
+        bytesOut,
+        cacheHit: Boolean(cacheHit),
+        toolKind: summary.toolKind,
+        operation: summary.operation,
+        downstreamCalls: summary.totalDownstreamToolCalls,
+        targets: summary.downstreamTargets,
+        forwardedHeaders: this.forwardedHeaderNamesForEvent(summary, toolContext),
+      };
+      try {
+        this.eventStore.recordCall(event);
+      } catch (error) {
+        process.stderr.write(
+          `[callmux] could not record event store call: ${(error as Error).message}\n`
+        );
+      }
+    }
+  }
+
+  private principalLabel(principal: AuthorizationPrincipal | undefined): string | undefined {
+    return principal ? `${principal.kind}:${principal.id}` : undefined;
+  }
+
+  private extractEventErrorClass(result: CallToolResult): string | undefined {
+    const structured = result.structuredContent;
+    if (isRecord(structured) && isRecord(structured.error)) {
+      const code = structured.error.code;
+      if (typeof code === "string" && code.length > 0) return code;
+    }
+    return extractToolError(result);
+  }
+
+  private forwardedHeaderNamesForEvent(
+    summary: DashboardToolCallSummary,
+    toolContext: ToolCallContext | undefined
+  ): string[] {
+    if (!toolContext?.forwardedHeaders) return [];
+    const targetServers = new Set(
+      summary.downstreamTargets
+        .map((target) => target.server)
+        .filter((server): server is string => typeof server === "string" && server.length > 0)
+    );
+    if (targetServers.size === 0) return [];
+    const configured = new Set<string>();
+    for (const server of targetServers) {
+      const config = this.options.config.servers[server];
+      if (!config || !isHttpServerConfig(config)) continue;
+      for (const header of config.forwardHeaders ?? []) {
+        configured.add(header.toLowerCase());
+      }
+    }
+    return Object.keys(toolContext.forwardedHeaders)
+      .map((header) => header.toLowerCase())
+      .filter((header) => configured.has(header));
   }
 
   private summarizeHttpRequestPayload(payload: unknown): Partial<{

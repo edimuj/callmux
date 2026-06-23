@@ -265,6 +265,7 @@ The wizard detects existing MCP servers, lets you pick from a curated list or ad
 |:------|:------------|
 | [Shared Server Mode](docs/shared-server.md) | Listener setup, client config, stdio bridge, session-cwd |
 | [Dashboard](docs/dashboard.md) | Enable the read-only dashboard and mount it behind reverse proxies |
+| [Observability](docs/observability.md) | Aggregate metrics, SQLite event history, and forwarded-header audit drill-down |
 | [Meta-Only Mode](docs/meta-only-mode.md) | Fixed system prompt, tool discovery workflow |
 | [Enterprise Deployment](docs/enterprise.md) | Auth, RBAC, rate limiting, audit, OIDC, metrics |
 | [Recipes](docs/recipes.md) | Config-defined workflow templates |

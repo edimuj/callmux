@@ -27,8 +27,11 @@ With the default path, callmux serves:
 - `/dashboard` - browser UI
 - `/dashboard/data` - JSON snapshot used by the UI
 - `/dashboard/events` - SSE stream for live updates
+- `/dashboard/drilldown` - SQLite event-store drill-down when `eventStore.enabled` is true
 
 `maxEvents` controls the bounded in-memory event history. Tool arguments are not stored in dashboard history.
+
+The dashboard's history charts use the aggregate RRD JSON metrics store. The Drill-down tab is additive and requires the optional [SQLite event store](observability.md); it shows per-server, per-tool, per-session, and forwarded-header audit breakdowns for the selected range.
 
 If listener auth is configured, dashboard requests use the same authentication as `/mcp`.
 

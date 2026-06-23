@@ -451,6 +451,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     .view-header { align-items: baseline; display: none; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
     .panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+    .panel-stack { display: grid; gap: 18px; }
     .metric { font-size: 28px; font-weight: 700; margin-top: 6px; }
     .diagram { display: grid; gap: 12px; }
     .flow { align-items: stretch; display: grid; gap: 10px; grid-template-columns: 1fr 34px 1fr 34px 1fr; }
@@ -609,6 +610,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <button class="nav-button" data-view-button="management"><span class="nav-icon">M</span>Management</button>
         <button class="nav-button" data-view-button="tools"><span class="nav-icon">T</span>Tool Suites</button>
         <button class="nav-button" data-view-button="diagrams"><span class="nav-icon">D</span>Diagrams</button>
+        <button class="nav-button" data-view-button="drilldown"><span class="nav-icon">Q</span>Drill-down</button>
         <button class="nav-button" data-view-button="events"><span class="nav-icon">E</span>Events</button>
         <button class="nav-button" data-view-button="runtime"><span class="nav-icon">{} </span>Runtime</button>
       </nav>
@@ -624,6 +626,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         <button class="nav-button" data-view-button="management">Management</button>
         <button class="nav-button" data-view-button="tools">Tools</button>
         <button class="nav-button" data-view-button="diagrams">Diagrams</button>
+        <button class="nav-button" data-view-button="drilldown">Drill-down</button>
         <button class="nav-button" data-view-button="events">Events</button>
         <button class="nav-button" data-view-button="runtime">Runtime</button>
       </div>
@@ -702,6 +705,23 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
           <h3 class="section-subtle">Live (last 2 minutes)</h3>
           <section id="runtime-diagrams" class="diagram-grid"></section>
         </section>
+        <section id="view-drilldown" class="view">
+          <div class="view-header"><h2>Drill-down</h2></div>
+          <section class="panel" style="margin-bottom:18px">
+            <div class="range-bar">
+              <span class="range-label">History</span>
+              <div class="range-buttons" id="drilldown-range-buttons">
+                <button class="range-button active" data-range="1h">1h</button>
+                <button class="range-button" data-range="today">Today</button>
+                <button class="range-button" data-range="yesterday">Yesterday</button>
+                <button class="range-button" data-range="7d">7d</button>
+                <button class="range-button" data-range="30d">30d</button>
+              </div>
+            </div>
+            <div id="drilldown-summary" class="detail-grid"></div>
+          </section>
+          <section id="drilldown-content" class="panel-stack"></section>
+        </section>
         <section id="view-events" class="view">
           <div class="toolbar">
             <h2>Recent Events</h2>
@@ -738,7 +758,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     }
     const dataUrl = dashboardEndpoint("data");
     const eventsUrl = dashboardEndpoint("events");
-    const viewTitles = { overview: "Overview", servers: "Servers", management: "Management", tools: "Tool Suites", diagrams: "Runtime Diagrams", events: "Recent Events", runtime: "Runtime" };
+    const viewTitles = { overview: "Overview", servers: "Servers", management: "Management", tools: "Tool Suites", diagrams: "Runtime Diagrams", drilldown: "Drill-down", events: "Recent Events", runtime: "Runtime" };
     let snapshot = null;
     let pendingSnapshot = null;
     let selectedEventKey = null;
@@ -751,8 +771,10 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
     let managementMessage = { kind: "muted", text: "No management action yet." };
     let metricsRange = loadRange();
     let seriesData = null;
+    let drilldownData = null;
     let serverStatsMap = {};
     const seriesUrl = dashboardEndpoint("series");
+    const drilldownUrl = dashboardEndpoint("drilldown");
 
     function loadRange() {
       try { return localStorage.getItem("callmux-dashboard-range") || "1h"; } catch { return "1h"; }
@@ -850,6 +872,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       document.querySelectorAll("[data-view-button]").forEach(button => button.classList.toggle("active", button.dataset.viewButton === view));
       document.getElementById("view-title").textContent = viewTitles[view];
       if (view === "diagrams") loadSeries();
+      if (view === "drilldown") loadDrilldown();
     }
     function cell(value, className = "", label = "") {
       return "<td" + (className ? " class=\\"" + className + "\\"" : "") + (label ? " data-label=\\"" + esc(label) + "\\"" : "") + ">" + String(value ?? "") + "</td>";
@@ -1289,6 +1312,69 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         renderHistoryCharts(seriesData);
       } catch {}
     }
+    function renderBreakdownTable(title, rows, firstColumn) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return '<section class="panel"><h2>' + esc(title) + '</h2><div class="muted">No rows in this range</div></section>';
+      }
+      return '<section class="panel"><h2>' + esc(title) + '</h2><table class="data-table"><thead><tr><th>' + esc(firstColumn) + '</th><th>Calls</th><th>Errors</th><th>Avg</th><th>In</th><th>Out</th><th>Last call</th></tr></thead><tbody>' +
+        rows.map(row => '<tr>' +
+          cell(esc(row.name), "", firstColumn) +
+          cell(esc(formatNum(row.calls)), "", "Calls") +
+          cell(esc(formatNum(row.errors)), row.errors > 0 ? "bad" : "muted", "Errors") +
+          cell(esc(formatNum(row.avgDurationMs) + "ms"), "", "Avg") +
+          cell(esc(formatBytes(row.bytesIn)), "", "In") +
+          cell(esc(formatBytes(row.bytesOut)), "", "Out") +
+          cell(esc(formatDateTime(row.lastCallAt)), "muted", "Last call") +
+        '</tr>').join("") + '</tbody></table></section>';
+    }
+    function renderForwardedHeaderAudit(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return '<section class="panel"><h2>Forwarded Header Audit</h2><div class="muted">No forwarded headers recorded in this range</div></section>';
+      }
+      return '<section class="panel"><h2>Forwarded Header Audit</h2><table class="data-table"><thead><tr><th>Server</th><th>Tool</th><th>Session</th><th>Principal</th><th>Header</th><th>Calls</th><th>Last seen</th></tr></thead><tbody>' +
+        rows.map(row => '<tr>' +
+          cell(esc(row.server), "", "Server") +
+          cell(esc(row.tool), "", "Tool") +
+          cell(esc(row.sessionId), "", "Session") +
+          cell(esc(row.principal), "", "Principal") +
+          cell(esc(row.headerName), "", "Header") +
+          cell(esc(formatNum(row.calls)), "", "Calls") +
+          cell(esc(formatDateTime(row.lastSeenAt)), "muted", "Last seen") +
+        '</tr>').join("") + '</tbody></table></section>';
+    }
+    function renderDrilldown(data) {
+      const summary = document.getElementById("drilldown-summary");
+      const content = document.getElementById("drilldown-content");
+      if (!summary || !content) return;
+      if (!data || data.enabled === false) {
+        summary.innerHTML = "";
+        content.innerHTML = '<section class="panel"><div class="muted">SQLite event store is disabled.</div></section>';
+        return;
+      }
+      const totals = data.totals || {};
+      summary.innerHTML = [
+        detailItem("Calls", formatNum(totals.calls)),
+        detailItem("Errors", formatNum(totals.errors)),
+        detailItem("Avg duration", formatNum(totals.avgDurationMs) + "ms"),
+        detailItem("Bytes in", formatBytes(totals.bytesIn)),
+        detailItem("Bytes out", formatBytes(totals.bytesOut)),
+      ].join("");
+      content.innerHTML = [
+        renderBreakdownTable("By Server", data.byServer, "Server"),
+        renderBreakdownTable("By Tool", data.byTool, "Tool"),
+        renderBreakdownTable("By Session", data.bySession, "Session"),
+        renderForwardedHeaderAudit(data.forwardedHeaders),
+      ].join("");
+    }
+    async function loadDrilldown() {
+      updateRangeButtons("#drilldown-range-buttons");
+      try {
+        const res = await fetch(drilldownUrl + "?range=" + encodeURIComponent(metricsRange), { headers: { "Accept": "application/json" } });
+        if (!res.ok) return;
+        drilldownData = await res.json();
+        renderDrilldown(drilldownData);
+      } catch {}
+    }
     function renderServerStats(stat) {
       if (!stat) return "";
       const avg = stat.calls > 0 ? Math.round(stat.totalDurationMs / stat.calls) : 0;
@@ -1478,6 +1564,7 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
       renderManagement(managementServers);
       renderToolSuites(status, servers, allEvents);
       renderRuntimeDiagrams(status, servers, data.summary, allEvents);
+      if (currentView === "drilldown") loadDrilldown();
       document.getElementById("runtime-json").textContent = JSON.stringify(status, null, 2);
       const displayedEvents = allEvents.filter(eventMatchesFilters).slice(-80).reverse();
       document.getElementById("events").innerHTML = displayedEvents.map((event, index) => {
@@ -1559,17 +1646,30 @@ export function renderDashboardHtml(config: Required<DashboardConfig>): string {
         try { localStorage.setItem("callmux-dashboard-theme", theme); } catch {}
       });
     })();
-    document.querySelectorAll("#range-buttons [data-range]").forEach(button => {
-      button.classList.toggle("active", button.dataset.range === metricsRange);
-      button.addEventListener("click", () => {
-        metricsRange = button.dataset.range;
-        saveRange(metricsRange);
-        document.querySelectorAll("#range-buttons [data-range]").forEach(b => b.classList.toggle("active", b.dataset.range === metricsRange));
-        loadSeries();
+    function updateRangeButtons(selector) {
+      document.querySelectorAll(selector + " [data-range]").forEach(button => {
+        button.classList.toggle("active", button.dataset.range === metricsRange);
       });
-    });
+    }
+    function bindRangeButtons(selector, onChange) {
+      document.querySelectorAll(selector + " [data-range]").forEach(button => {
+        button.classList.toggle("active", button.dataset.range === metricsRange);
+        button.addEventListener("click", () => {
+          metricsRange = button.dataset.range;
+          saveRange(metricsRange);
+          updateRangeButtons("#range-buttons");
+          updateRangeButtons("#drilldown-range-buttons");
+          onChange();
+        });
+      });
+    }
+    bindRangeButtons("#range-buttons", loadSeries);
+    bindRangeButtons("#drilldown-range-buttons", loadDrilldown);
     // Refresh the historic charts periodically while the diagrams view is open.
-    setInterval(() => { if (currentView === "diagrams") loadSeries(); }, 15000);
+    setInterval(() => {
+      if (currentView === "diagrams") loadSeries();
+      if (currentView === "drilldown") loadDrilldown();
+    }, 15000);
     async function refresh() {
       const res = await fetch(dataUrl, { headers: { "Accept": "application/json" } });
       if (res.ok) renderWhenSelectionAllows(await res.json());

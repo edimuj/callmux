@@ -112,6 +112,7 @@
     "auditLog": { "$ref": "#/$defs/auditLogConfig" },
     "metrics": { "$ref": "#/$defs/metricsConfig" },
     "dashboard": { "$ref": "#/$defs/dashboardConfig" },
+    "eventStore": { "$ref": "#/$defs/eventStoreConfig" },
     "management": { "$ref": "#/$defs/managementConfig" },
     "allowInsecureRemoteListener": {
       "type": "boolean",
@@ -456,6 +457,41 @@
           "minimum": 1,
           "default": 500,
           "description": "Maximum runtime events kept in memory"
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventStoreConfig": {
+      "type": "object",
+      "description": "Optional node:sqlite call event history store. Disabled by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable SQLite-backed per-call event history"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SQLite database path (default: callmux-events.sqlite beside the config file)"
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100000,
+          "description": "Maximum retained call event rows (0 = age-only retention)"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 14,
+          "description": "Maximum retained event age in days (0 = row-count-only retention)"
+        },
+        "pruneEvery": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100,
+          "description": "Completed calls between retention prune passes"
         }
       },
       "additionalProperties": false

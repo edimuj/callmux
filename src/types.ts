@@ -260,6 +260,19 @@ export interface DashboardConfig {
   maxEvents?: number;
 }
 
+export interface EventStoreConfig {
+  /** Enable node:sqlite call event history. Disabled by default. */
+  enabled?: boolean;
+  /** SQLite database path. Defaults to callmux-events.sqlite beside the config file. */
+  path?: string;
+  /** Maximum retained call event rows (default: 100000; 0 = age-only retention). */
+  maxRows?: number;
+  /** Maximum retained event age in days (default: 14; 0 = row-count-only retention). */
+  retentionDays?: number;
+  /** Completed calls between retention prune passes (default: 100). */
+  pruneEvery?: number;
+}
+
 export interface ManagementConfig {
   /** Enable the standalone listener management API. Disabled by default. */
   enabled?: boolean;
@@ -331,6 +344,8 @@ export interface CallmuxConfig {
   metrics?: MetricsConfig;
   /** Optional read-only dashboard configuration */
   dashboard?: DashboardConfig;
+  /** Optional node:sqlite call event history store */
+  eventStore?: EventStoreConfig;
   /** Optional standalone listener management API configuration */
   management?: ManagementConfig;
   /** Allow insecure remote listener (non-loopback host) without auth */

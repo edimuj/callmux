@@ -917,6 +917,35 @@ test("loadConfig parses reconnect policy configuration", async () => {
   }
 });
 
+test("loadConfig parses event store configuration", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-event-store-config-"));
+  const path = join(dir, "config.json");
+  try {
+    await writeFile(path, JSON.stringify({
+      servers: {
+        demo: { command: "node", args: ["server.js"] },
+      },
+      eventStore: {
+        enabled: true,
+        path: join(dir, "events.sqlite"),
+        maxRows: 500,
+        retentionDays: 3,
+        pruneEvery: 10,
+      },
+    }));
+    const config = await loadConfig(path);
+    assert.deepEqual(config.eventStore, {
+      enabled: true,
+      path: join(dir, "events.sqlite"),
+      maxRows: 500,
+      retentionDays: 3,
+      pruneEvery: 10,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("configFromArgs parses request body limit flags", () => {
   const config = configFromArgs([
     "--request-body-max-bytes",
@@ -12903,6 +12932,8 @@ test("listener accepts streamable HTTP initialize and lists tools", async () => 
 });
 
 test("listener forwards configured headers to remote downstream per session without credential bleed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-forwarded-header-audit-"));
+  const eventPath = join(dir, "events.sqlite");
   const downstreamRequests: Array<{
     rpc?: string;
     authorization?: string;
@@ -13003,7 +13034,12 @@ test("listener forwards configured headers to remote downstream per session with
     listener = new CallmuxListener({
       port: 0,
       host: "127.0.0.1",
-      config: { servers: { remote: remoteConfig } },
+      configPath: join(dir, "config.json"),
+      config: {
+        servers: { remote: remoteConfig },
+        dashboard: { enabled: true },
+        eventStore: { enabled: true, path: eventPath, maxRows: 1000, retentionDays: 7, pruneEvery: 1 },
+      },
       upstream,
       cache,
       allTools,
@@ -13067,10 +13103,47 @@ test("listener forwards configured headers to remote downstream per session with
       .map((request) => request.authorization);
     assert.deepEqual(downstreamToolCalls, [tokenA, tokenB]);
     assert.equal(downstreamToolCalls.includes("Bearer STATIC-CONFIG-TOKEN"), false);
+
+    const drilldownRes = await fetch(`http://127.0.0.1:${port}/dashboard/drilldown?range=1h`);
+    assert.equal(drilldownRes.status, 200);
+    const drilldown = await drilldownRes.json() as {
+      enabled: boolean;
+      totals: { calls: number };
+      byServer: { name: string; calls: number }[];
+      byTool: { name: string; calls: number }[];
+      bySession: { name: string; calls: number }[];
+      forwardedHeaders: Array<{
+        server: string;
+        tool: string;
+        headerName: string;
+        calls: number;
+        sessionId: string;
+      }>;
+    };
+    assert.equal(drilldown.enabled, true);
+    assert.equal(drilldown.totals.calls, 2);
+    assert.equal(drilldown.byServer.find((row) => row.name === "remote")?.calls, 2);
+    assert.equal(drilldown.byTool.find((row) => row.name === "whoami")?.calls, 2);
+    assert.equal(drilldown.bySession.length, 2);
+    assert.equal(
+      drilldown.forwardedHeaders.filter((row) =>
+        row.server === "remote" &&
+        row.tool === "whoami" &&
+        row.headerName === "authorization"
+      ).length,
+      2
+    );
+
+    await listener.close();
+    listener = undefined;
+    const dbBytes = await readFile(eventPath);
+    assert.equal(dbBytes.toString("utf8").includes("SESSION_A_TOKEN"), false);
+    assert.equal(dbBytes.toString("utf8").includes("SESSION_B_TOKEN"), false);
   } finally {
     await listener?.close();
     await upstream.close();
     await new Promise<void>((resolve) => downstream.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -13665,6 +13738,49 @@ test("listener dashboard metrics flush stays idle until metrics change", async (
     listener = undefined;
 
     await assert.rejects(readFile(metricsPath, "utf8"), {
+      code: "ENOENT",
+    });
+  } finally {
+    await listener?.close();
+    await upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener leaves event store file absent when event store is disabled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "callmux-event-store-disabled-"));
+  const configPath = join(dir, "config.json");
+  const eventPath = join(dir, "events.sqlite");
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+  let listener: CallmuxListener | undefined;
+
+  try {
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      configPath,
+      config: {
+        servers: {},
+        dashboard: { enabled: true },
+        eventStore: { enabled: false, path: eventPath },
+      },
+      upstream,
+      cache,
+      allTools: [],
+      maxConcurrency: 10,
+    });
+
+    await listener.start();
+    const port = listenerPort(listener);
+    const drilldown = await (await fetch(`http://127.0.0.1:${port}/dashboard/drilldown`)).json() as {
+      enabled: boolean;
+    };
+    assert.equal(drilldown.enabled, false);
+    await listener.close();
+    listener = undefined;
+
+    await assert.rejects(readFile(eventPath, "utf8"), {
       code: "ENOENT",
     });
   } finally {
