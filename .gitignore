@@ -2,6 +2,8 @@ node_modules/
 node_modules
 dist/
 dist-test/
+dashboard/dist/
+assets/dashboard.html
 *.tgz
 .DS_Store
 test-config.json

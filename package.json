@@ -19,6 +19,7 @@
   },
   "files": [
     "dist/",
+    "assets/dashboard.html",
     "schema.json",
     "README.md"
   ],
@@ -33,8 +34,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "dev:dashboard": "npm --prefix dashboard run dev",
+    "build:dashboard": "npm --prefix dashboard install --no-audit --no-fund && npm --prefix dashboard run build && node scripts/copy-dashboard-asset.mjs",
     "check:public-surface": "node scripts/check-public-surface.mjs",
     "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js",
+    "prepack": "npm run build:dashboard",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

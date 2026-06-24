@@ -57,7 +57,7 @@ import {
   classifyDashboardToolStatus,
   extractToolError,
   normalizeDashboardConfig,
-  renderDashboardHtml,
+  loadDashboardHtml,
   RuntimeEventStore,
   type DashboardSnapshot,
   type DashboardMetricsSnapshot,
@@ -959,7 +959,7 @@ export class CallmuxListener {
 
     const base = this.dashboardConfig.path;
     if (this.isDashboardBasePath(path, base)) {
-      const html = renderDashboardHtml(this.dashboardConfig);
+      const html = loadDashboardHtml();
       // The dashboard ships as a single self-contained HTML doc that changes
       // on every release. Without this, browsers heuristically cache it and
       // users keep seeing the old UI after an upgrade until a manual purge.

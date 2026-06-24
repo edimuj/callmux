@@ -31,6 +31,23 @@ jobs:
 
       - run: npm test
 
+  # Verify the dashboard SPA still bundles to its single-file artifact. Scoped
+  # to push (not PRs) and a single Node version to keep Actions minutes lean —
+  # the published tarball builds it for real via prepack.
+  dashboard:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: npm run build:dashboard
+
   audit:
     runs-on: ubuntu-latest
     steps:

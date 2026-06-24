@@ -72,7 +72,7 @@ import {
   resolveSchemaCompressionConfig,
 } from "./schema-compression.js";
 import { createDaemonPlan, formatDaemonPlan } from "./daemon.js";
-import { classifyDashboardToolStatus, renderDashboardHtml, RuntimeEventStore } from "./dashboard.js";
+import { classifyDashboardToolStatus, loadDashboardHtml, RuntimeEventStore } from "./dashboard.js";
 import { CallmuxBridge, deriveBridgeCallOptions } from "./bridge.js";
 import { renderAgentInstructions } from "./instructions.js";
 import { shutdownAfterFatalListenerError } from "./fatal.js";
@@ -10091,7 +10091,9 @@ test("listener dashboard supports trailing-slash reverse proxy paths", async () 
     const port = listenerPort(listener);
     const withoutSlash = await fetch(`http://127.0.0.1:${port}/relay`);
     assert.equal(withoutSlash.status, 200);
-    assert.match(await withoutSlash.text(), /dashboardEndpoint\("data"\)/);
+    // The SPA resolves its data endpoints from window.location at runtime, so
+    // the served doc is identical at any mount; assert it's the dashboard.
+    assert.match(await withoutSlash.text(), /callmux dashboard/);
 
     const withSlash = await fetch(`http://127.0.0.1:${port}/relay/`);
     assert.equal(withSlash.status, 200);
@@ -10126,10 +10128,7 @@ test("listener dashboard supports root mount", async () => {
     const html = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(html.status, 200);
     const htmlText = await html.text();
-    assert.ok(htmlText.includes('const configuredPath = "/"'));
-    assert.match(htmlText, /function externalMountPrefix/);
-    assert.match(htmlText, /prefix \+ base/);
-    assert.doesNotMatch(htmlText, /replace\(\/\/\+\$/);
+    assert.match(htmlText, /callmux dashboard/);
 
     const data = await fetch(`http://127.0.0.1:${port}/data`);
     assert.equal(data.status, 200);
@@ -10746,71 +10745,20 @@ test("listener dashboard records downstream tool failures without callmux error 
   assert.equal((listener as any).runtimeEvents.stats().recentErrors, 0);
 });
 
-test("dashboard hides successful transport HTTP events by default", () => {
-  const html = renderDashboardHtml({ enabled: true, path: "/dashboard", maxEvents: 500 });
-  assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
-  assert.match(html, /%2338bdf8/);
-  assert.match(html, /id="hide-transport" type="checkbox" checked/);
-  assert.match(html, /id="hide-agent-status" type="checkbox" checked/);
-  assert.match(html, /function isTransportHttpEvent/);
-  assert.match(html, /function isAgentStatusEvent/);
-  assert.match(html, /agent\\s\+\(ready\|idle\|busy\)/);
-  assert.match(html, /notifications\/initialized/);
-  assert.match(html, /function cacheEntriesText/);
-  assert.match(html, /return "disabled"/);
-  assert.match(html, /function truncateText/);
-  assert.match(html, /maxLength = 180/);
-  assert.match(html, /function setManagementMessage/);
-  assert.match(html, /Enable this server before restarting/);
-  assert.match(html, /server\.managed \? "Override" : "base"/);
-  assert.match(html, /const runtime = server\.runtime \|\| \{\}/);
-  assert.match(html, /const disabled = config\.disabled === true \|\| state === "disabled"/);
-  assert.match(html, /truncateText\(detailText\(event\)\)/);
-  assert.match(html, /function clientRows/);
-  assert.match(html, /STDIO Bridge/);
-  assert.match(html, /function renderTrafficChart/);
-  assert.match(html, /Tool Call Traffic/);
-  assert.match(html, /eventDurationText\(event\)/);
-  assert.match(html, /event-detail-row/);
-  assert.match(html, /function updateUpdatedClock/);
-  assert.match(html, /setInterval\(updateUpdatedClock, 1000\)/);
-  assert.match(html, /function hasActiveTextSelection/);
-  assert.match(html, /function renderWhenSelectionAllows/);
-  assert.match(html, /document\.addEventListener\("selectionchange"/);
-  assert.match(html, /renderWhenSelectionAllows\(await res\.json\(\)\)/);
-  assert.match(html, /Passthrough calls/);
-  assert.match(html, /In-Flight Tool Calls/);
-  assert.match(html, /function activeToolCallRows/);
-  assert.match(html, /tool_call_lifecycle/);
-  assert.match(html, /client_aborted/);
-  assert.match(html, /call exceeded timeout/);
-  assert.match(html, /Meta calls \/ downstream/);
-  assert.match(html, /Total downstream/);
-  assert.doesNotMatch(html, /Live proxy activity/);
-  assert.doesNotMatch(html, /Current status payload/);
-  assert.doesNotMatch(html, /Traffic Path/);
-  assert.match(html, /class="sidebar"/);
-  assert.match(html, /data-view-button="overview"/);
-  assert.match(html, /data-view-button="servers"/);
-  assert.match(html, /data-view-button="tools"/);
-  assert.match(html, /data-view-button="diagrams"/);
-  assert.match(html, /data-view-button="events"/);
-  assert.match(html, /data-view-button="runtime"/);
-  assert.match(html, /function switchView/);
-  assert.match(html, /callmux-dashboard-view/);
-  assert.match(html, /id="runtime-json"/);
-  assert.match(html, /id="server-detail"/);
-  assert.match(html, /id="tool-suites"/);
-  assert.match(html, /id="runtime-diagrams"/);
-  assert.match(html, /id="overview-flow"/);
-  assert.match(html, /function renderRuntimeDiagrams/);
-  assert.match(html, /function eventMatchesFilters/);
-  assert.match(html, /event-filter-server/);
-  assert.match(html, /class="filter-field search-field"/);
-  assert.match(html, /<th>Duration<\/th>/);
-  assert.ok(html.includes('["/mcp", "/sse", "/messages"]'));
-  assert.ok(html.includes("status < 400"));
-  assert.ok(html.includes('status === 499 && (event.path === "/sse" || (event.path === "/mcp" && event.method === "GET"))'));
+test("loadDashboardHtml returns a self-contained HTML document", () => {
+  // The dashboard is now a prebuilt Vite/React single-file bundle (see
+  // dashboard/). loadDashboardHtml reads assets/dashboard.html, or a minimal
+  // fallback when the bundle has not been built (as in this test env). Either
+  // way the served document must be a self-contained HTML doc with no external
+  // script/style references — the listener's serving contract.
+  const html = loadDashboardHtml();
+  assert.match(html, /^<!doctype html>/i);
+  assert.match(html, /<title>callmux dashboard<\/title>/);
+  assert.match(html, /<\/html>\s*$/);
+  // No CDN / sibling-asset requests: any <script src> or <link href> must be a
+  // self-contained data: URL, never a network URL.
+  const externalRefs = html.match(/<(?:script|link)[^>]*\b(?:src|href)="(?!data:)[^"]+"/gi) ?? [];
+  assert.deepEqual(externalRefs, [], `served doc must be self-contained, found: ${externalRefs.join(", ")}`);
 });
 
 test("listener dashboard summarizes meta-tool fanout without arguments", () => {
