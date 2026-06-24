@@ -39,6 +39,9 @@ export interface RuntimeEvent {
   durationMs?: number
   timeoutMs?: number
   principal?: string
+  // http_request: the 404 was a stale/unknown session rejection — expected
+  // re-init churn (e.g. a burst after a restart), not a real error.
+  sessionReinit?: boolean
   jsonRpcMethod?: string
   jsonRpcTool?: string
   jsonRpcRequestCount?: number

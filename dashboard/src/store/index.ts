@@ -77,6 +77,7 @@ interface DashboardState {
   filters: EventFilters
   hideAgentStatus: boolean
   hideTransportHttp: boolean
+  hideSessionReinit: boolean
   selectedServer: string | null
   selectedEventKey: string | null
 
@@ -89,6 +90,7 @@ interface DashboardState {
   setFilter: (patch: Partial<EventFilters>) => void
   setHideAgentStatus: (value: boolean) => void
   setHideTransportHttp: (value: boolean) => void
+  setHideSessionReinit: (value: boolean) => void
   selectServer: (name: string | null) => void
   toggleEvent: (key: string) => void
   setManagementToken: (token: string) => void
@@ -113,6 +115,7 @@ export const useStore = create<DashboardState>((set, get) => ({
   filters: { type: '', status: '', server: '', search: '' },
   hideAgentStatus: true,
   hideTransportHttp: true,
+  hideSessionReinit: true,
   selectedServer: null,
   selectedEventKey: null,
 
@@ -140,6 +143,7 @@ export const useStore = create<DashboardState>((set, get) => ({
   setFilter: (patch) => set((s) => ({ filters: { ...s.filters, ...patch } })),
   setHideAgentStatus: (value) => set({ hideAgentStatus: value }),
   setHideTransportHttp: (value) => set({ hideTransportHttp: value }),
+  setHideSessionReinit: (value) => set({ hideSessionReinit: value }),
   selectServer: (name) => set({ selectedServer: name }),
   toggleEvent: (key) => set((s) => ({ selectedEventKey: s.selectedEventKey === key ? null : key })),
   setManagementToken: (token) => {

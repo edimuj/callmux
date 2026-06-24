@@ -15,6 +15,9 @@ type RuntimeEvent =
       status: number;
       durationMs: number;
       principal?: string;
+      // Set when the 404 was a stale/unknown Mcp-Session-Id rejection — expected
+      // re-init churn (e.g. a burst after a restart), not a real error.
+      sessionReinit?: boolean;
       jsonRpcMethod?: string;
       jsonRpcTool?: string;
       jsonRpcRequestCount?: number;
@@ -234,6 +237,7 @@ export function classifyDashboardToolStatus(
 
 function isDashboardRuntimeError(event: RuntimeEvent): boolean {
   if (event.type === "http_request") {
+    if (event.sessionReinit) return false;
     return event.status >= 400 && !isRoutineTransportHttpClose(event);
   }
   if (event.type === "tool_call_lifecycle") return event.success === false;

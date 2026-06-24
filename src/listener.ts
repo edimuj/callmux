@@ -138,6 +138,11 @@ interface RequestContext {
   remoteIp?: string;
   principal?: AuthorizationPrincipal;
   payload?: unknown;
+  // Set when the request was rejected because it carried a stale/unknown
+  // Mcp-Session-Id (a 404 telling the client to re-initialize). Expected churn
+  // after a restart — tagged so the dashboard can classify it as benign rather
+  // than surface it as an error.
+  sessionReinit?: boolean;
 }
 
 type JsonRpcId = string | number | null;
@@ -1268,12 +1273,18 @@ export class CallmuxListener {
       }
 
       if (sessionId) {
+        // Unknown session id -> 404 Not Found, per the MCP SDK transport
+        // contract (server/streamableHttp.js: "Requests with invalid session
+        // IDs are rejected with 404 Not Found"). The 404 is the defined signal
+        // for a compliant client to start a fresh session. Tagged as benign
+        // re-init churn so the dashboard doesn't surface it as an error.
+        context.sessionReinit = true;
         this.writeJsonRpcError(
           res,
-          400,
+          404,
           context,
-          -32000,
-          "Bad Request: Unknown session. Re-initialize and retry with a new MCP-Session-Id."
+          -32001,
+          "Not Found: Unknown session. Re-initialize and retry with a new MCP-Session-Id."
         );
         return;
       }
@@ -1327,12 +1338,17 @@ export class CallmuxListener {
     }
 
     if (sessionId && !this.sessions.has(sessionId)) {
+      // Unknown session id -> 404 Not Found (see the non-POST branch above and
+      // the MCP SDK transport contract). This is the re-init signal a stale
+      // bridge expects after a restart; tagged benign so it doesn't read as an
+      // error in the dashboard.
+      context.sessionReinit = true;
       this.writeJsonRpcError(
         res,
-        400,
+        404,
         context,
-        -32000,
-        "Bad Request: Unknown session. Re-initialize and retry with a new MCP-Session-Id.",
+        -32001,
+        "Not Found: Unknown session. Re-initialize and retry with a new MCP-Session-Id.",
         jsonRpcId
       );
       return;
@@ -2659,6 +2675,7 @@ export class CallmuxListener {
         durationMs,
         ...this.summarizeHttpRequestPayload(context.payload),
         ...(context.principal ? { principal: `${context.principal.kind}:${context.principal.id}` } : {}),
+        ...(context.sessionReinit ? { sessionReinit: true } : {}),
       });
     };
 

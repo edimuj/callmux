@@ -13,6 +13,7 @@ import {
   eventKey,
   eventMatchesFilters,
   eventOk,
+  isSessionReinitEvent,
   normalizeServers,
   statusText,
   statusTone,
@@ -50,6 +51,12 @@ function EventDetail({ event }: { event: RuntimeEvent }) {
   }
   items.push({ label: 'Type', value: event.type })
   items.push({ label: 'Status', value: statusText(event, event.success !== false) })
+  if (event.sessionReinit) {
+    items.push({
+      label: 'Session re-init',
+      value: <Badge variant="secondary" className="font-normal text-muted-foreground">expected churn after restart</Badge>,
+    })
+  }
   add('Request id', event.requestId)
   add('Session id', event.sessionId)
   add('HTTP', event.method ? event.method + ' ' + (event.path || '') : '')
@@ -95,8 +102,10 @@ export function EventsView() {
   const setFilter = useStore((s) => s.setFilter)
   const hideAgentStatus = useStore((s) => s.hideAgentStatus)
   const hideTransportHttp = useStore((s) => s.hideTransportHttp)
+  const hideSessionReinit = useStore((s) => s.hideSessionReinit)
   const setHideAgentStatus = useStore((s) => s.setHideAgentStatus)
   const setHideTransportHttp = useStore((s) => s.setHideTransportHttp)
+  const setHideSessionReinit = useStore((s) => s.setHideSessionReinit)
   const selectedEventKey = useStore((s) => s.selectedEventKey)
   const toggleEvent = useStore((s) => s.toggleEvent)
 
@@ -106,10 +115,17 @@ export function EventsView() {
   const displayed = useMemo(
     () =>
       allEvents
-        .filter((event) => eventMatchesFilters(event, { hideAgentStatus, hideTransportHttp, filters }))
+        .filter((event) => eventMatchesFilters(event, { hideAgentStatus, hideTransportHttp, hideSessionReinit, filters }))
         .slice(-80)
         .reverse(),
-    [allEvents, hideAgentStatus, hideTransportHttp, filters],
+    [allEvents, hideAgentStatus, hideTransportHttp, hideSessionReinit, filters],
+  )
+
+  // Count session re-init events hidden by the toggle so the burst collapses
+  // into one muted summary row instead of vanishing silently.
+  const hiddenReinitCount = useMemo(
+    () => (hideSessionReinit ? allEvents.filter(isSessionReinitEvent).length : 0),
+    [allEvents, hideSessionReinit],
   )
 
   return (
@@ -122,6 +138,9 @@ export function EventsView() {
           </label>
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <Switch checked={hideTransportHttp} onCheckedChange={setHideTransportHttp} /> Hide transport HTTP
+          </label>
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Switch checked={hideSessionReinit} onCheckedChange={setHideSessionReinit} /> Hide session re-init
           </label>
         </div>
       </div>
@@ -199,6 +218,20 @@ export function EventsView() {
             </tr>
           </thead>
           <tbody>
+            {hiddenReinitCount > 0 && (
+              <tr className="border-t border-border">
+                <td colSpan={6} className="bg-muted/30 p-2 text-center text-muted-foreground">
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:underline"
+                    onClick={() => setHideSessionReinit(false)}
+                  >
+                    {hiddenReinitCount} session re-init {hiddenReinitCount === 1 ? 'event' : 'events'} hidden
+                    {' '}(expected churn after a restart) — show
+                  </button>
+                </td>
+              </tr>
+            )}
             {displayed.length === 0 && (
               <tr>
                 <td colSpan={6} className="p-4 text-center text-muted-foreground">
@@ -221,7 +254,14 @@ export function EventsView() {
                   >
                     <td className="p-2 text-muted-foreground">{new Date(event.timestamp).toLocaleTimeString()}</td>
                     <td className="p-2">{event.type}</td>
-                    <td className="p-2 break-words">{targetText(event)}</td>
+                    <td className="p-2 break-words">
+                      {targetText(event)}
+                      {isSessionReinitEvent(event) && (
+                        <Badge variant="secondary" className="ml-2 align-middle font-normal text-muted-foreground">
+                          session re-init
+                        </Badge>
+                      )}
+                    </td>
                     <td className="p-2">{eventDurationText(event)}</td>
                     <td className="p-2">
                       <ToneText tone={statusTone(event, ok)}>{statusText(event, ok)}</ToneText>

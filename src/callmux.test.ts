@@ -10709,6 +10709,34 @@ test("RuntimeEventStore recent errors ignores routine transport disconnects", ()
   assert.equal(store.stats().recentErrors, 2);
 });
 
+test("RuntimeEventStore recent errors ignores session re-init 404s (#42)", () => {
+  const store = new RuntimeEventStore(10);
+  // A stale-session 404 tagged as re-init churn must not count as an error...
+  store.append({
+    type: "http_request",
+    timestamp: new Date(0).toISOString(),
+    requestId: "reinit",
+    method: "POST",
+    path: "/mcp",
+    status: 404,
+    durationMs: 3,
+    sessionReinit: true,
+  });
+  assert.equal(store.stats().recentErrors, 0);
+
+  // ...but an untagged 404 (e.g. a genuine unknown route) still does.
+  store.append({
+    type: "http_request",
+    timestamp: new Date(1).toISOString(),
+    requestId: "real-404",
+    method: "POST",
+    path: "/mcp",
+    status: 404,
+    durationMs: 3,
+  });
+  assert.equal(store.stats().recentErrors, 1);
+});
+
 test("listener dashboard records downstream tool failures without callmux error status", () => {
   const listener = new CallmuxListener({
     port: 0,
@@ -11367,6 +11395,121 @@ test("listener /mcp returns 400 for non-initialize request without session", asy
       body.error?.message,
       "Bad Request: No valid session. Send initialize first, then include MCP-Session-Id."
     );
+  } finally {
+    await listener.close();
+  }
+});
+
+test("listener /mcp returns 404 (not 400) for a stale session after restart and re-inits cleanly (#42)", async () => {
+  const upstream = new UpstreamManager();
+  const cache = new CallCache(0, undefined, {}, 100);
+
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: {} },
+    upstream,
+    cache,
+    allTools: [],
+    maxConcurrency: 10,
+  });
+
+  await listener.start();
+  try {
+    const port = listenerPort(listener);
+    const mcpHeaders = {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+    };
+
+    const initialize = async (id: number) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: mcpHeaders,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+          },
+          id,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const sessionId = res.headers.get("mcp-session-id");
+      assert.ok(sessionId);
+      return sessionId!;
+    };
+
+    // A bridge connects and gets a session id before the restart.
+    const staleSessionId = await initialize(1);
+
+    // Simulate a callmux restart: all sessions are cleared (listener.ts ~L467),
+    // but the still-connected bridge keeps firing calls with its old session id.
+    (listener as unknown as { sessions: Map<string, unknown> }).sessions.clear();
+
+    // POST with the stale session id -> 404 Not Found (the SDK's re-init signal),
+    // NOT 400. The JSON-RPC id is preserved and the error code is -32001.
+    const stalePost = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": staleSessionId },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "callmux_status", arguments: {} },
+        id: 42,
+      }),
+    });
+    assert.equal(stalePost.status, 404);
+    const staleBody = await stalePost.json() as {
+      error?: { code?: number; message?: string };
+      id?: unknown;
+    };
+    assert.equal(staleBody.id, 42);
+    assert.equal(staleBody.error?.code, -32001);
+    assert.match(staleBody.error?.message ?? "", /Unknown session/);
+
+    // Non-POST (e.g. the SSE GET stream) with the stale session id -> 404 too.
+    const staleGet = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "GET",
+      headers: { ...mcpHeaders, "mcp-session-id": staleSessionId },
+    });
+    assert.equal(staleGet.status, 404);
+
+    // Both stale rejections are tagged sessionReinit on the runtime event so the
+    // dashboard classifies them as benign churn rather than errors.
+    const reinitEvents = (listener as unknown as {
+      runtimeEvents: { list: () => Array<{ type: string; status?: number; sessionReinit?: boolean; method?: string }> };
+    }).runtimeEvents.list().filter(
+      (event) => event.type === "http_request" && event.sessionReinit === true
+    );
+    assert.equal(reinitEvents.length, 2, "expected one tagged event per stale request");
+    for (const event of reinitEvents) {
+      assert.equal(event.status, 404);
+    }
+
+    // Missing-session-id (non-init) stays 400 per the SDK contract — the
+    // boundary did not move.
+    const missingSession = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: mcpHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 7 }),
+    });
+    assert.equal(missingSession.status, 400);
+
+    // The bridge re-initializes cleanly: a fresh initialize (no session id)
+    // yields a new, working session distinct from the stale one.
+    const freshSessionId = await initialize(2);
+    assert.notEqual(freshSessionId, staleSessionId);
+
+    const freshCall = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...mcpHeaders, "mcp-session-id": freshSessionId },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 8 }),
+    });
+    assert.equal(freshCall.status, 200);
   } finally {
     await listener.close();
   }

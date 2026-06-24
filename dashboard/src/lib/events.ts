@@ -58,6 +58,8 @@ export function statusText(event: RuntimeEvent, ok: boolean): string {
 export type StatusTone = 'ok' | 'warn' | 'bad'
 
 export function statusTone(event: RuntimeEvent, ok: boolean): StatusTone {
+  // Session re-init (404) is expected churn, not a failure — render muted, not red.
+  if (isSessionReinitEvent(event)) return 'warn'
   if (event.status === 'downstream_error') return 'warn'
   if (event.status === 'in_flight' || event.status === 'client_aborted') return 'warn'
   return ok ? 'ok' : 'bad'
@@ -82,6 +84,13 @@ export function isTransportHttpEvent(event: RuntimeEvent): boolean {
   return status === 499 && (event.path === '/sse' || (event.path === '/mcp' && event.method === 'GET'))
 }
 
+// Stale/unknown Mcp-Session-Id rejections (404). Expected churn after a
+// restart — the bridge re-initializes and retries cleanly. Classified as
+// benign so the default Events view stays quiet; still retained for drill-down.
+export function isSessionReinitEvent(event: RuntimeEvent): boolean {
+  return event.type === 'http_request' && event.sessionReinit === true
+}
+
 export function isAgentStatusEvent(event: RuntimeEvent): boolean {
   const text = [event.type, targetText(event), detailText(event), event.error, event.jsonRpcMethod, event.jsonRpcTool]
     .filter(Boolean)
@@ -99,11 +108,13 @@ export function isAgentStatusEvent(event: RuntimeEvent): boolean {
 export interface EventFilterContext {
   hideAgentStatus: boolean
   hideTransportHttp: boolean
+  hideSessionReinit: boolean
   filters: EventFilters
 }
 
 export function eventMatchesFilters(event: RuntimeEvent, ctx: EventFilterContext): boolean {
-  const { hideAgentStatus, hideTransportHttp, filters } = ctx
+  const { hideAgentStatus, hideTransportHttp, hideSessionReinit, filters } = ctx
+  if (hideSessionReinit && isSessionReinitEvent(event)) return false
   if (hideAgentStatus && isAgentStatusEvent(event)) return false
   if (hideTransportHttp && isTransportHttpEvent(event)) return false
   if (filters.type && event.type !== filters.type) return false
