@@ -1,6 +1,13 @@
 export { CallmuxProxy } from "./proxy.js";
 export { CallmuxListener } from "./listener.js";
 export type { ListenerOptions } from "./listener.js";
+export { createListener } from "./library.js";
+export type {
+  CreateListenerOptions,
+  ListenerHealthSnapshot,
+  ListenerLifecycleState,
+  ProgrammaticListener,
+} from "./library.js";
 export { UpstreamManager } from "./upstream.js";
 export { CallCache } from "./cache.js";
 export { loadConfig, configFromArgs, findDefaultConfig, CONFIG_SCHEMA_URL } from "./config.js";

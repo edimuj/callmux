@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { AddressInfo } from "node:net";
 import { isAbsolute, dirname, join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
@@ -458,6 +459,10 @@ export class CallmuxListener {
         ? `[callmux]   Management API: ${this.managementConfig.path}\n`
         : "")
     );
+  }
+
+  address(): AddressInfo | string | null {
+    return this.httpServer?.address() ?? null;
   }
 
   async close(): Promise<void> {

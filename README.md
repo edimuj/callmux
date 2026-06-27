@@ -150,6 +150,27 @@ callmux daemon install --start --enable
 
 [Full guide ->](docs/shared-server.md)
 
+### Library API for Embedders
+
+Embed callmux in-process when another supervisor owns the service lifecycle. The package exports a `createListener()` helper that builds the proxy runtime, starts the shared listener, reports structured health, emits status snapshots, and supports programmatic reloads. The `callmux bridge --url --cwd` stdio entrypoint remains the stable per-session bridge for clients that need stdio MCP.
+
+```ts
+import { createListener, type CallmuxConfig } from "callmux";
+
+const config: CallmuxConfig = {
+  servers: {
+    github: {
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+    },
+  },
+};
+
+const listener = await createListener({ host: "127.0.0.1", port: 4860, config });
+listener.on("status", (snapshot) => console.log(snapshot.state, snapshot.downstream));
+console.log(listener.mcpUrl);
+```
+
 ### Meta-Only Mode: Fixed System Prompt Size
 
 50+ tool definitions bloat the system prompt on every API turn, costing tokens that compound across the session. Meta-only mode hides all downstream tools and exposes only 11 meta-tools. The agent discovers tools via `callmux_search_tools` or `callmux_status` and calls them through `callmux_call`. System prompt size stays fixed regardless of how many servers you add.

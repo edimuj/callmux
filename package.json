@@ -15,7 +15,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./schema.json": "./schema.json"
   },
   "files": [
     "dist/",

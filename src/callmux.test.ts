@@ -52,6 +52,7 @@ import {
 } from "./doctor.js";
 import { handleBatch, handleCall, handleCacheClear, handleDryRun, handleParallel, handlePipeline, handleRecipeDryRun, handleRecipeRun, handleSearchTools, handleStatus } from "./handlers.js";
 import { CallmuxProxy } from "./proxy.js";
+import { createListener } from "./library.js";
 import { mapBounded, UpstreamManager } from "./upstream.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ServerConfig, StdioServerConfig } from "./types.js";
@@ -1991,6 +1992,55 @@ test("package test script executes compiled test files", async () => {
     packageJson.scripts?.test,
     "tsc --project tsconfig.test.json && node --test dist-test/*.test.js"
   );
+});
+
+test("package exports library API and installed schema", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf-8")
+  ) as { exports?: Record<string, unknown> };
+
+  assert.deepEqual(packageJson.exports?.["./schema.json"], "./schema.json");
+  const rootExport = packageJson.exports?.["."] as Record<string, string>;
+  assert.equal(rootExport.import, "./dist/index.js");
+  assert.equal(rootExport.types, "./dist/index.d.ts");
+});
+
+test("createListener exposes health, status events, and programmatic reload", async () => {
+  const listener = await createListener({
+    port: 0,
+    config: {
+      servers: {},
+      cacheTtlSeconds: 0,
+    },
+  });
+  const states: string[] = [];
+  listener.on("status", (snapshot) => {
+    states.push(snapshot.state);
+  });
+
+  try {
+    assert.match(listener.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(listener.mcpUrl, `${listener.url}/mcp`);
+    assert.equal(listener.health().state, "running");
+    assert.equal(listener.health().downstream.total, 0);
+
+    await listener.reload({
+      servers: {
+        fake: fakeMcpServer("fake"),
+      },
+      cacheTtlSeconds: 0,
+    });
+
+    const health = listener.health();
+    assert.equal(health.state, "running");
+    assert.equal(health.downstream.total, 1);
+    assert.equal(health.downstream.connected, 1);
+    assert.equal(health.downstream.failed, 0);
+    assert.equal(health.downstream.servers.fake.state, "connected");
+    assert.deepEqual(states, ["reloading", "running"]);
+  } finally {
+    await listener.stop();
+  }
 });
 
 test("server hints cannot bypass exposed tool filtering", async () => {

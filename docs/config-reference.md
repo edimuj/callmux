@@ -19,6 +19,13 @@ Add `$schema` for editor autocomplete (VS Code, JetBrains, etc.):
 }
 ```
 
+Embedders can import the installed package schema instead of pinning a raw GitHub URL:
+
+```ts
+import schema from "callmux/schema.json" with { type: "json" };
+import type { CallmuxConfig } from "callmux";
+```
+
 callmux also accepts MCP-compatible format (`{ "mcpServers": { ... } }`) so you can adopt it without changing config structure.
 
 ---
