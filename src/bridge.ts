@@ -4,6 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -195,6 +196,12 @@ export class CallmuxBridge {
     }
   }
 
+  private installUpstreamNotificationHandlers(client: Client): void {
+    client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+      await this.refreshToolList();
+    });
+  }
+
   private scheduleReconnect(): void {
     if (this.closed || this.client || this.reconnectPromise || this.reconnectTimer) return;
     const delayMs = Math.min(10_000, 250 * (2 ** Math.max(0, this.reconnectAttempts)));
@@ -227,6 +234,7 @@ export class CallmuxBridge {
 
     try {
       await client.connect(transport);
+      this.installUpstreamNotificationHandlers(client);
     } catch (error) {
       await client.close().catch(() => undefined);
       await transport.close?.().catch(() => undefined);

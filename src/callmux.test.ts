@@ -12012,6 +12012,62 @@ test("stdio bridge sends tool list changed on reconnect when tools differ", asyn
   }
 });
 
+test("stdio bridge forwards upstream tool list changed notifications in steady state", async () => {
+  const bridge = new CallmuxBridge({
+    url: "http://127.0.0.1:1/mcp",
+    cwd: process.cwd(),
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  let tools = [mockTool("alpha")];
+  let upstreamNotificationHandler: (() => Promise<void> | void) | undefined;
+  const notifications: Array<{ error: Error | null; tools: Tool[] | null }> = [];
+  const bridgeClient = new Client(
+    { name: "bridge-upstream-list-changed-test", version: "1.0" },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 0,
+          onChanged(error, changedTools) {
+            notifications.push({ error, tools: changedTools });
+          },
+        },
+      },
+    }
+  );
+
+  const fakeClient = {
+    async listTools() { return { tools }; },
+    setNotificationHandler(_schema: unknown, handler: () => Promise<void> | void) {
+      upstreamNotificationHandler = handler;
+    },
+    async close() {},
+  };
+  (bridge as any).client = fakeClient;
+  (bridge as any).installUpstreamNotificationHandlers(fakeClient);
+
+  try {
+    await (bridge as any).server.connect(serverTransport);
+    await bridgeClient.connect(clientTransport);
+
+    const first = await bridgeClient.listTools();
+    assert.deepEqual(first.tools.map((tool) => tool.name), ["alpha"]);
+    assert.equal(notifications.length, 0);
+    assert.equal(typeof upstreamNotificationHandler, "function");
+
+    tools = [mockTool("alpha"), mockTool("beta")];
+    await upstreamNotificationHandler?.();
+
+    await waitFor(async () => notifications.length === 1);
+    assert.equal(notifications[0].error, null);
+    assert.equal(notifications[0].tools, null);
+  } finally {
+    await bridgeClient.close().catch(() => undefined);
+    await bridge.close();
+  }
+});
+
 test("stdio bridge skips notification on reconnect when tools unchanged", async () => {
   const bridge = new CallmuxBridge({
     url: "http://127.0.0.1:1/mcp",
