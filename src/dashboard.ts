@@ -162,6 +162,10 @@ export interface DashboardMetricsSnapshot {
 
 export interface DashboardSnapshot {
   generatedAt: string;
+  dashboard?: {
+    enabled: boolean;
+    path: string;
+  };
   summary: DashboardRuntimeSummary;
   status: unknown;
   management?: {

@@ -10182,6 +10182,8 @@ test("listener dashboard supports root mount", async () => {
 
     const data = await fetch(`http://127.0.0.1:${port}/data`);
     assert.equal(data.status, 200);
+    const body = await data.json() as { dashboard?: { path?: string } };
+    assert.equal(body.dashboard?.path, "/");
 
     const events = await fetch(`http://127.0.0.1:${port}/events`);
     assert.equal(events.status, 200);

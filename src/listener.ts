@@ -1031,6 +1031,10 @@ export class CallmuxListener {
 
     return {
       generatedAt: new Date().toISOString(),
+      dashboard: {
+        enabled: this.dashboardConfig.enabled,
+        path: this.dashboardConfig.path,
+      },
       summary: this.runtimeEvents.stats(),
       status,
       management: {

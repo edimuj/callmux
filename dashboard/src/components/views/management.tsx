@@ -23,6 +23,7 @@ export function ManagementView() {
 
   const enabled = snapshot?.management?.enabled ?? false
   const basePath = snapshot?.management?.path ?? '/management/v1'
+  const dashboardPath = snapshot?.dashboard?.path ?? '/dashboard'
   const servers = (
     Array.isArray(snapshot?.managementServers) && snapshot.managementServers.length > 0
       ? snapshot.managementServers
@@ -31,7 +32,7 @@ export function ManagementView() {
 
   async function runAction(name: string, action: Action) {
     try {
-      const ctx = { token, basePath }
+      const ctx = { token, basePath, configuredPath: dashboardPath }
       const enc = encodeURIComponent(name)
       if (action === 'restart') await managementRequest(`servers/${enc}/restart`, ctx, { method: 'POST' })
       if (action === 'enable') await managementRequest(`servers/${enc}`, ctx, { method: 'PATCH', body: { disabled: false } })

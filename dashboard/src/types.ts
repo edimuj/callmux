@@ -155,6 +155,7 @@ export interface StatusSnapshot {
 
 export interface DashboardSnapshot {
   generatedAt: string
+  dashboard?: { enabled: boolean; path: string }
   summary: RuntimeSummary
   status: StatusSnapshot
   management?: { enabled: boolean; path: string }
