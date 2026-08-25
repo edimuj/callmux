@@ -11,6 +11,7 @@ import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
+import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import type {
   InstanceIdentity,
@@ -1186,9 +1187,10 @@ export class UpstreamManager {
   ): Transport {
     const url = new URL(config.url);
     const headers = this.mergedHttpHeaders(config, forwardedHeaders);
-    const opts = headers
-      ? { requestInit: { headers } }
-      : undefined;
+    const opts = {
+      ...(headers ? { requestInit: { headers } } : undefined),
+      fetch: fetchWithoutUndiciTimeout,
+    };
 
     if (config.transport === "sse") {
       return new SSEClientTransport(url, opts);
@@ -1220,11 +1222,12 @@ export class UpstreamManager {
     let transport: Transport | undefined;
     let client: Client | undefined;
     const headers = this.mergedHttpHeaders(config, forwardedHeaders);
+    const httpOpts = {
+      ...(headers ? { requestInit: { headers } } : undefined),
+      fetch: fetchWithoutUndiciTimeout,
+    };
     try {
-      transport = new StreamableHTTPClientTransport(
-        new URL(config.url),
-        headers ? { requestInit: { headers } } : undefined
-      );
+      transport = new StreamableHTTPClientTransport(new URL(config.url), httpOpts);
       client = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
       onAttempt?.(client, transport);
       await withTimeout(
@@ -1236,10 +1239,7 @@ export class UpstreamManager {
     } catch {
       await this.closeQuietly(client, transport);
       process.stderr.write(`[callmux] "${name}": streamable-http failed, trying SSE fallback\n`);
-      const sseTransport = new SSEClientTransport(
-        new URL(config.url),
-        headers ? { requestInit: { headers } } : undefined
-      );
+      const sseTransport = new SSEClientTransport(new URL(config.url), httpOpts);
       const sseClient = new Client({ name: "callmux", version: "0.2.0" }, { capabilities: {} });
       onAttempt?.(sseClient, sseTransport);
       await withTimeout(

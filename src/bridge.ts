@@ -9,6 +9,7 @@ import {
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { errorResult } from "./results.js";
+import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
 
 const BRIDGE_CWD_HEADER = "x-callmux-cwd";
 const BRIDGE_CLIENT_HEADER = "x-callmux-client";
@@ -312,6 +313,7 @@ export class CallmuxBridge {
       requestInit: {
         headers: bridgeHeaders(this.options),
       },
+      fetch: fetchWithoutUndiciTimeout,
     });
     const client = new Client(
       { name: "callmux-bridge", version: "0.1.0" },
