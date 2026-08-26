@@ -14004,6 +14004,108 @@ test("stdio bridge preserves ambiguous execution state across an annotated repla
   }
 });
 
+test("stdio bridge aborts the pending transport request when a call hits callTimeoutMs (#50 follow-up)", async () => {
+  // The MCP SDK's per-request timeout rejects the local call but does not
+  // abort the underlying HTTP request — only StreamableHTTPClientTransport
+  // .close() does that (it shares one AbortController across every send()).
+  // Now that the transport's undici ceiling is disabled (see http-fetch.ts),
+  // an unmatched timeout error would leave that request pending forever.
+  // Prove the bridge reconnects (and therefore aborts it) on timeout.
+  let requestAborted = false;
+  const server = createServer(async (req, res) => {
+    if (req.method === "GET") {
+      res.writeHead(405).end();
+      return;
+    }
+    if (req.method === "DELETE") {
+      res.writeHead(200).end();
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+
+    if (message.method === "initialize") {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "mcp-session-id": "bridge-timeout-abort-session",
+      });
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {} },
+          serverInfo: { name: "hang-daemon", version: "1.0.0" },
+        },
+      }));
+      return;
+    }
+    if (message.method === "notifications/initialized") {
+      res.writeHead(202).end();
+      return;
+    }
+    if (message.method === "tools/call") {
+      // Simulate a downstream call whose result is withheld indefinitely —
+      // never respond, so this request only ever ends via client abort.
+      req.once("aborted", () => { requestAborted = true; });
+      res.once("close", () => { if (!res.writableEnded) requestAborted = true; });
+      return;
+    }
+    res.writeHead(202).end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", resolve);
+    server.once("error", reject);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+
+  const bridge = new CallmuxBridge({
+    url: `http://127.0.0.1:${address.port}/mcp`,
+    cwd: process.cwd(),
+    callTimeoutMs: 150,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const bridgeClient = new Client({ name: "bridge-timeout-abort-test", version: "1.0" }, { capabilities: {} });
+
+  try {
+    await bridge.start(serverTransport);
+    await bridgeClient.connect(clientTransport);
+
+    const originalTransport = (bridge as any).transport;
+    let closedCalled = false;
+    const originalClose = originalTransport.close.bind(originalTransport);
+    originalTransport.close = async (...args: unknown[]) => {
+      closedCalled = true;
+      return originalClose(...args);
+    };
+
+    const start = Date.now();
+    const result = await bridgeClient.callTool({ name: "hang_tool", arguments: {} }) as any;
+    const elapsed = Date.now() - start;
+
+    // Bounded by the bridge's own callTimeoutMs, not left hanging on the
+    // withheld downstream response.
+    assert.ok(elapsed < 2000, `expected the call to time out quickly, took ${elapsed}ms`);
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error.code, "bridge_upstream_unavailable");
+
+    // The stale transport was actually closed (aborting its pending fetch)
+    // and a fresh one took its place — no leaked socket.
+    await waitFor(async () => closedCalled);
+    await waitFor(async () => requestAborted);
+    assert.notEqual((bridge as any).transport, originalTransport);
+  } finally {
+    await bridgeClient.close().catch(() => undefined);
+    await bridge.close();
+    server.close();
+  }
+});
+
 test("stdio bridge forwards upstream tool list changed notifications in steady state", async () => {
   const bridge = new CallmuxBridge({
     url: "http://127.0.0.1:1/mcp",

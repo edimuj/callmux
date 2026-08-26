@@ -459,6 +459,17 @@ function isReconnectableBridgeError(error: unknown): boolean {
     /fetch failed/i,
     /transport.*closed/i,
     /not connected/i,
+    // The MCP SDK's per-request `timeout` (callTimeoutMs) rejects the local
+    // call but does NOT abort the in-flight HTTP request — the transport has
+    // a single AbortController shared by every send(), not one per request,
+    // so only transport.close() can actually cancel the pending fetch. Treat
+    // a client-side timeout as reconnectable so withReconnect closes and
+    // reopens the transport, aborting the orphaned request instead of
+    // leaking it. Previously undici's fixed 300s ceiling bounded that leak;
+    // now that fetchWithoutUndiciTimeout disables it, an unmatched timeout
+    // here would hang the socket indefinitely (#50 follow-up).
+    /request timed out/i,
+    /maximum total timeout exceeded/i,
   ].some((pattern) => pattern.test(message));
 }
 
