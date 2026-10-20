@@ -381,6 +381,7 @@ export class CallmuxListener {
         generation: event.generation,
         addedTools: event.addedTools,
         removedTools: event.removedTools,
+        changedTools: event.changedTools,
       });
       for (const session of this.sessions.values()) {
         void session.server.sendToolListChanged().catch(() => undefined);

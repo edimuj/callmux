@@ -3356,6 +3356,42 @@ test("UpstreamManager records tool suite changes and removed tools after reconne
   await upstream.close();
 });
 
+test("UpstreamManager reconnect diff reports a schema-only tool change", async () => {
+  const upstream = new UpstreamManager();
+  const clients: Array<{ onclose?: () => void; callTool: () => Promise<CallToolResult>; close: () => Promise<void> }> = [];
+  const events: Array<{ addedTools: string[]; removedTools: string[]; changedTools: string[] }> = [];
+  let connectCount = 0;
+  const harness = upstream as unknown as {
+    connectOne: (name: string, config: ServerConfig) => Promise<unknown>;
+  };
+  harness.connectOne = async (name: string, config: ServerConfig) => {
+    connectCount++;
+    const tools = [
+      mockTool("get_issue", "Get an issue", connectCount === 1 ? ["id"] : ["id", "repo"]),
+    ];
+    const client = {
+      onclose: undefined as undefined | (() => void),
+      async callTool() {
+        return textResult("ok");
+      },
+      async close() {},
+    };
+    clients.push(client);
+    return { name, config, client, transport: { async close() {} }, allTools: tools, tools };
+  };
+
+  await upstream.connect({ github: { command: "github-mcp" } });
+  upstream.subscribeToolSuiteChanges((event) => events.push(event));
+  clients[0].onclose?.();
+  await upstream.callTool("get_issue", { id: "1" }, "github", { forceReconnect: true });
+
+  assert.deepEqual(events, [
+    { ...events[0], addedTools: [], removedTools: [], changedTools: ["get_issue"] },
+  ]);
+  assert.deepEqual(upstream.getServerInfo("github")?.changedTools, ["get_issue"]);
+  await upstream.close();
+});
+
 test("UpstreamManager call timeout returns a structured tool error", async () => {
   const upstream = new UpstreamManager(5) as unknown as {
     clients: Map<string, { callTool: (_params: unknown, _schema?: unknown, _options?: { timeout?: number }) => Promise<CallToolResult> }>;
@@ -13776,6 +13812,106 @@ test("stdio bridge forwards calls to shared listener with cwd header", async () 
     await listener?.close();
     await upstream.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function startMutableProxy(config: Partial<CallmuxConfig> = {}): Promise<{
+  proxy: CallmuxProxy;
+  client: Client;
+  listChangedCount: () => number;
+  callTool: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+}> {
+  const proxy = new CallmuxProxy({
+    servers: { mutable: fakeMcpServer("mutable", { FAKE_MCP_MUTABLE: "1" }) },
+    cacheTtlSeconds: 0,
+    ...config,
+  });
+  let notifications = 0;
+  const client = new Client(
+    { name: "proxy-list-changed-test", version: "1.0" },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 0,
+          onChanged() {
+            notifications++;
+          },
+        },
+      },
+    }
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await proxy.start(serverTransport);
+  await client.connect(clientTransport);
+  return {
+    proxy,
+    client,
+    listChangedCount: () => notifications,
+    callTool: async (name, args) =>
+      await client.callTool({ name, arguments: args }) as CallToolResult,
+  };
+}
+
+test("proxy mode refreshes a downstream's tools on list_changed without reconnecting", async () => {
+  const { proxy, client, listChangedCount, callTool } = await startMutableProxy({ metaOnly: true });
+  try {
+    assert.equal(client.getServerCapabilities()?.tools?.listChanged, true);
+    const before = await callTool("callmux_call", { tool: "added_tool", arguments: { query: "x" } });
+    assert.equal(before.isError, true);
+
+    await callTool("callmux_call", { tool: "mutate_tools", arguments: { action: "add_tool" } });
+    await waitFor(async () => listChangedCount() === 1);
+
+    const after = await callTool("callmux_call", { tool: "added_tool", arguments: { query: "x" } });
+    assert.notEqual(after.isError, true);
+    assert.match(JSON.stringify(after.content), /added_tool/);
+
+    const search = await callTool("callmux_search_tools", { query: "added" });
+    const found = (search.structuredContent as { results: Array<{ tool: string }> }).results;
+    assert.ok(found.some((result) => result.tool === "added_tool"));
+
+    const info = proxy.getUpstream().getServerInfo("mutable");
+    assert.equal(info?.state, "connected");
+    assert.deepEqual(info?.addedTools, ["added_tool"]);
+    // Still on the original connection: no reconnect happened.
+    assert.equal(info?.consecutiveFailures, 0);
+    assert.equal(info?.reconnectAttempts, undefined);
+  } finally {
+    await client.close().catch(() => undefined);
+    await proxy.close();
+  }
+});
+
+test("proxy mode picks up a schema-only tool change on list_changed", async () => {
+  const { proxy, client, listChangedCount, callTool } = await startMutableProxy();
+  try {
+    const inputProperties = async () => {
+      const { tools } = await client.listTools();
+      const tool = tools.find((candidate) => candidate.name === "mutable_tool");
+      return Object.keys(tool?.inputSchema.properties ?? {}).sort();
+    };
+    assert.deepEqual(await inputProperties(), ["id"]);
+    const generation = proxy.getUpstream().getServerInfo("mutable")?.toolSuiteGeneration;
+
+    await callTool("mutate_tools", { action: "change_schema" });
+    await waitFor(async () => listChangedCount() === 1);
+
+    assert.deepEqual(await inputProperties(), ["id", "label"]);
+    const search = await callTool("callmux_search_tools", { query: "mutable_tool" });
+    const result = (search.structuredContent as {
+      results: Array<{ tool: string; inputFields?: string[] }>;
+    }).results.find((candidate) => candidate.tool === "mutable_tool");
+    assert.ok(result?.inputFields?.includes("label"));
+
+    const info = proxy.getUpstream().getServerInfo("mutable");
+    assert.deepEqual(info?.changedTools, ["mutable_tool"]);
+    assert.equal(info?.addedTools, undefined);
+    assert.equal(info?.toolSuiteGeneration, (generation ?? 0) + 1);
+  } finally {
+    await client.close().catch(() => undefined);
+    await proxy.close();
   }
 });
 

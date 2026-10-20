@@ -10,6 +10,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { errorResult } from "./results.js";
 import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
+import { sameToolList } from "./tool-list.js";
 
 const BRIDGE_CWD_HEADER = "x-callmux-cwd";
 const BRIDGE_CLIENT_HEADER = "x-callmux-client";
@@ -53,38 +54,6 @@ function bridgeHeaders(options: BridgeOptions): Record<string, string> {
     [BRIDGE_CWD_HEADER]: options.cwd,
     [BRIDGE_CLIENT_HEADER]: "stdio-bridge",
   };
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => stableValue(item));
-  }
-
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nested]) => [key, stableValue(nested)])
-    );
-  }
-
-  return value;
-}
-
-function toolListFingerprint(tools: Tool[]): string {
-  const normalized = tools
-    .map((tool) => stableValue(tool) as Record<string, unknown>)
-    .sort((left, right) => {
-      const leftName = typeof left.name === "string" ? left.name : "";
-      const rightName = typeof right.name === "string" ? right.name : "";
-      return leftName.localeCompare(rightName) ||
-        JSON.stringify(left).localeCompare(JSON.stringify(right));
-    });
-  return JSON.stringify(normalized);
-}
-
-function sameToolList(left: Tool[], right: Tool[]): boolean {
-  return toolListFingerprint(left) === toolListFingerprint(right);
 }
 
 export class CallmuxBridge {

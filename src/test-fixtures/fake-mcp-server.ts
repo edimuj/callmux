@@ -97,6 +97,31 @@ for (const tool of tools) {
   });
 }
 
+// FAKE_MCP_MUTABLE=1 exposes `mutate_tools`, which changes the catalog at
+// runtime; McpServer then sends notifications/tools/list_changed itself.
+if (process.env.FAKE_MCP_MUTABLE === "1") {
+  const echo = (tool: string) => async (args: unknown) => textResult(
+    JSON.stringify({ server: process.env.FAKE_MCP_NAME ?? "fake-mcp-server", tool, arguments: args })
+  );
+  const mutable = server.registerTool("mutable_tool", {
+    description: "Tool whose schema can change",
+    inputSchema: { id: z.number().optional() },
+  }, echo("mutable_tool"));
+  server.registerTool("mutate_tools", {
+    inputSchema: { action: z.enum(["add_tool", "change_schema"]) },
+  }, async ({ action }) => {
+    if (action === "add_tool") {
+      server.registerTool("added_tool", {
+        description: "Tool added after connect",
+        inputSchema: { query: z.string() },
+      }, echo("added_tool"));
+    } else {
+      mutable.update({ paramsSchema: { id: z.number().optional(), label: z.string() } });
+    }
+    return textResult(action);
+  });
+}
+
 if (startDelayMs > 0) await delay(startDelayMs);
 if (failStart) {
   process.exit(1);

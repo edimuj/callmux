@@ -82,6 +82,7 @@ type RuntimeEvent =
       generation: number;
       addedTools: string[];
       removedTools: string[];
+      changedTools: string[];
     };
 
 export interface DashboardConfig {

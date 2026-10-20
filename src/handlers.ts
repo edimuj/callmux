@@ -2022,6 +2022,7 @@ export function handleStatus(
         if (info.lastToolSuiteChangeAt) base.lastToolSuiteChangeAt = info.lastToolSuiteChangeAt;
         if (info.addedTools) base.addedTools = info.addedTools;
         if (info.removedTools) base.removedTools = info.removedTools;
+        if (info.changedTools) base.changedTools = info.changedTools;
       }
 
       if (includeDescriptions) {

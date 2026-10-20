@@ -118,7 +118,7 @@ export class CallmuxProxy {
 
     this.server = new Server(
       { name: "callmux", version: VERSION },
-      { capabilities: { tools: {} } }
+      { capabilities: { tools: { listChanged: true } } }
     );
 
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -180,6 +180,11 @@ export class CallmuxProxy {
   async start(transport: Transport): Promise<void> {
     await this.connectUpstreams();
     await this.server.connect(transport);
+    // Listener mode shares this proxy's upstream but notifies its own sessions;
+    // only the directly connected (stdio) server is notified here.
+    this.upstream.subscribeToolSuiteChanges(() => {
+      void this.server.sendToolListChanged().catch(() => undefined);
+    });
   }
 
   /** Shared state accessors for listener mode */

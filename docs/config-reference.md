@@ -181,7 +181,7 @@ By default, failed downstream servers reconnect forever with jittered exponentia
 
 When a connected server disconnects or a tool call hits a transport/session/protocol/timeout failure, callmux retires that client and allows the next call to try reconnecting immediately. For cacheable safe calls, callmux may retry once after reconnecting.
 
-Tool suites are refreshed on reconnect. `listTools` is dynamic, callmux meta-tools stay present, and `callmux_status` reports `toolSuiteGeneration` plus per-server `addedTools` and `removedTools`. Calling a tool that disappeared after reconnect returns `tool_removed_after_reconnect` with the current alternatives.
+Tool suites are refreshed on reconnect and whenever a downstream sends `notifications/tools/list_changed` (re-listed in place, no reconnect). A change counts when a tool is added, removed, or its definition (input schema, description, …) differs; callmux then sends `notifications/tools/list_changed` to its own clients. `listTools` is dynamic, callmux meta-tools stay present, and `callmux_status` reports `toolSuiteGeneration` plus per-server `addedTools`, `removedTools`, and `changedTools`. Calling a tool that disappeared after reconnect returns `tool_removed_after_reconnect` with the current alternatives.
 
 Listener deployments expose two status endpoints:
 

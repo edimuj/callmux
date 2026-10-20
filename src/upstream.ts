@@ -9,9 +9,11 @@ import { open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
 import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
+import { diffToolLists, type ToolListDiff } from "./tool-list.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import type {
   InstanceIdentity,
@@ -83,6 +85,26 @@ export async function mapBounded<T, R>(
 
   await Promise.all(workers);
   return results;
+}
+
+type ToolSuiteChangeEvent = {
+  server: string;
+  generation: number;
+  changedAt: string;
+} & ToolListDiff;
+
+interface AppliedToolSuite extends ToolListDiff {
+  /** True when any tool was added, removed, or changed its definition. */
+  changed: boolean;
+  /** Set when the suite generation was bumped (first install or a change). */
+  changedAt?: string;
+}
+
+/** Apply a server's `tools` allowlist to its full downstream catalog. */
+function exposedToolsFor(config: ServerConfig, allTools: Tool[]): Tool[] {
+  if (!config.tools) return allTools;
+  const allowSet = new Set(config.tools);
+  return allTools.filter((tool) => allowSet.has(tool.name));
 }
 
 interface ConnectedServer {
@@ -894,13 +916,8 @@ export class UpstreamManager {
   private toolSuiteGeneration = 0;
   private lastToolSuiteChangeAt: string | undefined;
   private removedTools = new Map<string, { server: string; tool: string; lastSeenAt: string; removedAt: string; alternatives: string[] }>();
-  private toolSuiteSubscribers = new Set<(event: {
-    server: string;
-    generation: number;
-    changedAt: string;
-    addedTools: string[];
-    removedTools: string[];
-  }) => void>();
+  private toolSuiteSubscribers = new Set<(event: ToolSuiteChangeEvent) => void>();
+  private toolRefreshes = new Map<string, { rerun: boolean }>();
   private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
   private connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
   private reconnectPolicy: EffectiveReconnectPolicy = {
@@ -942,26 +959,14 @@ export class UpstreamManager {
     };
   }
 
-  subscribeToolSuiteChanges(callback: (event: {
-    server: string;
-    generation: number;
-    changedAt: string;
-    addedTools: string[];
-    removedTools: string[];
-  }) => void): () => void {
+  subscribeToolSuiteChanges(callback: (event: ToolSuiteChangeEvent) => void): () => void {
     this.toolSuiteSubscribers.add(callback);
     return () => {
       this.toolSuiteSubscribers.delete(callback);
     };
   }
 
-  private emitToolSuiteChange(event: {
-    server: string;
-    generation: number;
-    changedAt: string;
-    addedTools: string[];
-    removedTools: string[];
-  }): void {
+  private emitToolSuiteChange(event: ToolSuiteChangeEvent): void {
     for (const subscriber of this.toolSuiteSubscribers) {
       subscriber(event);
     }
@@ -1276,16 +1281,21 @@ export class UpstreamManager {
         );
       }
 
+      // The downstream may change its catalog at any time (e.g. a deploy
+      // behind a long-lived HTTP session that never reconnects); re-list it in
+      // place. Ignored until this client is the installed one for `name`.
+      const connectedClient = client;
+      connectedClient.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+        this.refreshServerTools(name, connectedClient);
+      });
+
       const { tools: allTools } = await withTimeout(
         client.listTools(),
         connectTimeoutMs,
         `"${name}" listTools`
       );
 
-      const allowSet = config.tools ? new Set(config.tools) : null;
-      const tools = allowSet
-        ? allTools.filter((t) => allowSet.has(t.name))
-        : allTools;
+      const tools = exposedToolsFor(config, allTools);
 
       const connectDurationMs = Math.round(performance.now() - startTime);
       return { name, config, client, transport, resolvedTransport, allTools, tools, connectDurationMs };
@@ -1397,28 +1407,7 @@ export class UpstreamManager {
     } = connected;
     const oldClient = this.clients.get(name);
     const oldTransport = this.transports.get(name);
-    const previousTools = new Set(this.toolsByServer.get(name)?.map((tool) => tool.name) ?? []);
-    const nextTools = new Set(tools.map((tool) => tool.name));
-    const addedTools = Array.from(nextTools).filter((tool) => !previousTools.has(tool)).sort();
-    const removedTools = Array.from(previousTools).filter((tool) => !nextTools.has(tool)).sort();
-    const suiteChanged = previousTools.size === 0 || addedTools.length > 0 || removedTools.length > 0;
-    const changedAt = suiteChanged ? new Date().toISOString() : undefined;
-    if (suiteChanged) {
-      this.toolSuiteGeneration += 1;
-      this.lastToolSuiteChangeAt = changedAt;
-      for (const tool of addedTools) {
-        this.removedTools.delete(`${name}__${tool}`);
-      }
-      for (const tool of removedTools) {
-        this.removedTools.set(`${name}__${tool}`, {
-          server: name,
-          tool,
-          lastSeenAt: this.serverInfoMap.get(name)?.lastConnectedAt ?? changedAt ?? new Date().toISOString(),
-          removedAt: changedAt ?? new Date().toISOString(),
-          alternatives: Array.from(nextTools).sort(),
-        });
-      }
-    }
+    const suite = this.applyToolSuite(name, tools);
     const generation = (this.connectionGenerations.get(name) ?? 0) + 1;
     this.connectionGenerations.set(name, generation);
 
@@ -1446,11 +1435,6 @@ export class UpstreamManager {
 
     this.clients.set(name, client);
     this.transports.set(name, transport);
-    this.toolsByServer.set(name, tools);
-    this.exposedToolsByServer.set(
-      name,
-      new Set(tools.map((tool) => tool.name))
-    );
     if (config.maxConcurrency) {
       this.serverConcurrency.set(name, config.maxConcurrency);
     } else {
@@ -1466,28 +1450,140 @@ export class UpstreamManager {
       ...(config.maxConcurrency ? { maxConcurrency: config.maxConcurrency } : {}),
       lastConnectedAt: new Date().toISOString(),
       consecutiveFailures: 0,
-      toolSuiteGeneration: this.toolSuiteGeneration,
-      ...(this.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: this.lastToolSuiteChangeAt } : {}),
-      ...(addedTools.length > 0 ? { addedTools } : {}),
-      ...(removedTools.length > 0 ? { removedTools } : {}),
+      ...this.toolSuiteInfo(suite),
     });
     this.clearFailedConnection(name);
     this.reconnectAttempts.delete(name);
     this.immediateReconnectServers.delete(name);
-    this.rebuildToolIndexes();
 
     if (oldClient && oldClient !== client) {
       void this.closeQuietly(oldClient, oldTransport);
     }
-    if (suiteChanged && changedAt && (addedTools.length > 0 || removedTools.length > 0)) {
-      this.emitToolSuiteChange({
-        server: name,
-        generation: this.toolSuiteGeneration,
-        changedAt,
-        addedTools,
-        removedTools,
-      });
+    this.emitToolSuiteChangeIfAny(name, suite);
+  }
+
+  /**
+   * Replace a server's exposed tools and rebuild the indexes. Bumps the suite
+   * generation on the first install or when any tool was added, removed, or
+   * changed its definition (schema, description, …).
+   */
+  private applyToolSuite(name: string, tools: Tool[]): AppliedToolSuite {
+    const previous = this.toolsByServer.get(name);
+    const diff = diffToolLists(previous ?? [], tools);
+    const changed =
+      diff.addedTools.length > 0 ||
+      diff.removedTools.length > 0 ||
+      diff.changedTools.length > 0;
+    let changedAt: string | undefined;
+    if (!previous?.length || changed) {
+      changedAt = new Date().toISOString();
+      this.toolSuiteGeneration += 1;
+      this.lastToolSuiteChangeAt = changedAt;
+      for (const tool of diff.addedTools) {
+        this.removedTools.delete(`${name}__${tool}`);
+      }
+      const alternatives = tools.map((tool) => tool.name).sort();
+      for (const tool of diff.removedTools) {
+        this.removedTools.set(`${name}__${tool}`, {
+          server: name,
+          tool,
+          lastSeenAt: this.serverInfoMap.get(name)?.lastConnectedAt ?? changedAt,
+          removedAt: changedAt,
+          alternatives,
+        });
+      }
     }
+
+    this.toolsByServer.set(name, tools);
+    this.exposedToolsByServer.set(
+      name,
+      new Set(tools.map((tool) => tool.name))
+    );
+    this.rebuildToolIndexes();
+    return { ...diff, changed, changedAt };
+  }
+
+  private toolSuiteInfo(suite: AppliedToolSuite): Pick<
+    ServerInfo,
+    "toolSuiteGeneration" | "lastToolSuiteChangeAt" | "addedTools" | "removedTools" | "changedTools"
+  > {
+    return {
+      toolSuiteGeneration: this.toolSuiteGeneration,
+      ...(this.lastToolSuiteChangeAt ? { lastToolSuiteChangeAt: this.lastToolSuiteChangeAt } : {}),
+      ...(suite.addedTools.length > 0 ? { addedTools: suite.addedTools } : {}),
+      ...(suite.removedTools.length > 0 ? { removedTools: suite.removedTools } : {}),
+      ...(suite.changedTools.length > 0 ? { changedTools: suite.changedTools } : {}),
+    };
+  }
+
+  private emitToolSuiteChangeIfAny(name: string, suite: AppliedToolSuite): void {
+    if (!suite.changed || !suite.changedAt) return;
+    this.emitToolSuiteChange({
+      server: name,
+      generation: this.toolSuiteGeneration,
+      changedAt: suite.changedAt,
+      addedTools: suite.addedTools,
+      removedTools: suite.removedTools,
+      changedTools: suite.changedTools,
+    });
+  }
+
+  /**
+   * Re-list a connected server's tools after it sent
+   * notifications/tools/list_changed, updating the catalog in place (no
+   * reconnect). Notifications arriving mid-refresh coalesce into one re-run.
+   */
+  private refreshServerTools(name: string, client: Client): void {
+    const inFlight = this.toolRefreshes.get(name);
+    if (inFlight) {
+      inFlight.rerun = true;
+      return;
+    }
+    const state = { rerun: false };
+    this.toolRefreshes.set(name, state);
+    void (async () => {
+      do {
+        state.rerun = false;
+        if (this.closing || this.clients.get(name) !== client) return;
+        let allTools: Tool[];
+        try {
+          ({ tools: allTools } = await withTimeout(
+            client.listTools(),
+            this.connectTimeoutMs,
+            `"${name}" listTools`
+          ));
+        } catch (error) {
+          process.stderr.write(
+            `[callmux] Warning: tools refresh failed "${name}": ${errorMessage(error)}\n`
+          );
+          return;
+        }
+        const config = this.serverConfigs.get(name);
+        if (this.closing || this.clients.get(name) !== client || !config) return;
+        const tools = exposedToolsFor(config, allTools);
+        const suite = this.applyToolSuite(name, tools);
+        if (!suite.changed) continue;
+        const info = this.serverInfoMap.get(name);
+        if (info) {
+          const next: ServerInfo = {
+            ...info,
+            totalTools: allTools.length,
+            exposedTools: tools.length,
+          };
+          delete next.addedTools;
+          delete next.removedTools;
+          delete next.changedTools;
+          this.serverInfoMap.set(name, { ...next, ...this.toolSuiteInfo(suite) });
+        }
+        process.stderr.write(
+          `[callmux] Tools changed on "${name}": ` +
+            `+${suite.addedTools.length} -${suite.removedTools.length} ~${suite.changedTools.length}\n`
+        );
+        this.emitToolSuiteChangeIfAny(name, suite);
+      } while (state.rerun);
+    })().finally(() => {
+      this.toolRefreshes.delete(name);
+    });
   }
 
   private reconnectDelayMs(attempts: number): number {

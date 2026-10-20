@@ -616,4 +616,6 @@ export interface ServerInfo {
   lastToolSuiteChangeAt?: string;
   addedTools?: string[];
   removedTools?: string[];
+  /** Tools whose definition (input schema, description, …) changed in place. */
+  changedTools?: string[];
 }
