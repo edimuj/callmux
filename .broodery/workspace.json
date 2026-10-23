@@ -1,0 +1,9 @@
+{
+  "prepare": [
+    {
+      "name": "install",
+      "command": "npm ci --no-audit --no-fund",
+      "timeoutMs": 1200000
+    }
+  ]
+}

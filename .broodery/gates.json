@@ -1,0 +1,16 @@
+{
+  "gates": [
+    {
+      "name": "test",
+      "command": "npm ci --no-audit --no-fund && npm run build && npm test",
+      "timeoutMs": 1200000
+    }
+  ],
+  "checks": [
+    {
+      "name": "test",
+      "command": "npm ci --no-audit --no-fund && npm run build && npm test",
+      "timeoutMs": 1200000
+    }
+  ]
+}

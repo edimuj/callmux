@@ -1,0 +1,69 @@
+{
+  "displayName": "callmux",
+  "defaultBranch": "main",
+  "conventions": "README.md",
+  "doneWhen": [
+    {
+      "kind": "build",
+      "clauses": [
+        {
+          "id": "g-land",
+          "type": "gate",
+          "where": "land",
+          "check": "test"
+        },
+        {
+          "by": "reviewer",
+          "id": "v-review",
+          "type": "verdict",
+          "question": "Does this change do what the task asked, and is the fix real?"
+        }
+      ]
+    },
+    {
+      "kind": "debug",
+      "clauses": [
+        {
+          "id": "g-land",
+          "type": "gate",
+          "where": "land",
+          "check": "test"
+        },
+        {
+          "by": "reviewer",
+          "id": "v-review",
+          "type": "verdict",
+          "question": "Does this change do what the task asked, and is the fix real?"
+        }
+      ]
+    },
+    {
+      "kind": "refactor",
+      "clauses": [
+        {
+          "id": "g-land",
+          "type": "gate",
+          "where": "land",
+          "check": "test"
+        },
+        {
+          "by": "reviewer",
+          "id": "v-review",
+          "type": "verdict",
+          "question": "Does this change do what the task asked, and is the fix real?"
+        }
+      ]
+    },
+    {
+      "kind": "mechanical",
+      "clauses": [
+        {
+          "id": "g-land",
+          "type": "gate",
+          "where": "land",
+          "check": "test"
+        }
+      ]
+    }
+  ]
+}
