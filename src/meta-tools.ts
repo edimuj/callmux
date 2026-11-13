@@ -7,6 +7,40 @@ const OUTPUT_FORMAT_PROPERTY = {
     "Optional model-facing text output format. structuredContent remains JSON.",
 } as const;
 
+const DETAIL_PROPERTY = {
+  type: "string",
+  enum: ["full", "brief"],
+  description:
+    "full (default) inlines every result. brief keeps status, counts, failedIndexes and failures; successes stay retrievable via omitted.retrieval.",
+} as const;
+
+/**
+ * One batch item: canonical `{arguments: {...}}` or a flat argument object.
+ * Flat keys other than cwd/timeoutMs become the tool's arguments; the runtime
+ * rejects items that mix `arguments` with other downstream keys.
+ */
+const BATCH_ITEM_SCHEMA = {
+  type: "object",
+  description:
+    "{arguments:{...}} or flat {...}. Flat cwd/timeoutMs stay callmux overrides (also sent if the tool declares them); wrap to send them only to the tool.",
+  properties: {
+    arguments: {
+      type: "object",
+      description: "Arguments for this call",
+    },
+    timeoutMs: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional timeout in milliseconds for this item.",
+    },
+    cwd: {
+      type: "string",
+      description: "Optional absolute cwd override for this item.",
+    },
+  },
+  additionalProperties: true,
+} as const;
+
 /**
  * Meta-tool definitions that callmux exposes alongside proxied tools.
  */
@@ -14,9 +48,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_parallel",
     description:
-      "Execute multiple tool calls in parallel. Returns all results at once. " +
-      "Use when you need to make several independent calls that don't depend on each other. " +
-      "Returns status, succeeded/failed counts, failedIndexes, and per-call results so partial failures are recoverable.",
+      "Run independent calls concurrently: {calls:[{tool,server?,arguments}]}. " +
+      "Returns status, counts, failedIndexes and per-call results; retry only failedIndexes.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -51,6 +84,7 @@ export const META_TOOLS: Tool[] = [
             additionalProperties: false,
           },
         },
+        detail: DETAIL_PROPERTY,
         outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["calls"],
@@ -60,9 +94,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_batch",
     description:
-      "Apply the same tool call across multiple items. Like parallel() but for " +
-      "the common case of calling one tool many times with different arguments. " +
-      "Returns status, succeeded/failed counts, failedIndexes, and per-item results so partial failures are recoverable.",
+      'Call one tool per item: {"tool":"get_item","items":[{"arguments":{"id":"1"}}]}; flat items [{"id":"1"}] also work. ' +
+      "Retry only failedIndexes.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -84,30 +117,10 @@ export const META_TOOLS: Tool[] = [
         },
         items: {
           type: "array",
-          description: "Array of argument objects, one per call",
-          items: {
-            type: "object",
-            properties: {
-              arguments: {
-                type: "object",
-                description: "Arguments for this call",
-              },
-              timeoutMs: {
-                type: "integer",
-                minimum: 1,
-                description:
-                  "Optional timeout in milliseconds for this item.",
-              },
-              cwd: {
-                type: "string",
-                description:
-                  "Optional absolute cwd override for this item.",
-              },
-            },
-            required: ["arguments"],
-            additionalProperties: false,
-          },
+          description: "One entry per call: {arguments:{...}} or flat argument object",
+          items: BATCH_ITEM_SCHEMA,
         },
+        detail: DETAIL_PROPERTY,
         outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       required: ["tool", "items"],
@@ -117,9 +130,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_pipeline",
     description:
-      "Chain tool calls where each step can use output from the previous step. " +
-      "Use inputMapping to extract values from the previous result's text content. " +
-      "If a step fails, execution stops and the result includes completed step outputs, status=\"failed\", failedStep, and mapping diagnostics for recovery.",
+      "Run dependent steps in order: {steps:[{tool,arguments,inputMapping}]}. " +
+      "On failure it stops and returns status=failed, failedStep and prior outputs.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -146,8 +158,7 @@ export const META_TOOLS: Tool[] = [
               inputMapping: {
                 type: "object",
                 description:
-                  "Map of argument names to JSONPath-like expressions to extract from the previous step's result. " +
-                  'Use "$text" for the full text content, "$json" to parse as JSON, or "$json.field.path" for nested fields.',
+                  'Argument name -> expression on the previous result: "$text" (full text), "$json" (parsed JSON) or "$json.field.path".',
                 additionalProperties: { type: "string" },
               },
               onMappingMissing: {
@@ -170,8 +181,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_search_tools",
     description:
-      "Search downstream tools by name, server, description, and input field names. " +
-      "Use this first in meta-only mode when you know the task but not the exact tool name.",
+      "Find downstream tools by name, server, description or field. Use first when the tool name is unknown. " +
+      "includeSchema:true adds types, required and enums.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -195,6 +206,11 @@ export const META_TOOLS: Tool[] = [
           description:
             "Max chars per tool description. 0 disables truncation for this call; omit uses the config default.",
         },
+        includeSchema: {
+          type: "boolean",
+          description:
+            "Include each result's full inputSchema (types, required, enums). Default false keeps results compact.",
+        },
         outputFormat: OUTPUT_FORMAT_PROPERTY,
       },
       additionalProperties: false,
@@ -203,10 +219,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_get_result",
     description:
-      "Retrieve a stored full result when a prior call returned a truncated _callmux.ref. " +
-      "Supports pagination, optional dot-path selection, field projection, and text search. " +
-      "For arrays, offset/limit page items; for strings, offset is a character offset and limit returns chunks of about 200 chars. " +
-      "If this tool is deferred by your MCP client, call callmux_call with tool=\"callmux_get_result\" and arguments={ref,...}.",
+      "Page a stored result by ref: {ref,path?,offset?,limit?,fields?,search?}. " +
+      "If deferred, use callmux_call with tool=callmux_get_result and arguments={ref}.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -247,9 +261,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_call",
     description:
-      "Call a single tool on a downstream server. Primary way to invoke tools in meta-only mode. " +
-      "Use callmux_search_tools to find available tools. " +
-      "Also accepts tool=\"callmux_get_result\" to page stored truncated results when the direct pagination tool is deferred.",
+      "Call one tool: {tool,server?,arguments}; server is optional if the name is unique. " +
+      "Find it via callmux_search_tools. tool=callmux_get_result pages refs.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -290,9 +303,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_dry_run",
     description:
-      "Validate and preview callmux calls without executing downstream tools. " +
-      "Resolves server routing and argument references ($file/$jsonFile/$yamlFile/$text), " +
-      "returns planned calls, cache-hit candidates, warnings for suspicious argument shapes, and per-call errors.",
+      "Preview call/parallel/batch/pipeline input without executing: resolves routing and $file/$text refs; " +
+      "returns planned calls, warnings and per-call errors.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -330,17 +342,8 @@ export const META_TOOLS: Tool[] = [
         },
         items: {
           type: "array",
-          description: "Batch mode argument items",
-          items: {
-            type: "object",
-            properties: {
-              arguments: { type: "object" },
-              timeoutMs: { type: "integer", minimum: 1 },
-              cwd: { type: "string" },
-            },
-            required: ["arguments"],
-            additionalProperties: false,
-          },
+          description: "Batch mode items: {arguments:{...}} or flat argument object",
+          items: BATCH_ITEM_SCHEMA,
         },
         steps: {
           type: "array",
@@ -396,8 +399,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_recipe_dry_run",
     description:
-      "Preview a named recipe without executing downstream tools. Expands recipe parameters, " +
-      "then validates routing, argument references, cache-hit candidates, and per-call errors.",
+      "Preview a named recipe without executing: expands parameters, then validates routing, " +
+      "argument refs, cache-hit candidates and per-call errors.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -436,8 +439,8 @@ export const META_TOOLS: Tool[] = [
   {
     name: "callmux_status",
     description:
-      "Check the health and status of callmux and its downstream servers. " +
-      "Returns instance identity, connected servers, available tools, cache stats, and configuration.",
+      "Check callmux and downstream server health. Returns instance identity, servers, tools, " +
+      "cache stats and config. Use it when routing fails.",
     inputSchema: {
       type: "object" as const,
       properties: {

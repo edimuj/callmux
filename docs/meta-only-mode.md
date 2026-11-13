@@ -62,7 +62,7 @@ In meta-only mode, the agent follows this workflow:
 -> Returns matching callable tool names, servers, descriptions, scores, and input field hints
 ```
 
-Use `server` to narrow results when you already know the target downstream server.
+Use `server` to narrow results when you already know the target downstream server. Add `"includeSchema": true` to get each result's full `inputSchema` (types, `required`, enums) before you call the tool.
 
 ### 3. List tools
 

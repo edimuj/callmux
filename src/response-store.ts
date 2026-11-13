@@ -364,31 +364,34 @@ function summarizeDataShape(data: unknown): Record<string, unknown> {
   return { type: data === null ? "null" : typeof data };
 }
 
+/**
+ * Ready-to-call first-page arguments for a stored ref, directly and through
+ * callmux_call for clients that defer callmux_get_result.
+ */
+export function retrievalCall(ref: string, path?: string): Record<string, unknown> {
+  const firstPage = {
+    ref,
+    ...(path ? { path } : {}),
+    offset: 0,
+    limit: DEFAULT_RESULT_PAGE_LIMIT,
+  };
+  return {
+    tool: "callmux_get_result",
+    arguments: firstPage,
+    viaCallmuxCall: {
+      tool: "callmux_call",
+      arguments: { tool: "callmux_get_result", arguments: firstPage },
+    },
+  };
+}
+
 function retrievalHint(ref: string, shape: Record<string, unknown>): Record<string, unknown> {
   const suggestedPath =
     typeof shape.suggestedPath === "string" && shape.suggestedPath.length > 0
       ? shape.suggestedPath
       : undefined;
   return {
-    tool: "callmux_get_result",
-    arguments: {
-      ref,
-      ...(suggestedPath ? { path: suggestedPath } : {}),
-      offset: 0,
-      limit: DEFAULT_RESULT_PAGE_LIMIT,
-    },
-    viaCallmuxCall: {
-      tool: "callmux_call",
-      arguments: {
-        tool: "callmux_get_result",
-        arguments: {
-          ref,
-          ...(suggestedPath ? { path: suggestedPath } : {}),
-          offset: 0,
-          limit: DEFAULT_RESULT_PAGE_LIMIT,
-        },
-      },
-    },
+    ...retrievalCall(ref, suggestedPath),
     supports: {
       path: "dot path inside the stored result, for example items or preview.items",
       offset: "array item offset, or character offset for string results",

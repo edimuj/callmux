@@ -12,6 +12,7 @@ import { META_TOOLS } from "./meta-tools.js";
 import {
   handleParallel,
   handleBatch,
+  type ResultRetainer,
   handlePipeline,
   handleCall,
   handleSearchTools,
@@ -250,7 +251,8 @@ export class CallmuxProxy {
             args,
             this.maxConcurrency,
             context,
-            this.config.outputFormat
+            this.config.outputFormat,
+            this.retainResult
           ),
           this.outputFormatFor(args)
         );
@@ -264,7 +266,8 @@ export class CallmuxProxy {
             args,
             this.maxConcurrency,
             context,
-            this.config.outputFormat
+            this.config.outputFormat,
+            this.retainResult
           ),
           this.outputFormatFor(args)
         );
@@ -464,6 +467,9 @@ export class CallmuxProxy {
 
     return { tool };
   }
+
+  private readonly retainResult: ResultRetainer = (tool, result) =>
+    this.responseStore.store(tool, result)?.ref;
 
   private shieldResult(
     target: ResponseShieldTarget,

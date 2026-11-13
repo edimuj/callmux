@@ -198,6 +198,8 @@ Set `exposeMetaTools: false` when you want the opposite shape: list only proxied
 
 Balanced schema compression is enabled by default. It minimizes verbose MCP tool and parameter descriptions before they enter the client context, while preserving names, types, required fields, enums, defaults, and bounds. Configure it globally or per server when a downstream MCP server needs more or less description.
 
+Compression also applies to the `callmux_*` meta-tools. Their descriptions fit the default 160-character budget, so the call shape and recovery hints stay visible to the agent. Longer guidance lives in this README and in `callmux instructions`.
+
 [Config reference ->](docs/config-reference.md#schema-compression)
 
 ### Enterprise Security Built In
@@ -259,7 +261,7 @@ These tools are exposed to your agent alongside (or instead of) the proxied tool
 | `callmux_parallel` | Fire independent calls concurrently, get all results in one turn |
 | `callmux_batch` | Same tool, many items. The bulk operation pattern |
 | `callmux_pipeline` | Chain tools where each step feeds into the next |
-| `callmux_search_tools` | Search downstream tools by task, keyword, server, description, and input fields |
+| `callmux_search_tools` | Search downstream tools by task, keyword, server, description, and input fields; `includeSchema: true` returns full input schemas |
 | `callmux_get_result` | Page, filter, or project a full stored result when callmux returns a truncated response ref |
 | `callmux_call` | Call a single downstream tool by name, or `callmux_get_result` when the direct pagination tool is deferred |
 | `callmux_dry_run` | Validate and preview calls without executing |
@@ -280,8 +282,34 @@ callmux instructions --profile codex --mode meta-only
 
 Fan-out and chained meta-tools are recoverable by design:
 
-- `callmux_parallel` and `callmux_batch` always return every per-call or per-item result, plus `status`, `succeeded`, `failed`, and `failedIndexes`. If one branch fails, successful siblings are still visible and failed indexes can be retried directly.
+- `callmux_parallel` and `callmux_batch` return every per-call or per-item result, plus `status`, `succeeded`, `failed`, and `failedIndexes`. If one branch fails, successful siblings are still visible and failed indexes can be retried directly.
+- Pass `detail: "brief"` to `callmux_parallel` or `callmux_batch` for a smaller response. Brief output keeps `status`, the counts, `failedIndexes`, and every failure inline under `failures`. Successful results are stored, and `omitted.retrieval` gives ready-to-call `callmux_get_result` arguments (path `results`) to page them. If the result store cannot hold the payload, callmux returns the full results with a `brief_not_retained` warning. `detail` works with any `outputFormat`. Meta-tools declare no `outputSchema`, so brief output does not affect downstream `outputSchema` validation ([#51](https://github.com/edimuj/callmux/issues/51)).
 - `callmux_pipeline` returns `status: "completed"`, every step result, and `finalResult` on success. If step N fails or throws, execution stops and returns `status: "failed"`, `failedStep`, and the outputs from steps `0..N`; mapped steps also include `mappedArguments` and `skippedMappings`, so agents can see which `inputMapping` values were actually sent or not resolved before retrying. Set `onMappingMissing: "fail"` on steps where missing mapped IDs or mutation targets must stop before side effects.
+
+### Batch item shapes
+
+`callmux_batch` items can take either form. Both pass the advertised JSON Schema:
+
+```json
+{ "tool": "get_item", "items": [{ "arguments": { "id": "1" } }] }
+{ "tool": "get_item", "items": [{ "id": "1" }] }
+```
+
+- **Wrapped** (`{ "arguments": {...} }`) is the canonical form. The only other keys allowed next to `arguments` are the per-item overrides `cwd` and `timeoutMs`. Any other key is rejected with `invalid_arguments` and `unexpectedKeys`, instead of being dropped silently.
+- **Flat** items are wrapped automatically, and the response includes an `auto_wrapped_flat_items` warning. In a flat item, `cwd` and `timeoutMs` are callmux overrides. If the target tool also declares an input property with that name, callmux forwards the value to the tool as well, so no downstream argument is lost. To send `cwd` or `timeoutMs` only to the tool, use the wrapped form.
+
+The same rules apply to flat `callmux_parallel` calls, `callmux_pipeline` steps, and `callmux_call`. Their reserved keys are `tool`, `server`, `cwd`, and `timeoutMs`, plus `inputMapping` and `onMappingMissing` for pipeline steps and `forceReconnect` and `outputFormat` for `callmux_call`. The routing keys `tool` and `server` are never forwarded to the tool.
+
+### Discovering argument schemas
+
+`callmux_search_tools` stays compact by default: tool name, server, description, score, and `inputFields`. Add `includeSchema: true` to get each result's full downstream `inputSchema`, including types, `required`, and enums. This lets an agent connected only over MCP build a valid call without guessing:
+
+```json
+// callmux_search_tools
+{ "query": "get item", "limit": 1, "includeSchema": true }
+```
+
+The CLI equivalent is `callmux tools schema <tool>`.
 
 ---
 

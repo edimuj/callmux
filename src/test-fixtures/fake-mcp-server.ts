@@ -9,6 +9,10 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 interface ToolDefinition {
   name: string;
   description?: string;
+  /** Declare `id` as a required string instead of an optional number. */
+  requiredId?: boolean;
+  /** Declare an outputSchema and return matching structuredContent. */
+  structured?: boolean;
 }
 
 type CallMode = "ok" | "throw" | "tool_error" | "exit" | "hang" | "large_result";
@@ -63,8 +67,11 @@ for (const tool of tools) {
   server.registerTool(tool.name, {
     ...(tool.description ? { description: tool.description } : {}),
     inputSchema: {
-      id: z.number().optional(),
+      id: tool.requiredId ? z.string() : z.number().optional(),
     },
+    ...(tool.structured
+      ? { outputSchema: { tool: z.string(), id: z.union([z.string(), z.number()]).optional() } }
+      : {}),
   }, async (args) => {
     if (callDelayMs > 0) await delay(callDelayMs);
     if (callMode === "hang") {
@@ -85,6 +92,13 @@ for (const tool of tools) {
         body: "x".repeat(200),
       }));
       return textResult(JSON.stringify(items));
+    }
+    if (tool.structured) {
+      const structuredContent = { tool: tool.name, ...(args.id !== undefined ? { id: args.id } : {}) };
+      return {
+        content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+        structuredContent,
+      };
     }
     return textResult(
       JSON.stringify({

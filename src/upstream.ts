@@ -3159,6 +3159,13 @@ export class UpstreamManager {
     return this.toolsByServer.get(server)?.find((tool) => tool.name === actualName);
   }
 
+  /** Downstream definition of the tool a name/server hint routes to, if known. */
+  getToolDefinition(toolName: string, serverHint?: string): Tool | undefined {
+    const resolved = this.resolveServer(toolName, serverHint);
+    if (!resolved || "error" in resolved) return undefined;
+    return this.resolvedTool(resolved.server, resolved.actualName);
+  }
+
   async prepareToolCall(
     toolName: string,
     args?: Record<string, unknown>,

@@ -17,6 +17,8 @@ import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { CallCache } from "./cache.js";
 import {
   configFromArgs,
@@ -17722,5 +17724,434 @@ test("callmux client attach stashes the CLI token in the same managed block as t
     assert.match(clientConfig, /callmux/);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Agent-facing schemas, discovery, and brief output (#55) ─────────
+
+function metaTool(name: string): Tool {
+  const tool = META_TOOLS.find((candidate) => candidate.name === name);
+  assert.ok(tool, `missing meta tool ${name}`);
+  return tool;
+}
+
+/** Validates arguments the way a strict MCP client does before sending. */
+function advertisedSchemaAccepts(tool: Tool, args: Record<string, unknown>): boolean {
+  const validator = new AjvJsonSchemaValidator();
+  return validator.getValidator(tool.inputSchema as never)(args).valid;
+}
+
+function errorCode(result: CallToolResult): string | undefined {
+  return (result.structuredContent as { error?: { code?: string } } | undefined)?.error?.code;
+}
+
+test("batch flat and wrapped items pass the advertised schema and run identically", async () => {
+  const wrapped = { tool: "get_item", items: [{ arguments: { id: "1" } }, { arguments: { id: "2" }, timeoutMs: 500 }] };
+  const flat = { tool: "get_item", items: [{ id: "1" }, { id: "2", timeoutMs: 500 }] };
+  // Both the source schema and the schema as exposed after default compression.
+  for (const exposed of [metaTool("callmux_batch"), compressToolForExposure(metaTool("callmux_batch"))]) {
+    assert.equal(advertisedSchemaAccepts(exposed, wrapped), true);
+    assert.equal(advertisedSchemaAccepts(exposed, flat), true);
+  }
+  const dryRun = compressToolForExposure(metaTool("callmux_dry_run"));
+  assert.equal(advertisedSchemaAccepts(dryRun, { mode: "batch", ...flat }), true);
+  assert.equal(advertisedSchemaAccepts(dryRun, { mode: "batch", ...wrapped }), true);
+
+  const runs: Array<Array<{ args?: Record<string, unknown>; timeoutMs?: number }>> = [];
+  for (const args of [wrapped, flat]) {
+    const seen: Array<{ args?: Record<string, unknown>; timeoutMs?: number }> = [];
+    const upstream = {
+      async callTool(_tool: string, callArgs?: Record<string, unknown>, _server?: string, ctx?: ToolCallContext) {
+        seen.push({ args: callArgs, ...(ctx?.timeoutMs ? { timeoutMs: ctx.timeoutMs } : {}) });
+        return textResult("ok");
+      },
+      getServerConcurrency() { return undefined; },
+    };
+    const result = await handleBatch(upstream as never, new CallCache(0), args, 1);
+    assert.equal((result.structuredContent as { status: string }).status, "completed");
+    runs.push(seen);
+  }
+  assert.deepEqual(runs[0], [{ args: { id: "1" } }, { args: { id: "2" }, timeoutMs: 500 }]);
+  assert.deepEqual(runs[1], runs[0]);
+});
+
+test("flat reserved keys stay callmux overrides and are forwarded when the tool declares them", async () => {
+  const seen: Array<{ args?: Record<string, unknown>; cwd?: string; timeoutMs?: number }> = [];
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>, _server?: string, ctx?: ToolCallContext) {
+      seen.push({ args, cwd: ctx?.cwd, timeoutMs: ctx?.timeoutMs });
+      return textResult("ok");
+    },
+    getToolDefinition(tool: string) {
+      // run_shell declares a downstream `cwd`; get_item declares neither key.
+      return tool === "run_shell"
+        ? { name: "run_shell", inputSchema: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" } } } }
+        : { name: "get_item", inputSchema: { type: "object", properties: { id: { type: "string" } } } };
+    },
+    getServerConcurrency() { return undefined; },
+  };
+
+  await handleBatch(upstream as never, new CallCache(0), {
+    tool: "run_shell",
+    items: [{ command: "ls", cwd: "/repo", timeoutMs: 900 }],
+  }, 1);
+  await handleBatch(upstream as never, new CallCache(0), {
+    tool: "get_item",
+    items: [{ id: "1", cwd: "/repo" }],
+  }, 1);
+  await handleParallel(upstream as never, new CallCache(0), {
+    calls: [{ tool: "run_shell", command: "pwd", cwd: "/repo" }],
+  }, 1);
+
+  assert.deepEqual(seen, [
+    // Declared cwd reaches the tool and still overrides the session cwd.
+    { args: { command: "ls", cwd: "/repo" }, cwd: "/repo", timeoutMs: 900 },
+    // Undeclared cwd is only a callmux override.
+    { args: { id: "1" }, cwd: "/repo", timeoutMs: undefined },
+    { args: { command: "pwd", cwd: "/repo" }, cwd: "/repo", timeoutMs: undefined },
+  ]);
+
+  // A wrapped item sends the key only downstream.
+  seen.length = 0;
+  await handleBatch(upstream as never, new CallCache(0), {
+    tool: "run_shell",
+    items: [{ arguments: { command: "ls", cwd: "relative/dir" } }],
+  }, 1);
+  assert.deepEqual(seen, [{ args: { command: "ls", cwd: "relative/dir" }, cwd: undefined, timeoutMs: undefined }]);
+});
+
+test("containers mixing arguments with other keys are rejected before any call", async () => {
+  let calls = 0;
+  const upstream = createMockUpstream([{ server: "items", tool: mockTool("get_item", "Get", ["id"]) }]);
+  (upstream as unknown as { callTool: () => Promise<CallToolResult> }).callTool = async () => {
+    calls++;
+    return textResult("ok");
+  };
+  const cache = new CallCache(0);
+
+  const results = [
+    await handleBatch(upstream as never, cache, { tool: "get_item", items: [{ arguments: { id: "1" }, label: "x" }] }, 1),
+    await handleParallel(upstream as never, cache, { calls: [{ tool: "get_item", arguments: { id: "1" }, label: "x" }] }, 1),
+    await handlePipeline(upstream as never, cache, { steps: [{ tool: "get_item", arguments: { id: "1" }, label: "x" }] }),
+    await handleCall(upstream as never, cache, { tool: "get_item", arguments: { id: "1" }, label: "x" }),
+  ];
+  for (const result of results) {
+    assert.equal(result.isError, true);
+    assert.equal(errorCode(result), "invalid_arguments");
+    assert.deepEqual(
+      (result.structuredContent as { error: { details: { unexpectedKeys: string[] } } }).error.details.unexpectedKeys,
+      ["label"]
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+test("call recipes do not leak the recipe mode into downstream arguments", async () => {
+  let seenArgs: Record<string, unknown> | undefined = { sentinel: true };
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      seenArgs = args;
+      return textResult("ok");
+    },
+    resolveServer() { return { actualName: "ping", server: "default" }; },
+    getServerConcurrency() { return undefined; },
+  };
+  const result = await handleRecipeRun(upstream as never, new CallCache(0), {
+    ping: { mode: "call", tool: "ping" },
+  }, { recipe: "ping" }, 1);
+  assert.notEqual(result.isError, true);
+  assert.equal(seenArgs, undefined);
+});
+
+test("meta-tool descriptions survive default schema compression intact", () => {
+  const proxy = new CallmuxProxy({ servers: { items: { command: "ignored" } }, metaOnly: true });
+  const exposed = new Map(proxy.getTools().map((tool) => [tool.name, tool]));
+  assert.equal(exposed.size, META_TOOLS.length);
+
+  const truncated: string[] = [];
+  const compare = (source: unknown, shown: unknown, path: string) => {
+    if (Array.isArray(source)) {
+      source.forEach((item, index) => compare(item, (shown as unknown[])[index], `${path}[${index}]`));
+      return;
+    }
+    if (source === null || typeof source !== "object") return;
+    const shownRecord = shown as Record<string, unknown>;
+    for (const [key, value] of Object.entries(source)) {
+      if (key === "description" && typeof value === "string") {
+        // Compression may drop an obvious description but must never clip one.
+        const kept = shownRecord.description;
+        if (kept !== undefined && kept !== value.replace(/\s+/g, " ").trim()) truncated.push(path);
+        continue;
+      }
+      compare(value, shownRecord[key], `${path}.${key}`);
+    }
+  };
+  for (const tool of META_TOOLS) {
+    const shown = exposed.get(tool.name);
+    assert.ok(shown);
+    assert.equal(shown.description, tool.description, `${tool.name} description was clipped`);
+    compare(tool.inputSchema, shown.inputSchema, tool.name);
+  }
+  assert.deepEqual(truncated, []);
+
+  // Call shape and recovery guidance lead each fan-out/retrieval description.
+  assert.match(exposed.get("callmux_batch")!.description!, /\{"tool":"get_item","items":\[\{"arguments":\{"id":"1"\}\}\]\}/);
+  assert.match(exposed.get("callmux_batch")!.description!, /failedIndexes/);
+  assert.match(exposed.get("callmux_parallel")!.description!, /failedIndexes/);
+  assert.match(exposed.get("callmux_pipeline")!.description!, /failedStep/);
+  assert.match(exposed.get("callmux_get_result")!.description!, /callmux_call/);
+  assert.match(exposed.get("callmux_call")!.description!, /callmux_get_result/);
+  assert.match(exposed.get("callmux_search_tools")!.description!, /includeSchema/);
+});
+
+async function startProxyClient(config: CallmuxConfig): Promise<{
+  proxy: CallmuxProxy;
+  client: Client;
+  call: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>;
+  close: () => Promise<void>;
+}> {
+  const proxy = new CallmuxProxy(config);
+  const client = new Client({ name: "agent-facing-test", version: "1.0" }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await proxy.start(serverTransport);
+  await client.connect(clientTransport);
+  return {
+    proxy,
+    client,
+    call: async (name, args) => await client.callTool({ name, arguments: args }) as CallToolResult,
+    close: async () => {
+      await client.close().catch(() => undefined);
+      await proxy.close();
+    },
+  };
+}
+
+test("meta-only agent discovers get_item(id) with required types and keeps routing diagnostics", async () => {
+  const harness = await startProxyClient({
+    servers: {
+      items: fakeMcpServer("items", {
+        FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item", description: "Get one item", requiredId: true }]),
+      }),
+    },
+    metaOnly: true,
+    cacheTtlSeconds: 0,
+  });
+  try {
+    const { tools } = await harness.client.listTools();
+    assert.ok(tools.every((tool) => tool.name.startsWith("callmux_")));
+
+    type SearchResult = { tool: string; inputFields?: string[]; inputSchema?: Record<string, unknown> };
+    const compact = await harness.call("callmux_search_tools", { query: "get", limit: 1 });
+    const compactHit = (compact.structuredContent as { results: SearchResult[] }).results[0];
+    assert.equal(compactHit.tool, "get_item");
+    assert.deepEqual(compactHit.inputFields, ["id"]);
+    assert.equal(compactHit.inputSchema, undefined);
+
+    const detailed = await harness.call("callmux_search_tools", { query: "get", limit: 1, includeSchema: true });
+    const schema = (detailed.structuredContent as { results: SearchResult[] }).results[0].inputSchema as {
+      required?: string[];
+      properties: Record<string, { type?: string }>;
+    };
+    assert.deepEqual(schema.required, ["id"]);
+    assert.equal(schema.properties.id.type, "string");
+
+    const badFlag = await harness.call("callmux_search_tools", { query: "get", includeSchema: "yes" });
+    assert.equal(errorCode(badFlag), "invalid_arguments");
+
+    // Unambiguous routing without server keeps working.
+    const routed = await harness.call("callmux_call", { tool: "get_item", arguments: { id: "1" } });
+    assert.notEqual(routed.isError, true);
+    assert.match(JSON.stringify(routed.content), /get_item/);
+
+    // A wrong server still explains how to correct the route.
+    const wrong = await harness.call("callmux_call", { tool: "get_item", server: "example", arguments: { id: "1" } });
+    assert.equal(wrong.isError, true);
+    const error = (wrong.structuredContent as {
+      error: { code: string; message: string; details: { availableServers: string[] } };
+    }).error;
+    assert.equal(error.code, "tool_resolution_failed");
+    assert.ok(error.message.startsWith('server "example" not found in this callmux instance.'));
+    assert.match(error.message, /items/);
+    assert.deepEqual(error.details.availableServers, ["items"]);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("brief batch keeps every failure inline and stores successes for retrieval", async () => {
+  const store = new ResponseStore();
+  const retain = (tool: string, result: CallToolResult) => store.store(tool, result)?.ref;
+  let downstreamCalls = 0;
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      downstreamCalls++;
+      const id = (args as { id: number }).id;
+      if (id === 2) return { content: [{ type: "text" as const, text: "not found" }], isError: true };
+      if (id === 3) throw new Error("timeout");
+      return textResult(JSON.stringify({ id }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+  const args = {
+    tool: "get_item",
+    detail: "brief",
+    items: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
+  };
+
+  const result = await handleBatch(upstream as never, new CallCache(0), args, 2, undefined, undefined, retain);
+  const brief = result.structuredContent as {
+    status: string;
+    detail: string;
+    succeeded: number;
+    failed: number;
+    failedIndexes: number[];
+    results?: unknown;
+    failures: Array<{ index: number; result?: { isError?: boolean; error?: string }; error?: string }>;
+    omitted: { results: number; ref: string; retrieval: { tool: string; arguments: Record<string, unknown> } };
+  };
+  assert.equal(brief.status, "partial");
+  assert.equal(brief.detail, "brief");
+  assert.equal(brief.succeeded, 2);
+  assert.equal(brief.failed, 2);
+  assert.deepEqual(brief.failedIndexes, [1, 2]);
+  assert.equal(brief.results, undefined);
+  assert.deepEqual(brief.failures.map((failure) => failure.index), [1, 2]);
+  assert.equal(brief.failures[0].result?.isError, true);
+  assert.equal(brief.failures[1].error, "timeout");
+  assert.equal(brief.omitted.results, 2);
+  assert.equal(brief.omitted.retrieval.tool, "callmux_get_result");
+
+  const page = store.query(brief.omitted.retrieval.arguments);
+  const stored = page.structuredContent as { total: number; data: Array<{ index: number; result?: unknown }> };
+  assert.equal(stored.total, 4);
+  assert.deepEqual(stored.data[0].result, { id: 1 });
+  assert.deepEqual(stored.data[3].result, { id: 4 });
+
+  // Brief is orthogonal to the text format.
+  const toon = await handleBatch(upstream as never, new CallCache(0), { ...args, outputFormat: "toon" }, 2, undefined, undefined, retain);
+  const text = toon.content[0].type === "text" ? toon.content[0].text : "";
+  assert.ok(!text.trimStart().startsWith("{"));
+  assert.match(text, /failedIndexes/);
+  assert.match(text, /omitted/);
+
+  // Without a result store brief is refused before anything runs.
+  downstreamCalls = 0;
+  const refused = await handleBatch(upstream as never, new CallCache(0), args, 2);
+  assert.equal(errorCode(refused), "invalid_arguments");
+  const invalid = await handleBatch(upstream as never, new CallCache(0), { ...args, detail: "short" }, 2, undefined, undefined, retain);
+  assert.equal(errorCode(invalid), "invalid_arguments");
+  assert.equal(downstreamCalls, 0);
+
+  // When the store declines the payload, nothing is hidden.
+  const tinyStore = new ResponseStore(100, 1024 * 1024, 16);
+  const fallback = await handleBatch(
+    upstream as never,
+    new CallCache(0),
+    args,
+    2,
+    undefined,
+    undefined,
+    (tool, stored) => tinyStore.store(tool, stored)?.ref
+  );
+  const full = fallback.structuredContent as { results: unknown[]; warnings: Array<{ code: string }> };
+  assert.equal(full.results.length, 4);
+  assert.ok(full.warnings.some((warning) => warning.code === "brief_not_retained"));
+});
+
+test("brief parallel over MCP pages omitted results and leaves downstream outputSchema intact (#51)", async () => {
+  const harness = await startProxyClient({
+    servers: {
+      items: fakeMcpServer("items", {
+        FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item", description: "Get one item", structured: true }]),
+      }),
+    },
+    cacheTtlSeconds: 0,
+  });
+  try {
+    const { tools } = await harness.client.listTools();
+    const direct = tools.find((tool) => tool.name === "get_item");
+    assert.ok(direct?.outputSchema, "downstream outputSchema must survive exposure");
+    assert.equal(tools.find((tool) => tool.name === "callmux_parallel")?.outputSchema, undefined);
+
+    // The SDK client validates structuredContent against the advertised outputSchema.
+    const directResult = await harness.call("get_item", { id: 7 });
+    assert.deepEqual(directResult.structuredContent, { tool: "get_item", id: 7 });
+
+    const brief = await harness.call("callmux_parallel", {
+      detail: "brief",
+      calls: [
+        { tool: "get_item", arguments: { id: 1 } },
+        { tool: "missing_tool" },
+        { tool: "get_item", arguments: { id: 3 } },
+      ],
+    });
+    const payload = brief.structuredContent as {
+      failedIndexes: number[];
+      failures: Array<{ index: number; call: { tool: string } }>;
+      omitted: { results: number; retrieval: { arguments: Record<string, unknown>; viaCallmuxCall: { arguments: Record<string, unknown> } } };
+    };
+    assert.deepEqual(payload.failedIndexes, [1]);
+    assert.deepEqual(payload.failures.map((failure) => [failure.index, failure.call.tool]), [[1, "missing_tool"]]);
+    assert.equal(payload.omitted.results, 2);
+
+    for (const page of [
+      await harness.call("callmux_get_result", payload.omitted.retrieval.arguments),
+      await harness.call("callmux_call", payload.omitted.retrieval.viaCallmuxCall.arguments),
+    ]) {
+      const data = (page.structuredContent as { data: Array<{ result?: { structuredContent?: unknown } }> }).data;
+      assert.equal(data.length, 3);
+      assert.deepEqual(data[0].result?.structuredContent, { tool: "get_item", id: 1 });
+      assert.deepEqual(data[2].result?.structuredContent, { tool: "get_item", id: 3 });
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("listener brief batch refs are retrievable by the owning principal only", async () => {
+  const upstream = createMockUpstream([{ server: "items", tool: mockTool("get_item", "Get", ["id"]) }]);
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: {
+      servers: { items: { command: "ignored" } },
+      auth: { mode: "bearer", tokens: [{ id: "owner", token: "owner-token" }, { id: "other", token: "other-token" }] },
+    },
+    upstream: upstream as unknown as UpstreamManager,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  await listener.start();
+  const url = new URL(`http://127.0.0.1:${listenerPort(listener)}/mcp`);
+  const owner = new Client({ name: "brief-owner", version: "1.0" }, { capabilities: {} });
+  const other = new Client({ name: "brief-other", version: "1.0" }, { capabilities: {} });
+  try {
+    const as = (token: string) =>
+      new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+    await owner.connect(as("owner-token"));
+    await other.connect(as("other-token"));
+    const brief = await owner.callTool({
+      name: "callmux_batch",
+      arguments: { tool: "get_item", detail: "brief", items: [{ id: "1" }, { id: "2" }] },
+    }) as CallToolResult;
+    const omitted = (brief.structuredContent as {
+      omitted: { results: number; retrieval: { arguments: Record<string, unknown> } };
+    }).omitted;
+    assert.equal(omitted.results, 2);
+
+    const page = await owner.callTool({ name: "callmux_get_result", arguments: omitted.retrieval.arguments }) as CallToolResult;
+    const data = (page.structuredContent as { data: Array<{ result: string }> }).data;
+    assert.deepEqual(data.map((entry) => entry.result), [
+      'items:get_item:{"id":"1"}',
+      'items:get_item:{"id":"2"}',
+    ]);
+
+    const foreign = await other.callTool({ name: "callmux_get_result", arguments: omitted.retrieval.arguments }) as CallToolResult;
+    assert.equal(errorCode(foreign), "result_not_found");
+  } finally {
+    await owner.close().catch(() => undefined);
+    await other.close().catch(() => undefined);
+    await listener.close();
   }
 });
