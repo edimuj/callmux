@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,9 +22,12 @@ function run(command, args, cwd, capture = false) {
 
 try {
   // npm pack must build everything itself; no build or test compilation first.
-  const output = run("npm", ["pack", "--json", "--pack-destination", scratch], root, true);
-  const [pack] = JSON.parse(output);
-  const paths = pack.files.map((file) => file.path).sort();
+  run("npm", ["pack", "--pack-destination", scratch], root);
+  const archives = (await readdir(scratch)).filter((path) => path.endsWith(".tgz"));
+  assert.equal(archives.length, 1);
+  const archive = join(scratch, archives[0]);
+  const paths = run("tar", ["-tzf", archive], root, true).trim().split("\n")
+    .map((path) => path.replace(/^package\//, "")).sort();
   for (const path of paths) {
     assert.ok(
       /^(LICENSE|README\.md|package\.json|schema\.json|assets\/dashboard\.html)$/.test(path)
@@ -39,7 +42,7 @@ try {
 
   await mkdir(consumer);
   await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
-  run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund", join(scratch, pack.filename)], consumer);
+  run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund", archive], consumer);
   const bin = join(consumer, "node_modules", ".bin", "callmux");
   const { version } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   assert.equal(run(bin, ["--version"], consumer, true).trim(), version);
