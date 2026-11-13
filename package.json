@@ -33,14 +33,14 @@
     "url": "https://github.com/edimuj/callmux/issues"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "dev": "tsc --watch",
     "dev:dashboard": "npm --prefix dashboard run dev",
-    "build:dashboard": "npm --prefix dashboard install --no-audit --no-fund && npm --prefix dashboard run build && node scripts/copy-dashboard-asset.mjs",
+    "build:dashboard": "npm --prefix dashboard ci --no-audit --no-fund && npm --prefix dashboard run build && node scripts/copy-dashboard-asset.mjs",
     "check:public-surface": "node scripts/check-public-surface.mjs",
     "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js",
-    "prepack": "npm run build:dashboard",
-    "prepublishOnly": "npm run build"
+    "test:package": "node scripts/package-smoke.mjs",
+    "prepack": "npm run build && npm run build:dashboard"
   },
   "keywords": [
     "mcp",
