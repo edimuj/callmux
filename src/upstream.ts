@@ -917,7 +917,8 @@ export class UpstreamManager {
   private lastToolSuiteChangeAt: string | undefined;
   private removedTools = new Map<string, { server: string; tool: string; lastSeenAt: string; removedAt: string; alternatives: string[] }>();
   private toolSuiteSubscribers = new Set<(event: ToolSuiteChangeEvent) => void>();
-  private toolRefreshes = new Map<string, { rerun: boolean }>();
+  private pendingToolRefreshes = new WeakSet<Client>();
+  private toolRefreshes = new WeakMap<Client, { rerun: boolean }>();
   private instanceIdentity: InstanceIdentity = { instanceId: "unknown" };
   private connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
   private reconnectPolicy: EffectiveReconnectPolicy = {
@@ -1283,7 +1284,7 @@ export class UpstreamManager {
 
       // The downstream may change its catalog at any time (e.g. a deploy
       // behind a long-lived HTTP session that never reconnects); re-list it in
-      // place. Ignored until this client is the installed one for `name`.
+      // place. Keep notifications pending until this same client is installed.
       const connectedClient = client;
       connectedClient.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
         this.refreshServerTools(name, connectedClient);
@@ -1460,6 +1461,9 @@ export class UpstreamManager {
       void this.closeQuietly(oldClient, oldTransport);
     }
     this.emitToolSuiteChangeIfAny(name, suite);
+    if (this.pendingToolRefreshes.delete(client)) {
+      this.refreshServerTools(name, client);
+    }
   }
 
   /**
@@ -1534,13 +1538,18 @@ export class UpstreamManager {
    * reconnect). Notifications arriving mid-refresh coalesce into one re-run.
    */
   private refreshServerTools(name: string, client: Client): void {
-    const inFlight = this.toolRefreshes.get(name);
+    if (this.closing) return;
+    if (this.clients.get(name) !== client) {
+      this.pendingToolRefreshes.add(client);
+      return;
+    }
+    const inFlight = this.toolRefreshes.get(client);
     if (inFlight) {
       inFlight.rerun = true;
       return;
     }
     const state = { rerun: false };
-    this.toolRefreshes.set(name, state);
+    this.toolRefreshes.set(client, state);
     void (async () => {
       do {
         state.rerun = false;
@@ -1582,7 +1591,7 @@ export class UpstreamManager {
         this.emitToolSuiteChangeIfAny(name, suite);
       } while (state.rerun);
     })().finally(() => {
-      this.toolRefreshes.delete(name);
+      this.toolRefreshes.delete(client);
     });
   }
 
