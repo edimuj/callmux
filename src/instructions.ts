@@ -22,7 +22,7 @@ export function renderAgentInstructions(
     "- For required pipeline mappings, set `onMappingMissing: \"fail\"` so missing IDs/targets stop before side effects.",
     "- Retry only failed `failedIndexes` from `callmux_parallel` or `callmux_batch`; successful siblings are already complete.",
     "- Batch items may be `{ arguments: {...} }` or flat argument objects; flat `cwd`/`timeoutMs` are callmux overrides, so wrap items to send those keys only downstream.",
-    "- Use `detail: \"brief\"` on large `callmux_parallel`/`callmux_batch` fan-outs: failures stay inline and successes stay retrievable via `omitted.retrieval`.",
+    "- Use `detail: \"brief\"` on large `callmux_parallel`/`callmux_batch` fan-outs: the response stays within the shield size limit, every failure index stays listed, and the full results are at `full.ref` (path `results.<index>`).",
     "- Use `callmux_call` when direct downstream tools are hidden or when `callmux_get_result` is deferred by the client.",
     "- Run `callmux_dry_run` before mutating multi-step workflows; treat per-item `warnings` as safety issues to fix first.",
     "- Use absolute `cwd` overrides for session-cwd stdio tools when client cwd/roots are unreliable.",

@@ -191,6 +191,19 @@ export function resolveResponseShieldOptions(
   return merged;
 }
 
+/** Numeric shield limits for a target; policy flags (enabled/allow/deny) are not applied. */
+export function resolveResponseShieldLimits(
+  config: CallmuxConfig,
+  target: ResponseShieldTarget
+): { maxResultBytes: number; maxStringChars: number; maxArrayItems: number } {
+  const options = resolveResponseShieldOptions(config, target);
+  return {
+    maxResultBytes: options.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES,
+    maxStringChars: options.maxStringChars ?? DEFAULT_MAX_STRING_CHARS,
+    maxArrayItems: options.maxArrayItems ?? DEFAULT_MAX_ARRAY_ITEMS,
+  };
+}
+
 function compactValue(
   value: unknown,
   options: Required<Pick<ResponseShieldOptions, "maxResultBytes" | "maxStringChars" | "maxArrayItems">>

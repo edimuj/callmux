@@ -86,7 +86,8 @@ import {
   renderSharedListenerStartCommand,
   setupPromptDefaults,
 } from "./setup.js";
-import { createResponseStore, ResponseStore, shieldToolResult } from "./response-store.js";
+import { createResponseStore, resolveResponseShieldLimits, ResponseStore, shieldToolResult } from "./response-store.js";
+import type { BriefSink } from "./fan-out-brief.js";
 import {
   compressToolForExposure,
   resolveSchemaCompressionConfig,
@@ -17978,87 +17979,262 @@ test("meta-only agent discovers get_item(id) with required types and keeps routi
   }
 });
 
-test("brief batch keeps every failure inline and stores successes for retrieval", async () => {
-  const store = new ResponseStore();
-  const retain = (tool: string, result: CallToolResult) => store.store(tool, result)?.ref;
-  let downstreamCalls = 0;
+const DEFAULT_BRIEF_LIMITS = resolveResponseShieldLimits({ servers: {} }, { tool: "callmux_batch" });
+
+function resultBytes(result: CallToolResult): number {
+  return Buffer.byteLength(JSON.stringify(result), "utf8");
+}
+
+function storeSink(store: ResponseStore, limits = DEFAULT_BRIEF_LIMITS): BriefSink {
+  return { retain: (tool, result) => store.store(tool, result)?.ref, limits };
+}
+
+type BriefEnvelope = {
+  _callmux?: unknown;
+  results?: unknown;
+  status: string;
+  detail: string;
+  succeeded: number;
+  failed: number;
+  failedIndexes: number[];
+  failures: Array<{ index: number; tool?: string; code: string; message: string; chars: number }>;
+  failuresOmitted?: number;
+  full?: { ref: string; failurePath: string; retrieval: { arguments: Record<string, unknown>; viaCallmuxCall: { arguments: Record<string, unknown> } } };
+  warnings?: Array<{ code: string }>;
+};
+
+async function briefOfTextFailures(bodies: string[], store: ResponseStore): Promise<CallToolResult> {
   const upstream = {
     async callTool(_tool: string, args?: Record<string, unknown>) {
-      downstreamCalls++;
-      const id = (args as { id: number }).id;
-      if (id === 2) return { content: [{ type: "text" as const, text: "not found" }], isError: true };
-      if (id === 3) throw new Error("timeout");
-      return textResult(JSON.stringify({ id }));
+      return { content: [{ type: "text" as const, text: bodies[(args as { n: number }).n] }], isError: true };
     },
     getServerConcurrency() { return undefined; },
   };
-  const args = {
-    tool: "get_item",
+  return await handleBatch(upstream as never, new CallCache(0), {
+    tool: "explode",
     detail: "brief",
-    items: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
-  };
+    items: bodies.map((_, n) => ({ n })),
+  }, 4, undefined, undefined, storeSink(store));
+}
 
-  const result = await handleBatch(upstream as never, new CallCache(0), args, 2, undefined, undefined, retain);
-  const brief = result.structuredContent as {
-    status: string;
-    detail: string;
-    succeeded: number;
-    failed: number;
-    failedIndexes: number[];
-    results?: unknown;
-    failures: Array<{ index: number; result?: { isError?: boolean; error?: string }; error?: string }>;
-    omitted: { results: number; ref: string; retrieval: { tool: string; arguments: Record<string, unknown> } };
-  };
-  assert.equal(brief.status, "partial");
-  assert.equal(brief.detail, "brief");
-  assert.equal(brief.succeeded, 2);
-  assert.equal(brief.failed, 2);
-  assert.deepEqual(brief.failedIndexes, [1, 2]);
-  assert.equal(brief.results, undefined);
-  assert.deepEqual(brief.failures.map((failure) => failure.index), [1, 2]);
-  assert.equal(brief.failures[0].result?.isError, true);
-  assert.equal(brief.failures[1].error, "timeout");
-  assert.equal(brief.omitted.results, 2);
-  assert.equal(brief.omitted.retrieval.tool, "callmux_get_result");
+test("brief bounds escape-heavy failures and keeps their full bodies by ref", async () => {
+  // Stack traces with quotes, newlines and multibyte text grow when escaped twice.
+  const frame = (index: number) =>
+    `Error #${index}: "lookup" failed for café ✓ 😀\n    at Object.<anonymous> (/srv/app/src/handler.ts:42:13)\n`;
+  const bodies = Array.from({ length: 20 }, (_, index) => frame(index).repeat(700).slice(0, 63_000));
+  const store = new ResponseStore();
+  const result = await briefOfTextFailures(bodies, store);
 
-  const page = store.query(brief.omitted.retrieval.arguments);
-  const stored = page.structuredContent as { total: number; data: Array<{ index: number; result?: unknown }> };
-  assert.equal(stored.total, 4);
-  assert.deepEqual(stored.data[0].result, { id: 1 });
-  assert.deepEqual(stored.data[3].result, { id: 4 });
+  const { maxResultBytes, maxStringChars, maxArrayItems } = DEFAULT_BRIEF_LIMITS;
+  const maxMessage = Math.min(maxStringChars, Math.floor(maxResultBytes / (2 * maxArrayItems)));
+  assert.ok(resultBytes(result) <= maxResultBytes, `brief result is ${resultBytes(result)} bytes`);
+  const brief = result.structuredContent as BriefEnvelope;
+  assert.equal(brief.failed, 20);
+  assert.equal(brief.failures.length, 20);
+  assert.equal(brief.failuresOmitted, undefined);
+  for (const failure of brief.failures) {
+    assert.equal(failure.code, "tool_error");
+    assert.ok(failure.message.length <= maxMessage);
+    assert.equal(failure.chars, bodies[failure.index].length);
+  }
 
-  // Brief is orthogonal to the text format.
-  const toon = await handleBatch(upstream as never, new CallCache(0), { ...args, outputFormat: "toon" }, 2, undefined, undefined, retain);
-  const text = toon.content[0].type === "text" ? toon.content[0].text : "";
-  assert.ok(!text.trimStart().startsWith("{"));
-  assert.match(text, /failedIndexes/);
-  assert.match(text, /omitted/);
-
-  // Without a result store brief is refused before anything runs.
-  downstreamCalls = 0;
-  const refused = await handleBatch(upstream as never, new CallCache(0), args, 2);
-  assert.equal(errorCode(refused), "invalid_arguments");
-  const invalid = await handleBatch(upstream as never, new CallCache(0), { ...args, detail: "short" }, 2, undefined, undefined, retain);
-  assert.equal(errorCode(invalid), "invalid_arguments");
-  assert.equal(downstreamCalls, 0);
-
-  // When the store declines the payload, nothing is hidden.
-  const tinyStore = new ResponseStore(100, 1024 * 1024, 16);
-  const fallback = await handleBatch(
-    upstream as never,
-    new CallCache(0),
-    args,
-    2,
-    undefined,
-    undefined,
-    (tool, stored) => tinyStore.store(tool, stored)?.ref
-  );
-  const full = fallback.structuredContent as { results: unknown[]; warnings: Array<{ code: string }> };
-  assert.equal(full.results.length, 4);
-  assert.ok(full.warnings.some((warning) => warning.code === "brief_not_retained"));
+  const seventh = store.query({ ref: brief.full!.ref, path: "results.7" });
+  assert.notEqual(seventh.isError, true);
+  const data = (seventh.structuredContent as { data: { result: { error: string } } }).data;
+  assert.equal(data.result.error, bodies[7]);
 });
 
-test("brief parallel over MCP pages omitted results and leaves downstream outputSchema intact (#51)", async () => {
+test("brief drops the highest-index entries when escaping alone breaks the bound", async () => {
+  // Pathological escaping (two quotes, a newline, a tab and three multibyte chars
+  // every 25 chars) across all N inline entries: capped messages still overflow.
+  const bodies = Array.from({ length: DEFAULT_BRIEF_LIMITS.maxArrayItems }, (_, index) =>
+    `#${index} "quoted"\n\tstack 😀 é ✓ `.repeat(100));
+  const result = await briefOfTextFailures(bodies, new ResponseStore());
+
+  assert.ok(resultBytes(result) <= DEFAULT_BRIEF_LIMITS.maxResultBytes, `brief result is ${resultBytes(result)} bytes`);
+  const brief = result.structuredContent as BriefEnvelope;
+  const total = bodies.length;
+  assert.ok(brief.failures.length > 0 && brief.failures.length < total);
+  assert.deepEqual(brief.failures.map((failure) => failure.index), brief.failedIndexes.slice(0, brief.failures.length));
+  assert.equal(brief.failuresOmitted, total - brief.failures.length);
+  assert.equal(brief.failedIndexes.length, total);
+  assert.ok(brief.full?.ref);
+});
+
+test("brief with thousands of failures lists every index and caps entries", async () => {
+  const upstream = {
+    async callTool() { throw new Error("nope"); },
+    getServerConcurrency() { return undefined; },
+  };
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "explode",
+    detail: "brief",
+    items: Array.from({ length: 2000 }, (_, n) => ({ n })),
+  }, 50, undefined, undefined, storeSink(new ResponseStore()));
+
+  assert.ok(resultBytes(result) <= DEFAULT_BRIEF_LIMITS.maxResultBytes);
+  const brief = result.structuredContent as BriefEnvelope;
+  assert.equal(brief.failedIndexes.length, 2000);
+  assert.equal(brief.failures.length, DEFAULT_BRIEF_LIMITS.maxArrayItems);
+  assert.equal(brief.failuresOmitted, 1950);
+  assert.deepEqual(brief.failures[0], { index: 0, code: "call_failed", message: "nope", chars: 4 });
+});
+
+test("all-fail brief through a one-entry store retains exactly once and stays retrievable", async () => {
+  const harness = await startProxyClient({
+    servers: {
+      items: fakeMcpServer("items", { FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]) }),
+    },
+    cacheTtlSeconds: 0,
+    responseShield: { maxStoredResults: 1 },
+  });
+  try {
+    const before = harness.proxy.getResponseStore().stats().totalStored;
+    const result = await harness.call("callmux_batch", {
+      tool: "missing_tool",
+      detail: "brief",
+      items: [{ id: 1 }, { id: 2 }, { id: 3 }],
+    });
+    assert.equal(harness.proxy.getResponseStore().stats().totalStored, before + 1);
+    const brief = result.structuredContent as BriefEnvelope;
+    assert.equal(brief._callmux, undefined);
+    assert.deepEqual(brief.failedIndexes, [0, 1, 2]);
+    assert.deepEqual(brief.failures.map((failure) => failure.code), ["tool_not_found", "tool_not_found", "tool_not_found"]);
+
+    const page = await harness.call("callmux_get_result", brief.full!.retrieval.arguments);
+    assert.notEqual(page.isError, true, JSON.stringify(page.structuredContent));
+    assert.equal((page.structuredContent as { total: number }).total, 3);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("brief reports a declined full result instead of falling back to full output", async () => {
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      return (args as { n: number }).n === 1
+        ? { content: [{ type: "text" as const, text: "boom" }], isError: true }
+        : textResult(JSON.stringify({ ok: true }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+  const result = await handleBatch(upstream as never, new CallCache(0), {
+    tool: "get_item",
+    detail: "brief",
+    items: [{ n: 0 }, { n: 1 }, { n: 2 }],
+  }, 2, undefined, undefined, storeSink(new ResponseStore(100, 1024 * 1024, 16)));
+
+  assert.ok(resultBytes(result) <= DEFAULT_BRIEF_LIMITS.maxResultBytes);
+  const brief = result.structuredContent as BriefEnvelope;
+  assert.equal(brief.full, undefined);
+  assert.equal(brief.results, undefined);
+  assert.ok(brief.warnings?.some((warning) => warning.code === "full_result_not_retained"));
+  assert.equal(brief.succeeded, 2);
+  assert.deepEqual(brief.failures, [{ index: 1, code: "tool_error", message: "boom", chars: 4 }]);
+});
+
+test("mixed brief parallel returns the same unshielded envelope through proxy and listener", async () => {
+  const server = fakeMcpServer("items", { FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item" }]) });
+  const calls = [
+    { tool: "get_item", arguments: { id: 1 } },
+    { tool: "missing_tool" },
+    { tool: "get_item", arguments: { id: 3 } },
+  ];
+  const normalize = (value: unknown) => JSON.parse(
+    JSON.stringify(value)
+      .replace(/r_[0-9a-f-]{36}/g, "REF")
+      .replace(/"totalDurationMs":\d+/g, '"totalDurationMs":0')
+  );
+  const normalizeText = (text: string) => text
+    .replace(/r_[0-9a-f-]{36}/g, "REF")
+    .replace(/totalDurationMs: \d+/g, "totalDurationMs: 0");
+
+  const harness = await startProxyClient({ servers: { items: server }, cacheTtlSeconds: 0 });
+  const upstream = new UpstreamManager();
+  let listener: CallmuxListener | undefined;
+  const client = new Client({ name: "brief-parity", version: "1.0" }, { capabilities: {} });
+  try {
+    await upstream.connect({ items: server });
+    listener = new CallmuxListener({
+      port: 0,
+      host: "127.0.0.1",
+      config: { servers: { items: server } },
+      upstream,
+      cache: new CallCache(0, undefined, {}, 100),
+      allTools: [],
+      maxConcurrency: 10,
+    });
+    await listener.start();
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${listenerPort(listener)}/mcp`)));
+    const viaListener = async (args: Record<string, unknown>) =>
+      await client.callTool({ name: "callmux_parallel", arguments: args }) as CallToolResult;
+
+    const proxyJson = await harness.call("callmux_parallel", { detail: "brief", calls });
+    const listenerJson = await viaListener({ detail: "brief", calls });
+    const brief = proxyJson.structuredContent as BriefEnvelope;
+    assert.equal(brief._callmux, undefined);
+    assert.deepEqual(brief.failedIndexes, [1]);
+    assert.deepEqual(brief.failures.map((failure) => [failure.index, failure.tool, failure.code]), [[1, "missing_tool", "tool_not_found"]]);
+    assert.deepEqual(normalize(listenerJson.structuredContent), normalize(proxyJson.structuredContent));
+
+    const proxyToon = await harness.call("callmux_parallel", { detail: "brief", outputFormat: "toon", calls });
+    const listenerToon = await viaListener({ detail: "brief", outputFormat: "toon", calls });
+    const toonText = (result: CallToolResult) => result.content[0].type === "text" ? result.content[0].text : "";
+    assert.equal(proxyToon.structuredContent, undefined);
+    assert.ok(!toonText(proxyToon).includes("_callmux"));
+    assert.match(toonText(proxyToon), /missing_tool/);
+    assert.equal(normalizeText(toonText(listenerToon)), normalizeText(toonText(proxyToon)));
+  } finally {
+    await client.close().catch(() => undefined);
+    await listener?.close();
+    await upstream.close();
+    await harness.close();
+  }
+});
+
+test("detail full and omitted detail produce identical fan-out output", async () => {
+  const upstream = {
+    async callTool(_tool: string, args?: Record<string, unknown>) {
+      return (args as { n: number }).n === 1
+        ? { content: [{ type: "text" as const, text: "boom" }], isError: true }
+        : textResult(JSON.stringify({ n: (args as { n: number }).n }));
+    },
+    getServerConcurrency() { return undefined; },
+  };
+  const stripDurations = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stripDurations);
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => key !== "durationMs" && key !== "totalDurationMs")
+      .map(([key, nested]) => [key, stripDurations(nested)]));
+  };
+  const withoutDurations = (result: CallToolResult) => ({
+    text: stripDurations(JSON.parse(result.content[0].type === "text" ? result.content[0].text : "null")),
+    structuredContent: stripDurations(result.structuredContent),
+  });
+  const args = { tool: "get_item", items: [{ n: 0 }, { n: 1 }] };
+  const sink = storeSink(new ResponseStore());
+  const omitted = await handleBatch(upstream as never, new CallCache(0), args, 2, undefined, undefined, sink);
+  const full = await handleBatch(upstream as never, new CallCache(0), { ...args, detail: "full" }, 2, undefined, undefined, sink);
+  assert.deepEqual(withoutDurations(full), withoutDurations(omitted));
+  assert.equal((omitted.structuredContent as { results: unknown[] }).results.length, 2);
+});
+
+test("brief without a result store or with an unknown detail is refused before any call", async () => {
+  let calls = 0;
+  const upstream = {
+    async callTool() { calls++; return textResult("ok"); },
+    getServerConcurrency() { return undefined; },
+  };
+  const args = { tool: "get_item", items: [{ n: 0 }] };
+  const noStore = await handleBatch(upstream as never, new CallCache(0), { ...args, detail: "brief" }, 1);
+  const unknown = await handleParallel(upstream as never, new CallCache(0), { calls: [{ tool: "get_item" }], detail: "short" }, 1, undefined, undefined, storeSink(new ResponseStore()));
+  assert.equal(errorCode(noStore), "invalid_arguments");
+  assert.equal(errorCode(unknown), "invalid_arguments");
+  assert.equal(calls, 0);
+});
+
+test("brief parallel over MCP pages full results and leaves downstream outputSchema intact (#51)", async () => {
   const harness = await startProxyClient({
     servers: {
       items: fakeMcpServer("items", {
@@ -18085,18 +18261,13 @@ test("brief parallel over MCP pages omitted results and leaves downstream output
         { tool: "get_item", arguments: { id: 3 } },
       ],
     });
-    const payload = brief.structuredContent as {
-      failedIndexes: number[];
-      failures: Array<{ index: number; call: { tool: string } }>;
-      omitted: { results: number; retrieval: { arguments: Record<string, unknown>; viaCallmuxCall: { arguments: Record<string, unknown> } } };
-    };
+    const payload = brief.structuredContent as BriefEnvelope;
     assert.deepEqual(payload.failedIndexes, [1]);
-    assert.deepEqual(payload.failures.map((failure) => [failure.index, failure.call.tool]), [[1, "missing_tool"]]);
-    assert.equal(payload.omitted.results, 2);
+    assert.equal(payload.succeeded, 2);
 
     for (const page of [
-      await harness.call("callmux_get_result", payload.omitted.retrieval.arguments),
-      await harness.call("callmux_call", payload.omitted.retrieval.viaCallmuxCall.arguments),
+      await harness.call("callmux_get_result", payload.full!.retrieval.arguments),
+      await harness.call("callmux_call", payload.full!.retrieval.viaCallmuxCall.arguments),
     ]) {
       const data = (page.structuredContent as { data: Array<{ result?: { structuredContent?: unknown } }> }).data;
       assert.equal(data.length, 3);
@@ -18135,118 +18306,20 @@ test("listener brief batch refs are retrievable by the owning principal only", a
       name: "callmux_batch",
       arguments: { tool: "get_item", detail: "brief", items: [{ id: "1" }, { id: "2" }] },
     }) as CallToolResult;
-    const omitted = (brief.structuredContent as {
-      omitted: { results: number; retrieval: { arguments: Record<string, unknown> } };
-    }).omitted;
-    assert.equal(omitted.results, 2);
+    const full = (brief.structuredContent as BriefEnvelope).full!;
 
-    const page = await owner.callTool({ name: "callmux_get_result", arguments: omitted.retrieval.arguments }) as CallToolResult;
+    const page = await owner.callTool({ name: "callmux_get_result", arguments: full.retrieval.arguments }) as CallToolResult;
     const data = (page.structuredContent as { data: Array<{ result: string }> }).data;
     assert.deepEqual(data.map((entry) => entry.result), [
       'items:get_item:{"id":"1"}',
       'items:get_item:{"id":"2"}',
     ]);
 
-    const foreign = await other.callTool({ name: "callmux_get_result", arguments: omitted.retrieval.arguments }) as CallToolResult;
+    const foreign = await other.callTool({ name: "callmux_get_result", arguments: full.retrieval.arguments }) as CallToolResult;
     assert.equal(errorCode(foreign), "result_not_found");
   } finally {
     await owner.close().catch(() => undefined);
     await other.close().catch(() => undefined);
-    await listener.close();
-  }
-});
-
-/** 51 failing calls (beyond the default 50-item shield) around one success. */
-function manyFailuresWithOneSuccess(): Array<Record<string, unknown>> {
-  return [
-    ...Array.from({ length: 25 }, () => ({ tool: "missing_tool" })),
-    { tool: "get_item", arguments: { id: "ok" } },
-    ...Array.from({ length: 26 }, () => ({ tool: "missing_tool" })),
-  ];
-}
-
-function assertCompleteBriefFailures(result: CallToolResult): Record<string, unknown> {
-  const brief = result.structuredContent as {
-    _callmux?: unknown;
-    status: string;
-    detail: string;
-    succeeded: number;
-    failed: number;
-    failedIndexes: number[];
-    failures: Array<{ index: number }>;
-    omitted: { results: number; retrieval: { arguments: Record<string, unknown> } };
-  };
-  const expectedFailed = Array.from({ length: 52 }, (_, index) => index).filter((index) => index !== 25);
-  assert.equal(brief._callmux, undefined, "brief output must not be re-shielded");
-  assert.equal(brief.status, "partial");
-  assert.equal(brief.detail, "brief");
-  assert.equal(brief.succeeded, 1);
-  assert.equal(brief.failed, 51);
-  assert.deepEqual(brief.failedIndexes, expectedFailed);
-  assert.deepEqual(brief.failures.map((failure) => failure.index), expectedFailed);
-  assert.equal(brief.omitted.results, 1);
-  return brief.omitted.retrieval.arguments;
-}
-
-test("brief fan-out over MCP keeps all failures and its omitted ref with default and minimal stores", async () => {
-  for (const responseShield of [undefined, { maxStoredResults: 1 }]) {
-    const harness = await startProxyClient({
-      servers: {
-        items: fakeMcpServer("items", {
-          FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item", requiredId: true }]),
-        }),
-      },
-      cacheTtlSeconds: 0,
-      ...(responseShield ? { responseShield } : {}),
-    });
-    try {
-      const brief = await harness.call("callmux_parallel", { detail: "brief", calls: manyFailuresWithOneSuccess() });
-      const retrieval = assertCompleteBriefFailures(brief);
-      const page = await harness.call("callmux_get_result", { ...retrieval, offset: 25, limit: 1 });
-      assert.notEqual(page.isError, true, JSON.stringify(page.structuredContent));
-      const data = (page.structuredContent as { data: Array<{ result: unknown }> }).data;
-      assert.match(JSON.stringify(data[0].result), /"tool":"get_item"/);
-    } finally {
-      await harness.close();
-    }
-  }
-});
-
-test("listener brief batch with a one-entry store keeps all failures and its omitted ref", async () => {
-  const upstream = createMockUpstream([{ server: "items", tool: mockTool("get_item", "Get", ["id"]) }]);
-  (upstream as unknown as { callPrepared: (prepared: { resolvedArguments?: { id?: string } }) => Promise<CallToolResult> })
-    .callPrepared = async (prepared) =>
-      prepared.resolvedArguments?.id === "ok"
-        ? textResult(JSON.stringify({ id: "ok" }))
-        : { content: [{ type: "text", text: "not found" }], isError: true };
-  const listener = new CallmuxListener({
-    port: 0,
-    host: "127.0.0.1",
-    config: { servers: { items: { command: "ignored" } }, responseShield: { maxStoredResults: 1 } },
-    upstream: upstream as unknown as UpstreamManager,
-    cache: new CallCache(0, undefined, {}, 100),
-    allTools: [],
-    maxConcurrency: 10,
-  });
-  await listener.start();
-  const client = new Client({ name: "brief-listener", version: "1.0" }, { capabilities: {} });
-  try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${listenerPort(listener)}/mcp`)));
-    const items = Array.from({ length: 52 }, (_, index) => ({ id: index === 25 ? "ok" : `missing-${index}` }));
-    const brief = await client.callTool({
-      name: "callmux_batch",
-      arguments: { tool: "get_item", detail: "brief", items },
-    }) as CallToolResult;
-    const retrieval = assertCompleteBriefFailures(brief);
-    const page = await client.callTool({
-      name: "callmux_get_result",
-      arguments: { ...retrieval, offset: 25, limit: 1 },
-    }) as CallToolResult;
-    assert.notEqual(page.isError, true, JSON.stringify(page.structuredContent));
-    const data = (page.structuredContent as { data: Array<{ result: unknown }> }).data;
-    assert.deepEqual(data[0].result, { id: "ok" });
-  } finally {
-    await client.close().catch(() => undefined);
     await listener.close();
   }
 });

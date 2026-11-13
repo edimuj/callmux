@@ -9,11 +9,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { UpstreamManager } from "./upstream.js";
 import { CallCache } from "./cache.js";
 import { META_TOOLS } from "./meta-tools.js";
+import type { BriefSink } from "./fan-out-brief.js";
 import {
   handleParallel,
   handleBatch,
   isBriefFanOut,
-  type ResultRetainer,
   handlePipeline,
   handleCall,
   handleSearchTools,
@@ -34,6 +34,7 @@ import { isOutputFormat, type OutputFormat } from "./output-format.js";
 import {
   createResponseStore,
   ResponseStore,
+  resolveResponseShieldLimits,
   resolveResponseShieldOptions,
   shieldToolResult,
   type ResponseShieldTarget,
@@ -254,7 +255,7 @@ export class CallmuxProxy {
             this.maxConcurrency,
             context,
             this.config.outputFormat,
-            this.retainResult
+            this.briefSink(name)
           )
         );
 
@@ -269,7 +270,7 @@ export class CallmuxProxy {
             this.maxConcurrency,
             context,
             this.config.outputFormat,
-            this.retainResult
+            this.briefSink(name)
           )
         );
 
@@ -469,8 +470,12 @@ export class CallmuxProxy {
     return { tool };
   }
 
-  private readonly retainResult: ResultRetainer = (tool, result) =>
-    this.responseStore.store(tool, result)?.ref;
+  private briefSink(tool: string): BriefSink {
+    return {
+      retain: (stored, result) => this.responseStore.store(stored, result)?.ref,
+      limits: resolveResponseShieldLimits(this.config, { tool }),
+    };
+  }
 
   private shieldFanOut(
     name: string,

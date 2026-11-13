@@ -22,7 +22,6 @@ import {
   handleParallel,
   handleBatch,
   isBriefFanOut,
-  type ResultRetainer,
   handlePipeline,
   handleCall,
   handleSearchTools,
@@ -46,12 +45,14 @@ import {
 } from "./authorization.js";
 import { errorResult, textFirstResultForNonJson } from "./results.js";
 import { META_TOOLS } from "./meta-tools.js";
+import type { BriefSink } from "./fan-out-brief.js";
 import { AbuseController } from "./abuse.js";
 import { AuditLogger } from "./audit.js";
 import { PrometheusMetrics } from "./metrics.js";
 import {
   createResponseStore,
   ResponseStore,
+  resolveResponseShieldLimits,
   resolveResponseShieldOptions,
   shieldToolResult,
   type ResponseShieldTarget,
@@ -2131,8 +2132,11 @@ export class CallmuxListener {
       // can't retrieve it later via callmux_get_result (undefined = unowned when
       // unauthenticated; see responseOwnerKey).
       const responseOwner = this.responseOwnerKey(principal);
-      const retainResult: ResultRetainer = (tool, stored) =>
-        this.responseStore.store(tool, stored, responseOwner)?.ref;
+      const briefSink = (tool: string): BriefSink => ({
+        retain: (storedTool, stored) =>
+          this.responseStore.store(storedTool, stored, responseOwner)?.ref,
+        limits: resolveResponseShieldLimits(config, { tool }),
+      });
 
       let result: CallToolResult;
       switch (name) {
@@ -2148,7 +2152,7 @@ export class CallmuxListener {
               maxConcurrency,
               toolContext,
               config.outputFormat,
-              retainResult
+              briefSink(name)
             ),
             responseOwner
           );
@@ -2165,7 +2169,7 @@ export class CallmuxListener {
               maxConcurrency,
               toolContext,
               config.outputFormat,
-              retainResult
+              briefSink(name)
             ),
             responseOwner
           );

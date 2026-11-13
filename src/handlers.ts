@@ -2,7 +2,8 @@ import { isAbsolute } from "node:path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { PreparedToolCall, UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
-import { retrievalCall, type ResponseStore } from "./response-store.js";
+import type { ResponseStore } from "./response-store.js";
+import { briefFanOutResult, type BriefSink, type FanOutPayload } from "./fan-out-brief.js";
 import type { SchemaCompressionDiagnostics } from "./schema-compression.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
@@ -236,98 +237,37 @@ function resolveOutputFormat(
   );
 }
 
-type DetailLevel = "full" | "brief";
-
 /**
- * Stores a full callmux result and returns its ref, or undefined when the
- * store declined it (for example over its size limits). The caller binds the
- * response owner, so handlers stay unaware of sessions.
+ * detail:"brief" resolves to the sink that shapes it; "full"/absent to undefined.
+ * Checked before any downstream call runs: brief must never execute calls
+ * whose results it then could not make retrievable.
  */
-export type ResultRetainer = (tool: string, result: CallToolResult) => string | undefined;
-
-function resolveDetail(
+function resolveBriefSink(
   args: unknown,
-  retainResult: ResultRetainer | undefined
-): DetailLevel | CallToolResult {
-  if (!isRecord(args) || args.detail === undefined || args.detail === "full") return "full";
+  sink: BriefSink | undefined
+): BriefSink | undefined | CallToolResult {
+  if (!isRecord(args) || args.detail === undefined || args.detail === "full") return undefined;
   if (args.detail !== "brief") {
     return errorResult("invalid_arguments", 'detail must be "full" or "brief"', {
       field: "detail",
     });
   }
-  // Checked before any downstream call runs: brief must never execute calls
-  // whose successful results it then could not make retrievable.
-  if (!retainResult) {
+  if (!sink) {
     return errorResult(
       "invalid_arguments",
       'detail "brief" needs the callmux result store, which is unavailable here; use detail "full"',
       { field: "detail" }
     );
   }
-  return "brief";
+  return sink;
 }
 
 /**
- * Brief fan-out output is already shaped and retained by the handler. Callers
- * must not run the generic response shield over it: that would truncate the
- * inline failures and could evict the summary's own omitted ref.
+ * Brief fan-out output is already shaped, bounded, and retained by
+ * briefFanOutResult. Callers must not run the generic response shield over it.
  */
 export function isBriefFanOut(args: unknown): boolean {
   return isRecord(args) && args.detail === "brief";
-}
-
-interface FanOutPayload extends Record<string, unknown> {
-  results: Array<Record<string, unknown>>;
-  failedIndexes: number[];
-  warnings?: Array<Record<string, unknown>>;
-}
-
-/**
- * Brief fan-out output: every failure stays inline; successful results are
- * stored with the full payload and replaced by a retrieval reference. When the
- * store declines the payload, the full output is returned instead so no result
- * is ever lost.
- */
-function fanOutOutput(
-  tool: "callmux_batch" | "callmux_parallel",
-  full: FanOutPayload,
-  detail: DetailLevel,
-  retainResult: ResultRetainer | undefined
-): Record<string, unknown> {
-  if (detail === "full" || !retainResult) return full;
-  const failed = new Set(full.failedIndexes);
-  const omitted = full.results.length - failed.size;
-  const { results, ...summary } = full;
-  const failures = results.flatMap((result, index) =>
-    failed.has(index) ? [{ ...result, index }] : []
-  );
-  if (omitted === 0) return { ...summary, detail: "brief", failures };
-
-  // structuredContent alone is what callmux_get_result pages; skip rendering text.
-  const ref = retainResult(tool, { content: [], structuredContent: full });
-  if (!ref) {
-    return {
-      ...full,
-      warnings: [
-        ...(full.warnings ?? []),
-        {
-          code: "brief_not_retained",
-          message:
-            "The result store declined this payload, so detail \"brief\" fell back to full results.",
-        },
-      ],
-    };
-  }
-  return {
-    ...summary,
-    detail: "brief",
-    failures,
-    omitted: {
-      results: omitted,
-      ref,
-      retrieval: retrievalCall(ref, "results"),
-    },
-  };
 }
 
 function contextWithCallOverrides(
@@ -1188,14 +1128,14 @@ export async function handleParallel(
   maxConcurrency: number,
   context?: ToolCallContext,
   defaultOutputFormat?: OutputFormat,
-  retainResult?: ResultRetainer
+  briefSink?: BriefSink
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
-  const detail = resolveDetail(args, retainResult);
-  if (isToolErrorResult(detail)) return detail;
+  const brief = resolveBriefSink(args, briefSink);
+  if (isToolErrorResult(brief)) return brief;
 
   const parsedArgs = validateParallelArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
@@ -1282,10 +1222,9 @@ export async function handleParallel(
       : {}),
   };
 
-  return successResult(
-    fanOutOutput("callmux_parallel", output, detail, retainResult),
-    outputFormat
-  );
+  return brief
+    ? briefFanOutResult("callmux_parallel", output, outputFormat, brief)
+    : successResult(output, outputFormat);
 }
 
 export async function handleBatch(
@@ -1295,14 +1234,14 @@ export async function handleBatch(
   maxConcurrency: number,
   context?: ToolCallContext,
   defaultOutputFormat?: OutputFormat,
-  retainResult?: ResultRetainer
+  briefSink?: BriefSink
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
-  const detail = resolveDetail(args, retainResult);
-  if (isToolErrorResult(detail)) return detail;
+  const brief = resolveBriefSink(args, briefSink);
+  if (isToolErrorResult(brief)) return brief;
 
   const parsedArgs = validateBatchArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
@@ -1396,10 +1335,9 @@ export async function handleBatch(
       : {}),
   };
 
-  return successResult(
-    fanOutOutput("callmux_batch", output, detail, retainResult),
-    outputFormat
-  );
+  return brief
+    ? briefFanOutResult("callmux_batch", output, outputFormat, brief)
+    : successResult(output, outputFormat);
 }
 
 export async function handlePipeline(

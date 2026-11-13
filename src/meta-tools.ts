@@ -11,7 +11,7 @@ const DETAIL_PROPERTY = {
   type: "string",
   enum: ["full", "brief"],
   description:
-    "full (default) inlines every result. brief keeps status, counts, failedIndexes and failures; successes stay retrievable via omitted.retrieval.",
+    "full (default) inlines every result. brief: counts, failedIndexes, capped failures; every result stays at full.ref, path results.<index>.",
 } as const;
 
 /**
