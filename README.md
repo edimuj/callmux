@@ -87,6 +87,8 @@ In practice, callmux reduces tool calls to **~15% of the original count**. Sessi
 
 ## Install
 
+Requires Node.js 22.19.0 or newer.
+
 No install needed. Use `npx`:
 
 ```bash
