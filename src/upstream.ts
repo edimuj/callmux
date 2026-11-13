@@ -14,6 +14,7 @@ import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult } from "./results.js";
 import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
 import { diffToolLists, type ToolListDiff } from "./tool-list.js";
+import { listAllTools } from "./tool-discovery.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import type {
   InstanceIdentity,
@@ -1291,7 +1292,7 @@ export class UpstreamManager {
       });
 
       const { tools: allTools } = await withTimeout(
-        client.listTools(),
+        listAllTools(client, connectTimeoutMs),
         connectTimeoutMs,
         `"${name}" listTools`
       );
@@ -1557,7 +1558,7 @@ export class UpstreamManager {
         let allTools: Tool[];
         try {
           ({ tools: allTools } = await withTimeout(
-            client.listTools(),
+            listAllTools(client, this.connectTimeoutMs),
             this.connectTimeoutMs,
             `"${name}" listTools`
           ));
@@ -2263,7 +2264,7 @@ export class UpstreamManager {
           `"${server}" connect (${cwd})`
         );
         const { tools: allTools } = await withTimeout(
-          client.listTools(),
+          listAllTools(client, this.connectTimeoutMs),
           this.connectTimeoutMs,
           `"${server}" listTools (${cwd})`
         );
@@ -2357,7 +2358,7 @@ export class UpstreamManager {
         transport = connected.transport;
         client = connected.client;
         const { tools: allTools } = await withTimeout(
-          client.listTools(),
+          listAllTools(client, this.connectTimeoutMs),
           this.connectTimeoutMs,
           `"${server}" listTools (${label})`
         );

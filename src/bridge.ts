@@ -6,15 +6,20 @@ import {
   ListToolsRequestSchema,
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ListToolsResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { errorResult } from "./results.js";
 import { fetchWithoutUndiciTimeout } from "./http-fetch.js";
 import { sameToolList } from "./tool-list.js";
+import { listAllTools } from "./tool-discovery.js";
 
 const BRIDGE_CWD_HEADER = "x-callmux-cwd";
 const BRIDGE_CLIENT_HEADER = "x-callmux-client";
 const META_TOOL_TIMEOUT_OVERHEAD_MS = 5_000;
+
+function sameToolPage(left: ListToolsResult, right: ListToolsResult): boolean {
+  return left.nextCursor === right.nextCursor && sameToolList(left.tools, right.tools);
+}
 
 interface BridgeOptions {
   url: string;
@@ -64,6 +69,7 @@ export class CallmuxBridge {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempts = 0;
   private cachedTools: Tool[] = [];
+  private cachedToolPages = new Map<string | undefined, ListToolsResult>();
   private hasReturnedTools = false;
   private lastConnectError: string | undefined;
   private closed = false;
@@ -74,23 +80,35 @@ export class CallmuxBridge {
       { capabilities: { tools: { listChanged: true } } }
     );
 
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    this.server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+      const cursor = request.params?.cursor;
       try {
         const result = await this.withReconnect(
-          (client) => client.listTools(),
+          (client) => client.listTools(request.params),
           { idempotent: true }
         );
-        const changed = this.hasReturnedTools && !sameToolList(result.tools, this.cachedTools);
-        this.cachedTools = result.tools;
+        const previous = this.cachedToolPages.get(cursor);
+        const changed = previous !== undefined && !sameToolPage(previous, result);
+        if (changed) {
+          this.cachedToolPages.clear();
+          this.cachedTools = [];
+        }
+        this.cachedToolPages.set(cursor, result);
+        if (previous === undefined || changed) {
+          for (const tool of result.tools) this.cachedTools.push(tool);
+        }
         this.hasReturnedTools = true;
         if (changed) {
           await this.server.sendToolListChanged().catch(() => undefined);
         }
         return result;
-      } catch {
+      } catch (error) {
         this.scheduleReconnect();
         this.hasReturnedTools = true;
-        return { tools: this.cachedTools };
+        const cached = this.cachedToolPages.get(cursor);
+        if (cached) return cached;
+        if (cursor === undefined) return { tools: [] };
+        throw error;
       }
     });
 
@@ -242,13 +260,16 @@ export class CallmuxBridge {
   private async refreshToolList(): Promise<void> {
     if (!this.client || !this.hasReturnedTools) return;
     try {
-      const result = await this.client.listTools();
-      if (!sameToolList(result.tools, this.cachedTools)) {
-        this.cachedTools = result.tools;
+      const result = await listAllTools(this.client);
+      const changed = !sameToolList(result.tools, this.cachedTools);
+      this.cachedTools = result.tools;
+      this.cachedToolPages = result.pages;
+      if (changed) {
         await this.server.sendToolListChanged().catch(() => undefined);
       }
-    } catch {
-      // Non-fatal — next tools/list call will pick up changes
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[callmux] Warning: bridge tools refresh failed: ${message}\n`);
     }
   }
 
