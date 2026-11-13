@@ -26,7 +26,7 @@ export function HealthStrip() {
   return (
     <div className="space-y-2">
       <div className="text-xs text-muted-foreground">
-        {snapshot && lastUpdated ? 'Live · ' + new Date(lastUpdated).toLocaleTimeString() : 'Connecting…'}
+        {snapshot && lastUpdated ? (connected ? 'Live · ' + new Date(lastUpdated).toLocaleTimeString() : 'Disconnected') : 'Connecting…'}
       </div>
       <div className="grid gap-1.5">
         <div className="flex items-center justify-between gap-2 text-xs text-sidebar-foreground/80">

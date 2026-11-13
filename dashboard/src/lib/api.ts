@@ -38,6 +38,7 @@ export async function fetchDrilldown(range: MetricsRange): Promise<DrilldownResp
 export function openEventStream(onMessage: () => void, onError: () => void): EventSource {
   const stream = new EventSource(dashboardEndpoint('events'))
   stream.onmessage = onMessage
+  stream.addEventListener('snapshot', onMessage)
   stream.onerror = onError
   return stream
 }

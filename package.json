@@ -40,6 +40,7 @@
     "check:public-surface": "node scripts/check-public-surface.mjs",
     "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js",
     "test:package": "node scripts/package-smoke.mjs",
+    "test:dashboard": "npm run build && npm run build:dashboard && playwright test",
     "prepack": "npm run build && npm run build:dashboard"
   },
   "keywords": [
@@ -61,6 +62,7 @@
     "yaml": "^2.8.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3",
     "zod": "^4.3.6"

@@ -63,7 +63,7 @@ export function App() {
     document.addEventListener('selectionchange', onSelectionChange)
 
     void refresh()
-    const stream = openEventStream(safeRefresh, () => setTimeout(safeRefresh, 1500))
+    const stream = openEventStream(safeRefresh, safeRefresh)
     // Periodically refresh the historic charts / drilldown while their view is open.
     const interval = window.setInterval(() => {
       const current = useStore.getState().view

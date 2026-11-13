@@ -48,6 +48,33 @@ jobs:
 
       - run: npm run test:package
 
+  # Check types and exercise the embedded dashboard against a real listener.
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            dashboard/package-lock.json
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run test:dashboard
+
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: dashboard-test-results
+          path: test-results/
+          retention-days: 7
+
   audit:
     runs-on: ubuntu-latest
     steps:
