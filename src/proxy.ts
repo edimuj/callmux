@@ -37,6 +37,7 @@ import {
   resolveResponseShieldLimits,
   resolveResponseShieldOptions,
   shieldToolResult,
+  toolForResponseShield,
   type ResponseShieldTarget,
 } from "./response-store.js";
 import { textFirstResultForNonJson } from "./results.js";
@@ -213,7 +214,7 @@ export class CallmuxProxy {
         ? { ...tool, name: qualifiedName, _meta: { ...tool._meta, "anthropic/alwaysLoad": true } }
         : { ...tool, name: qualifiedName };
       return compressToolForExposure(
-        base,
+        toolForResponseShield(base, this.config, { tool: tool.name, server }),
         this.config.schemaCompression,
         serverCfg?.schemaCompression
       );

@@ -18234,7 +18234,113 @@ test("brief without a result store or with an unknown detail is refused before a
   assert.equal(calls, 0);
 });
 
-test("brief parallel over MCP pages full results and leaves downstream outputSchema intact (#51)", async () => {
+for (const transport of ["proxy", "listener"] as const) {
+  const policies: Array<{
+    name: string;
+    global?: CallmuxConfig["responseShield"];
+    server?: CallmuxConfig["responseShield"];
+    shielded: boolean;
+  }> = [
+    { name: "default", shielded: true },
+    { name: "global disable", global: { enabled: false }, shielded: false },
+    { name: "server disable", server: { enabled: false }, shielded: false },
+    { name: "server enable", global: { enabled: false }, server: { enabled: true }, shielded: true },
+    { name: "allow match", global: { allowTools: ["items__large_*"] }, shielded: true },
+    { name: "allow exclusion", global: { allowTools: ["other_*"] }, shielded: false },
+    { name: "deny match", global: { denyTools: ["items__large_*"] }, shielded: false },
+    { name: "retention limit", global: { maxStoredResultBytes: 1 }, shielded: true },
+  ];
+  for (const policy of policies) {
+    test(`${transport} truncation passes SDK outputSchema validation (${policy.name}) (#51)`, async () => {
+      const config: CallmuxConfig = {
+        servers: {
+          items: {
+            ...fakeMcpServer("items", {
+              FAKE_MCP_TOOLS: JSON.stringify([{ name: "large_list", structured: true }]),
+              FAKE_MCP_CALL_MODE: "large_result",
+              FAKE_MCP_LARGE_ITEM_COUNT: "240",
+            }),
+            responseShield: policy.server,
+          },
+        },
+        responseShield: policy.global,
+      };
+      const harness = await startProxyClient(config);
+      let listener: CallmuxListener | undefined;
+      const client = transport === "proxy"
+        ? harness.client
+        : new Client({ name: "shield-test", version: "1.0" }, { capabilities: {} });
+      try {
+        if (transport === "listener") {
+          listener = new CallmuxListener({
+            port: 0,
+            host: "127.0.0.1",
+            config,
+            upstream: harness.proxy.getUpstream(),
+            cache: harness.proxy.getCache(),
+            allTools: [],
+            maxConcurrency: 10,
+          });
+          await listener.start();
+          await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${listenerPort(listener)}/mcp`)));
+        }
+        const sourceSchema = harness.proxy.getUpstream().getTools()[0].tool.outputSchema!;
+        assert.deepEqual(sourceSchema.required, ["items"]);
+        assert.equal(sourceSchema.additionalProperties, false);
+
+        // listTools installs the advertised schema validator in the real SDK client.
+        const { tools } = await client.listTools();
+        const shielded = await client.callTool({ name: "large_list", arguments: {} }) as CallToolResult;
+        assert.notEqual(shielded.isError, true);
+        const exposed = tools.find((tool) => tool.name === "large_list");
+        assert.ok(exposed);
+        if (!policy.shielded) {
+          assert.deepEqual(exposed.outputSchema, sourceSchema);
+          const { items } = shielded.structuredContent as { items: Array<{ body: string }> };
+          assert.equal(items.length, 240);
+          assert.equal(items[239].body, "x".repeat(200));
+          return;
+        }
+        assert.equal(exposed.outputSchema, undefined);
+        const { _callmux } = shielded.structuredContent as {
+          _callmux: { truncated: boolean; retained?: boolean; originalBytes: number; ref?: string; retrieval: {
+            arguments: Record<string, unknown>;
+            viaCallmuxCall: { arguments: Record<string, unknown> };
+          } };
+        };
+        assert.equal(_callmux.truncated, true);
+        assert.ok(_callmux.originalBytes > 100_000);
+        if (policy.name === "retention limit") {
+          assert.equal(_callmux.retained, false);
+          assert.equal(_callmux.ref, undefined);
+          return;
+        }
+        const ref = _callmux.ref;
+        assert.ok(ref);
+        assert.match(ref, /^r_/);
+        assert.ok(shielded.content.some((part) => part.type === "text" && part.text.includes(ref)));
+        for (const page of [
+          await client.callTool({ name: "callmux_get_result", arguments: _callmux.retrieval.arguments }),
+          await client.callTool({ name: "callmux_call", arguments: _callmux.retrieval.viaCallmuxCall.arguments }),
+        ]) {
+          assert.notEqual(page.isError, true);
+          const { data, total } = page.structuredContent as { data: Array<{ id: number; body: string }>; total: number };
+          assert.equal(total, 240);
+          assert.equal(data.length, 50);
+          assert.equal(data[0].id, 1);
+          assert.equal(data[49].id, 50);
+          assert.equal(data[0].body, "x".repeat(200));
+        }
+      } finally {
+        if (transport === "listener") await client.close().catch(() => undefined);
+        await listener?.close();
+        await harness.close();
+      }
+    });
+  }
+}
+
+test("brief parallel over MCP pages full results and preserves outputSchema when shielding is disabled", async () => {
   const harness = await startProxyClient({
     servers: {
       items: fakeMcpServer("items", {
@@ -18242,6 +18348,7 @@ test("brief parallel over MCP pages full results and leaves downstream outputSch
       }),
     },
     cacheTtlSeconds: 0,
+    responseShield: { enabled: false },
   });
   try {
     const { tools } = await harness.client.listTools();

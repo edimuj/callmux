@@ -70,7 +70,9 @@ for (const tool of tools) {
       id: tool.requiredId ? z.string() : z.number().optional(),
     },
     ...(tool.structured
-      ? { outputSchema: { tool: z.string(), id: z.union([z.string(), z.number()]).optional() } }
+      ? { outputSchema: callMode === "large_result"
+        ? { items: z.array(z.object({ id: z.number(), name: z.string(), body: z.string() })) }
+        : { tool: z.string(), id: z.union([z.string(), z.number()]).optional() } }
       : {}),
   }, async (args) => {
     if (callDelayMs > 0) await delay(callDelayMs);
@@ -91,6 +93,13 @@ for (const tool of tools) {
         name: `item-${index + 1}`,
         body: "x".repeat(200),
       }));
+      if (tool.structured) {
+        const structuredContent = { items };
+        return {
+          content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+          structuredContent,
+        };
+      }
       return textResult(JSON.stringify(items));
     }
     if (tool.structured) {

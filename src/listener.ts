@@ -55,6 +55,7 @@ import {
   resolveResponseShieldLimits,
   resolveResponseShieldOptions,
   shieldToolResult,
+  toolForResponseShield,
   type ResponseShieldTarget,
 } from "./response-store.js";
 import {
@@ -2351,7 +2352,7 @@ export class CallmuxListener {
         ? { ...tool, name: qualifiedName, _meta: { ...tool._meta, "anthropic/alwaysLoad": true } }
         : { ...tool, name: qualifiedName };
       return compressToolForExposure(
-        base,
+        toolForResponseShield(base, this.options.config, { tool: tool.name, server }),
         this.options.config.schemaCompression,
         serverCfg?.schemaCompression
       );

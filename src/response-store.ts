@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
   CallmuxConfig,
@@ -189,6 +189,20 @@ export function resolveResponseShieldOptions(
   }
 
   return merged;
+}
+
+export function toolForResponseShield(
+  tool: Tool,
+  config: CallmuxConfig,
+  target: ResponseShieldTarget
+): Tool {
+  if (!tool.outputSchema || resolveResponseShieldOptions(config, target).enabled === false) {
+    return tool;
+  }
+  // The shield can replace structuredContent with a retrieval envelope. Keep
+  // the upstream schema for upstream validation, but do not advertise it here.
+  const { outputSchema: _outputSchema, ...exposed } = tool;
+  return exposed;
 }
 
 /** Numeric shield limits for a target; policy flags (enabled/allow/deny) are not applied. */

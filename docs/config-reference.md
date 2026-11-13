@@ -272,6 +272,13 @@ Per-server override:
 }
 ```
 
+Tools eligible for response shielding omit the downstream `outputSchema` from
+their exposed tool definitions. A truncated response contains a retrieval
+envelope instead of the original structured output, so the downstream schema
+would reject it. The downstream server's original schema still validates its
+results inside callmux. Tools excluded from shielding (by `enabled: false`,
+`allowTools`, or `denyTools`) keep their original `outputSchema`.
+
 Retrieve a stored result:
 
 ```json
