@@ -2171,6 +2171,15 @@ export function handleStatus(
         base.toolCount = tools.length;
       }
 
+      if (parsed.cacheEligibility === true) {
+        base.cacheEligibility = upstream.getServerTools(name).map((tool) => {
+          const reason = cache.getIneligibilityReason(
+            tool, name, upstream.getToolDefinition(tool, name)?.annotations
+          );
+          return { tool, eligible: reason === undefined, ...(reason ? { reason } : {}) };
+        });
+      }
+
       return base;
     });
 

@@ -208,19 +208,23 @@ export class CallCache {
     };
   }
 
-  private shouldCache(
+  /** Undefined means eligible; otherwise explains the policy blocking caching. */
+  getIneligibilityReason(
     tool: string,
     server?: string,
     annotations?: ToolSafetyAnnotations
-  ): boolean {
+  ): string | undefined {
+    if (this.ttlMs <= 0) return "caching disabled; set cacheTtlSeconds above 0";
     const policy = this.policyDecision(tool, server);
-    if (policy.denied) return false;
-    if (policy.explicitlyAllowed) return true;
-    if (policy.hasAllowList) return false;
+    if (policy.denied) return "tool matches cachePolicy.denyTools; deny rules take precedence";
+    if (policy.explicitlyAllowed) return undefined;
+    if (policy.hasAllowList) return "tool does not match cachePolicy.allowTools; add it to allowTools if replay-safe";
 
-    // MCP annotations default to false. Unknown tools are deliberately unsafe:
-    // names such as `get_and_delete` are not a trustworthy side-effect signal.
-    return annotations?.readOnlyHint === true;
+    // Names such as `get_and_delete` are not a trustworthy side-effect signal.
+    if (annotations?.readOnlyHint !== true) {
+      return "tool lacks readOnlyHint: true; add it to cachePolicy.allowTools if replay-safe";
+    }
+    return undefined;
   }
 
   isSafeToRetry(
@@ -244,8 +248,7 @@ export class CallCache {
     server?: string,
     annotations?: ToolSafetyAnnotations
   ): boolean {
-    if (this.ttlMs <= 0) return false;
-    return this.shouldCache(tool, server, annotations);
+    return this.getIneligibilityReason(tool, server, annotations) === undefined;
   }
 
   private key(
@@ -339,9 +342,8 @@ export class CallCache {
     scope?: string,
     annotations?: ToolSafetyAnnotations
   ): CallToolResult | null {
-    if (this.ttlMs <= 0) return null;
     const effectiveServer = this.effectiveServer(tool, server);
-    if (!this.shouldCache(tool, effectiveServer, annotations)) return null;
+    if (!this.canCache(tool, effectiveServer, annotations)) return null;
     const now = Date.now();
     this.maybePruneExpired(now);
 
@@ -371,9 +373,8 @@ export class CallCache {
     scope?: string,
     annotations?: ToolSafetyAnnotations
   ): void {
-    if (this.ttlMs <= 0) return;
     const effectiveServer = this.effectiveServer(tool, server);
-    if (!this.shouldCache(tool, effectiveServer, annotations)) return;
+    if (!this.canCache(tool, effectiveServer, annotations)) return;
     if (result.isError) return;
     const now = Date.now();
     this.maybePruneExpired(now);

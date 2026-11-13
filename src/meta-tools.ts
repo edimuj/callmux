@@ -452,6 +452,10 @@ export const META_TOOLS: Tool[] = [
           type: "boolean",
           description: "Include tool descriptions in output (default false)",
         },
+        cacheEligibility: {
+          type: "boolean",
+          description: "Include per-tool cache eligibility and exclusion reasons (default false).",
+        },
         descriptionMaxLength: {
           type: "integer",
           minimum: 0,

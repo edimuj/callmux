@@ -274,6 +274,12 @@ All argument objects support [file references](docs/config-reference.md#file-ref
 
 Callmux-owned structured results can render model-facing text as JSON, TOON, or conservative auto mode with `outputFormat: "json" | "toon" | "auto"`. JSON mode keeps `structuredContent`; TOON output is returned text-first because some MCP clients prioritize `structuredContent` over `content[].text`. Cache keys, response storage, and pipeline `$json` mapping stay JSON-native internally. JSON remains the default.
 
+Caching defaults to off. Set a positive `cacheTtlSeconds`; tools then need
+`readOnlyHint: true` unless explicitly allowed by `cachePolicy.allowTools`.
+Deny rules always win. Call `callmux_status` with `{"cacheEligibility":true}`
+to see why each tool is excluded. See [Caching](docs/config-reference.md#caching)
+for a config example, TTL behavior, and policy precedence.
+
 Print compact, version-aligned agent guidance with:
 
 ```bash

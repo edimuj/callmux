@@ -192,7 +192,11 @@ Listener deployments expose two status endpoints:
 
 ## Caching
 
-Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never cached.
+Set a positive `cacheTtlSeconds` or `--cache <seconds>` to enable caching; the
+default is `0` (disabled). TTL is measured from storage, not refreshed on a hit.
+Without an allowlist, only tools advertising the MCP annotation
+`readOnlyHint: true` are eligible. Tool names such as `get_*` do not imply safety;
+`idempotentHint` alone does not enable caching. Error results are never cached.
 
 ```json
 {
@@ -207,10 +211,13 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
 }
 ```
 
-- **`allowTools`**: only matching tools are cacheable (whitelist)
-- **`denyTools`**: matching tools are never cached (blacklist)
-- Supports exact names and `*` wildcards
-- Per-server policies combine with the global policy
+- **`allowTools`**: a nonempty allowlist restricts caching to matching tools and
+  explicitly permits them even without `readOnlyHint`. Only allow tools whose
+  identical calls can safely reuse a result.
+- **`denyTools`**: matching tools are never cached, even if allowed or read-only.
+- Supports exact names and `*` wildcards, matching bare or `server__tool` names.
+- Global and per-server allowlists combine (union); deny rules from either win.
+  A positive TTL is still required for explicitly allowed tools.
 - Oldest cache entries are evicted after `maxCacheEntries` (default: 1000)
 - Entries larger than `maxCacheEntryBytes` are not stored, and oldest entries
   are evicted before the cache exceeds `maxCacheBytes`
@@ -219,6 +226,16 @@ Enable with `cacheTtlSeconds` or `--cache <seconds>`. Error results are never ca
   shared invocation is cancelled when its last waiter leaves, and rejected
   calls are removed from the in-flight map
 - `callmux_cache_clear` invalidates manually
+
+To find why a tool is not cached, call `callmux_status` with
+`{"server":"github","cacheEligibility":true}` (omit `server` for all servers).
+Each `servers[].cacheEligibility[]` entry contains `tool`, `eligible`, and, when
+excluded, `reason`. For example: `"tool lacks readOnlyHint: true; add it to
+cachePolicy.allowTools if replay-safe"`. Reasons also identify disabled TTL,
+deny rules, and allowlist mismatches. This reports current eligibility, not the
+history of a particular call: an eligible call still misses on first use, expiry,
+eviction, different arguments or caller scope, errors, or oversized results.
+Ordinary tool results do not include these diagnostics.
 
 ---
 

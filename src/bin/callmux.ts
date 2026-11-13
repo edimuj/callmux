@@ -138,7 +138,7 @@ Options:
   --config <path>       Path to callmux config or .mcp.json file
   --tools <list>        Comma-separated tool whitelist (single-server mode)
   --env KEY=VALUE       Environment variable for downstream server (repeatable)
-  --cache <seconds>     Cache TTL for read operations (default: 0 = off)
+  --cache <seconds>     Cache TTL; requires readOnlyHint or allowlist (default: 0 = off)
   --cache-max-entries <n> Max cache entries before oldest entries are evicted (default: 1000)
   --cache-allow <list>  Comma-separated cache allowlist for single-server mode
   --cache-deny <list>   Comma-separated cache denylist for single-server mode

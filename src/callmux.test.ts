@@ -6752,6 +6752,46 @@ test("handleSearchTools validates limit and unknown server", () => {
 
 const TEST_INSTANCE_IDENTITY = { instanceId: "test-instance" };
 
+test("handleStatus explains cache eligibility using the effective tool policy", () => {
+  const cases = [
+    { name: "disabled TTL overrides allowlist", ttl: 0, policy: { allowTools: ["*"] }, reason: /caching disabled/ },
+    { name: "missing annotation", reason: /lacks readOnlyHint: true.*cachePolicy.allowTools/ },
+    { name: "false annotation", annotations: { readOnlyHint: false }, reason: /lacks readOnlyHint: true/ },
+    { name: "idempotent is insufficient", annotations: { idempotentHint: true }, reason: /lacks readOnlyHint: true/ },
+    { name: "read-only annotation", annotations: { readOnlyHint: true } },
+    { name: "explicit global allow", policy: { allowTools: ["github__get_*"] } },
+    { name: "explicit server allow", serverPolicy: { allowTools: ["get_issue"] } },
+    { name: "global and server allowlists combine", policy: { allowTools: ["other_*"] }, serverPolicy: { allowTools: ["get_issue"] } },
+    { name: "allowlist excludes annotated tool", policy: { allowTools: ["other_*"] }, annotations: { readOnlyHint: true }, reason: /does not match cachePolicy.allowTools/ },
+    { name: "global deny wins", policy: { denyTools: ["github__get_*"] }, serverPolicy: { allowTools: ["*"] }, annotations: { readOnlyHint: true }, reason: /denyTools.*precedence/ },
+    { name: "server deny wins", policy: { allowTools: ["*"] }, serverPolicy: { denyTools: ["get_issue"] }, reason: /denyTools.*precedence/ },
+  ];
+  for (const example of cases) {
+    const upstream = createMockUpstream([
+      { server: "github", tool: mockTool("get_issue", undefined, [], example.annotations) },
+      { server: "other", tool: mockTool("get_issue", undefined, [], { readOnlyHint: true }) },
+    ]);
+    const cache = new CallCache(example.ttl ?? 60, example.policy, { github: example.serverPolicy });
+    const status = (args: unknown) => handleStatus(
+      upstream as never, cache, 20, false, undefined, TEST_INSTANCE_IDENTITY, args
+    ).structuredContent as {
+      servers: Array<{ name: string; cacheEligibility?: Array<{ tool: string; eligible: boolean; reason?: string }> }>;
+    };
+    const content = status({ server: "github", cacheEligibility: true });
+    assert.equal(content.servers.length, 1, example.name);
+    const diagnostic = content.servers[0].cacheEligibility![0];
+    assert.equal(diagnostic.tool, "get_issue", example.name);
+    const eligible = example.reason === undefined;
+    assert.equal(diagnostic.eligible, eligible, example.name);
+    if (example.reason) assert.match(diagnostic.reason!, example.reason, example.name);
+    else assert.equal(diagnostic.reason, undefined, example.name);
+    assert.equal(cache.canCache("github__get_issue", undefined, example.annotations), eligible, example.name);
+    cache.set("get_issue", {}, textResult("issue"), "github", undefined, example.annotations);
+    assert.equal(cache.get("get_issue", {}, "github", undefined, example.annotations) !== null, eligible, example.name);
+    assert.equal(status({}).servers[0].cacheEligibility, undefined, example.name);
+  }
+});
+
 test("handleStatus includes mode field", () => {
   const upstream = createMockUpstream([
     { server: "github", tool: mockTool("get_issue") },

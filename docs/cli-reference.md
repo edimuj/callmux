@@ -41,9 +41,9 @@ Single-server mode flags (used with `callmux -- <server-command>`):
 |:-----|:------------|
 | `--tools <list>` | Comma-separated tool whitelist |
 | `--env KEY=VALUE` | Environment variable (repeatable) |
-| `--cache <seconds>` | Cache TTL |
+| `--cache <seconds>` | Cache TTL; 0 disables caching (default) |
 | `--cache-max-entries <n>` | Max cache entries before LRU eviction |
-| `--cache-allow <list>` | Cacheable tool patterns |
+| `--cache-allow <list>` | Explicit replay-safe tool allowlist; overrides missing `readOnlyHint` |
 | `--cache-deny <list>` | Non-cacheable tool patterns |
 | `--concurrency <n>` | Max parallel calls (default: 20) |
 | `--connect-timeout <ms>` | Startup connect/list-tools timeout |
@@ -258,3 +258,6 @@ The output covers meta-tool recovery fields, `callmux_dry_run`, response-shield 
 
 - [Config Reference](config-reference.md) - full config schema and options
 - [Shared Server Mode](shared-server.md) - listener setup, bridge command, client config
+
+For cache eligibility rules and per-tool exclusion reasons via `callmux_status`, see
+[Caching](config-reference.md#caching).
