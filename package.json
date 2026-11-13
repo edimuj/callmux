@@ -66,8 +66,5 @@
     "zod": "^4.3.6"
   },
   "author": "Edin Mujkanovic",
-  "license": "MIT",
-  "overrides": {
-    "ip-address": "10.2.0"
-  }
+  "license": "MIT"
 }
