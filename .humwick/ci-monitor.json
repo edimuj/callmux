@@ -5,7 +5,7 @@
       "id": "main",
       "workflow": "CI",
       "branch": "main",
-      "jobs": ["build-and-test (22)", "build-and-test (24)", "build-and-test (26)", "package-smoke", "audit", "secrets"],
+      "jobs": ["build-and-test (22)", "build-and-test (24)", "build-and-test (26)", "package-smoke", "dashboard", "audit", "secrets"],
       "events": ["push"]
     }
   ]
