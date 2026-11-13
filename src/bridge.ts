@@ -94,16 +94,19 @@ export class CallmuxBridge {
       }
     });
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       try {
         return await this.withReconnect((client) => client.callTool(
           request.params,
           undefined,
-          deriveBridgeCallOptions(
-            request.params.name,
-            request.params.arguments,
-            this.options.callTimeoutMs
-          )
+          {
+            ...deriveBridgeCallOptions(
+              request.params.name,
+              request.params.arguments,
+              this.options.callTimeoutMs
+            ),
+            signal: extra.signal,
+          }
         ), { idempotent: this.toolAllowsReplay(request.params.name) }) as unknown as CallToolResult;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
