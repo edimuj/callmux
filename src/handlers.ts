@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { PreparedToolCall, UpstreamManager } from "./upstream.js";
 import type { CallCache } from "./cache.js";
-import type { ResponseStore } from "./response-store.js";
+import { retrievalCall, type ResponseStore } from "./response-store.js";
 import type { SchemaCompressionDiagnostics } from "./schema-compression.js";
 import { errorResult, jsonResult } from "./results.js";
 import type {
@@ -236,6 +236,91 @@ function resolveOutputFormat(
   );
 }
 
+type DetailLevel = "full" | "brief";
+
+/**
+ * Stores a full callmux result and returns its ref, or undefined when the
+ * store declined it (for example over its size limits). The caller binds the
+ * response owner, so handlers stay unaware of sessions.
+ */
+export type ResultRetainer = (tool: string, result: CallToolResult) => string | undefined;
+
+function resolveDetail(
+  args: unknown,
+  retainResult: ResultRetainer | undefined
+): DetailLevel | CallToolResult {
+  if (!isRecord(args) || args.detail === undefined || args.detail === "full") return "full";
+  if (args.detail !== "brief") {
+    return errorResult("invalid_arguments", 'detail must be "full" or "brief"', {
+      field: "detail",
+    });
+  }
+  // Checked before any downstream call runs: brief must never execute calls
+  // whose successful results it then could not make retrievable.
+  if (!retainResult) {
+    return errorResult(
+      "invalid_arguments",
+      'detail "brief" needs the callmux result store, which is unavailable here; use detail "full"',
+      { field: "detail" }
+    );
+  }
+  return "brief";
+}
+
+interface FanOutPayload extends Record<string, unknown> {
+  results: Array<Record<string, unknown>>;
+  failedIndexes: number[];
+  warnings?: Array<Record<string, unknown>>;
+}
+
+/**
+ * Brief fan-out output: every failure stays inline; successful results are
+ * stored with the full payload and replaced by a retrieval reference. When the
+ * store declines the payload, the full output is returned instead so no result
+ * is ever lost.
+ */
+function fanOutOutput(
+  tool: "callmux_batch" | "callmux_parallel",
+  full: FanOutPayload,
+  detail: DetailLevel,
+  retainResult: ResultRetainer | undefined
+): Record<string, unknown> {
+  if (detail === "full" || !retainResult) return full;
+  const failed = new Set(full.failedIndexes);
+  const omitted = full.results.length - failed.size;
+  const { results, ...summary } = full;
+  const failures = results.flatMap((result, index) =>
+    failed.has(index) ? [{ ...result, index }] : []
+  );
+  if (omitted === 0) return { ...summary, detail: "brief", failures };
+
+  // structuredContent alone is what callmux_get_result pages; skip rendering text.
+  const ref = retainResult(tool, { content: [], structuredContent: full });
+  if (!ref) {
+    return {
+      ...full,
+      warnings: [
+        ...(full.warnings ?? []),
+        {
+          code: "brief_not_retained",
+          message:
+            "The result store declined this payload, so detail \"brief\" fell back to full results.",
+        },
+      ],
+    };
+  }
+  return {
+    ...summary,
+    detail: "brief",
+    failures,
+    omitted: {
+      results: omitted,
+      ref,
+      retrieval: retrievalCall(ref, "results"),
+    },
+  };
+}
+
 function contextWithCallOverrides(
   context: ToolCallContext | undefined,
   overrides: { timeoutMs?: number; cwd?: string }
@@ -431,27 +516,68 @@ function validateArgumentsObject(
   return value;
 }
 
+/** Input property names a tool declares, or undefined when the schema is unknown. */
+type InputPropertyLookup = (
+  tool: string,
+  server: string | undefined
+) => ReadonlySet<string> | undefined;
+
+function inputPropertyLookup(upstream: UpstreamManager): InputPropertyLookup {
+  const withDefinitions = upstream as UpstreamManager & {
+    getToolDefinition?: (toolName: string, serverHint?: string) => Tool | undefined;
+  };
+  return (tool, server) => {
+    if (typeof withDefinitions.getToolDefinition !== "function") return undefined;
+    const properties = withDefinitions.getToolDefinition(tool, server)?.inputSchema?.properties;
+    return isRecord(properties) ? new Set(Object.keys(properties)) : undefined;
+  };
+}
+
+/** Keys that route a call; they are never downstream arguments of a flat container. */
+const ROUTING_KEYS: ReadonlySet<string> = new Set(["tool", "server", "arguments"]);
+
 /**
  * Auto-wrap a flat argument object that is missing the `{arguments}` wrapper.
  * The common mental model is "a list of arg objects" — when a caller writes
  * `{tool, foo, bar}` instead of `{tool, arguments: {foo, bar}}`, lift every key
  * except the reserved meta-level keys into `arguments`.
  *
- * Only fires when `arguments` is absent. `wrapEmpty` controls the no-lift case:
- * batch requires `arguments` (so an item with only reserved keys still yields
- * `arguments: {}`); parallel/pipeline/call treat `arguments` as optional (so a
- * bare `{tool: "x"}` stays argument-less rather than gaining an empty object).
+ * A reserved override key (cwd, timeoutMs, ...) in a flat container stays a
+ * callmux override; when the target tool also declares that input property it
+ * is forwarded too, so a flat call never silently drops a downstream argument.
+ * A container that has `arguments` plus any non-reserved key is rejected: those
+ * keys would otherwise be dropped.
+ *
+ * `wrapEmpty` controls the no-lift case: batch requires `arguments` (so an item
+ * with only reserved keys still yields `arguments: {}`); parallel/pipeline/call
+ * treat `arguments` as optional (so a bare `{tool: "x"}` stays argument-less).
  */
 function liftFlatArguments(
   container: Record<string, unknown>,
   reserved: ReadonlySet<string>,
-  wrapEmpty: boolean
-): { source: unknown; wrapped: boolean } {
-  if ("arguments" in container) return { source: container.arguments, wrapped: false };
+  wrapEmpty: boolean,
+  field: string,
+  declared?: ReadonlySet<string>
+): { source: unknown; wrapped: boolean } | CallToolResult {
+  if ("arguments" in container) {
+    const strayKeys = Object.keys(container).filter(
+      (key) => key !== "arguments" && !reserved.has(key)
+    );
+    if (strayKeys.length > 0) {
+      return errorResult(
+        "invalid_arguments",
+        `${field} mixes "arguments" with other keys (${strayKeys.join(", ")}); put downstream arguments inside "arguments" or drop the wrapper`,
+        { field, unexpectedKeys: strayKeys }
+      );
+    }
+    return { source: container.arguments, wrapped: false };
+  }
   const lifted: Record<string, unknown> = {};
   let any = false;
   for (const [key, value] of Object.entries(container)) {
-    if (reserved.has(key)) continue;
+    if (reserved.has(key)) {
+      if (ROUTING_KEYS.has(key) || !declared?.has(key)) continue;
+    }
     lifted[key] = value;
     any = true;
   }
@@ -490,7 +616,8 @@ const CALL_RESERVED_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 function validateParallelArgs(
-  args: unknown
+  args: unknown,
+  inputProperties?: InputPropertyLookup
 ): { calls: ParallelCall[]; autoWrappedCalls?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.calls)) {
     return errorResult("invalid_arguments", `"calls" must be an array`, {
@@ -520,7 +647,14 @@ function validateParallelArgs(
     // Auto-wrap a flat call ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
     // Without this the stray keys are silently dropped and the tool runs with no
     // arguments. arguments is optional here, so a bare {tool} stays argument-less.
-    const lifted = liftFlatArguments(call, PARALLEL_RESERVED_KEYS, false);
+    const lifted = liftFlatArguments(
+      call,
+      PARALLEL_RESERVED_KEYS,
+      false,
+      `calls[${index}]`,
+      inputProperties?.(tool, typeof server === "string" ? server : undefined)
+    );
+    if (isToolErrorResult(lifted)) return lifted;
     if (lifted.wrapped) autoWrappedCalls++;
     const parsedArgs = validateArgumentsObject(
       lifted.source,
@@ -545,7 +679,8 @@ function validateParallelArgs(
 }
 
 function validateBatchArgs(
-  args: unknown
+  args: unknown,
+  inputProperties?: InputPropertyLookup
 ): { server?: string; tool: string; items: BatchItem[]; timeoutMs?: number; cwd?: string; autoWrappedItems?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.items)) {
     return errorResult("invalid_arguments", `"items" must be an array`, {
@@ -566,6 +701,7 @@ function validateBatchArgs(
 
   const items: BatchItem[] = [];
   let autoWrappedItems = 0;
+  const declared = inputProperties?.(tool, typeof server === "string" ? server : undefined);
   for (let index = 0; index < args.items.length; index++) {
     const item = args.items[index];
     if (!isRecord(item)) {
@@ -578,7 +714,14 @@ function validateBatchArgs(
     // items: [{foo, bar}] becomes items: [{arguments: {foo, bar}}]. Reserved
     // per-item keys (cwd, timeoutMs) stay at the item level. arguments is
     // required for a batch item, so wrapEmpty is true.
-    const lifted = liftFlatArguments(item, BATCH_RESERVED_KEYS, true);
+    const lifted = liftFlatArguments(
+      item,
+      BATCH_RESERVED_KEYS,
+      true,
+      `items[${index}]`,
+      declared
+    );
+    if (isToolErrorResult(lifted)) return lifted;
     if (lifted.wrapped) autoWrappedItems++;
 
     const parsedArgs = validateArgumentsObject(lifted.source, `items[${index}].arguments`);
@@ -616,7 +759,8 @@ function validateBatchArgs(
 }
 
 function validatePipelineArgs(
-  args: unknown
+  args: unknown,
+  inputProperties?: InputPropertyLookup
 ): { steps: PipelineStep[]; autoWrappedSteps?: number } | CallToolResult {
   if (!isRecord(args) || !Array.isArray(args.steps)) {
     return errorResult("invalid_arguments", `"steps" must be an array`, {
@@ -652,7 +796,14 @@ function validatePipelineArgs(
     // Auto-wrap a flat step ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
     // inputMapping/onMappingMissing are reserved, so a step that only carries a
     // mapping is left argument-less rather than wrapped.
-    const lifted = liftFlatArguments(step, PIPELINE_RESERVED_KEYS, false);
+    const lifted = liftFlatArguments(
+      step,
+      PIPELINE_RESERVED_KEYS,
+      false,
+      `steps[${index}]`,
+      inputProperties?.(tool, typeof server === "string" ? server : undefined)
+    );
+    if (isToolErrorResult(lifted)) return lifted;
     if (lifted.wrapped) autoWrappedSteps++;
     const parsedArgs = validateArgumentsObject(
       lifted.source,
@@ -764,7 +915,8 @@ interface DryRunCall {
 }
 
 function validateDryRunArgs(
-  args: unknown
+  args: unknown,
+  inputProperties: InputPropertyLookup
 ): { mode: DryRunMode; calls: DryRunCall[] } | CallToolResult {
   if (!isRecord(args)) {
     return errorResult("invalid_arguments", "dry run arguments must be an object", {
@@ -838,7 +990,7 @@ function validateDryRunArgs(
   }
 
   if (inferredMode === "parallel") {
-    const validated = validateParallelArgs(args);
+    const validated = validateParallelArgs(args, inputProperties);
     if (isToolErrorResult(validated)) return validated;
     return {
       mode: "parallel",
@@ -850,7 +1002,7 @@ function validateDryRunArgs(
   }
 
   if (inferredMode === "batch") {
-    const validated = validateBatchArgs(args);
+    const validated = validateBatchArgs(args, inputProperties);
     if (isToolErrorResult(validated)) return validated;
     return {
       mode: "batch",
@@ -869,7 +1021,7 @@ function validateDryRunArgs(
     };
   }
 
-  const validated = validatePipelineArgs(args);
+  const validated = validatePipelineArgs(args, inputProperties);
   if (isToolErrorResult(validated)) return validated;
   return {
     mode: "pipeline",
@@ -1026,14 +1178,17 @@ export async function handleParallel(
   args: unknown,
   maxConcurrency: number,
   context?: ToolCallContext,
-  defaultOutputFormat?: OutputFormat
+  defaultOutputFormat?: OutputFormat,
+  retainResult?: ResultRetainer
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
+  const detail = resolveDetail(args, retainResult);
+  if (isToolErrorResult(detail)) return detail;
 
-  const parsedArgs = validateParallelArgs(args);
+  const parsedArgs = validateParallelArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
@@ -1097,7 +1252,7 @@ export async function handleParallel(
     return [];
   });
   const failed = failedIndexes.length;
-  const output = {
+  const output: FanOutPayload = {
     status: failed === 0 ? "completed" : "partial",
     results,
     totalDurationMs: Date.now() - startTime,
@@ -1111,14 +1266,17 @@ export async function handleParallel(
               code: "auto_wrapped_flat_calls",
               message: `Auto-wrapped ${autoWrappedCalls} flat call${autoWrappedCalls === 1 ? "" : "s"} into the {arguments} shape.`,
               recommendation:
-                "Canonical shape is calls: [{ tool, arguments: {...} }]. Reserved keys (server, cwd, timeoutMs) stay outside arguments.",
+                "Canonical shape is calls: [{ tool, arguments: {...} }]. Reserved keys (server, cwd, timeoutMs) stay outside arguments; cwd/timeoutMs are also forwarded when the tool declares them.",
             },
           ],
         }
       : {}),
   };
 
-  return successResult(output as unknown as Record<string, unknown>, outputFormat);
+  return successResult(
+    fanOutOutput("callmux_parallel", output, detail, retainResult),
+    outputFormat
+  );
 }
 
 export async function handleBatch(
@@ -1127,14 +1285,17 @@ export async function handleBatch(
   args: unknown,
   maxConcurrency: number,
   context?: ToolCallContext,
-  defaultOutputFormat?: OutputFormat
+  defaultOutputFormat?: OutputFormat,
+  retainResult?: ResultRetainer
 ): Promise<CallToolResult> {
   const concurrencyError = validateConcurrency(maxConcurrency);
   if (concurrencyError) return concurrencyError;
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
+  const detail = resolveDetail(args, retainResult);
+  if (isToolErrorResult(detail)) return detail;
 
-  const parsedArgs = validateBatchArgs(args);
+  const parsedArgs = validateBatchArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
@@ -1205,7 +1366,7 @@ export async function handleBatch(
     }
     return [];
   });
-  const output = {
+  const output: FanOutPayload = {
     status: failed === 0 ? "completed" : "partial",
     results,
     totalDurationMs: Date.now() - startTime,
@@ -1219,14 +1380,17 @@ export async function handleBatch(
               code: "auto_wrapped_flat_items",
               message: `Auto-wrapped ${autoWrappedItems} flat item${autoWrappedItems === 1 ? "" : "s"} into the {arguments} shape.`,
               recommendation:
-                "Canonical shape is items: [{ arguments: {...} }]. Reserved per-item keys (cwd, timeoutMs) stay outside arguments.",
+                "Canonical shape is items: [{ arguments: {...} }]. Reserved per-item keys (cwd, timeoutMs) stay outside arguments; they are also forwarded when the tool declares them.",
             },
           ],
         }
       : {}),
   };
 
-  return successResult(output as unknown as Record<string, unknown>, outputFormat);
+  return successResult(
+    fanOutOutput("callmux_batch", output, detail, retainResult),
+    outputFormat
+  );
 }
 
 export async function handlePipeline(
@@ -1238,7 +1402,7 @@ export async function handlePipeline(
 ): Promise<CallToolResult> {
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
-  const parsedArgs = validatePipelineArgs(args);
+  const parsedArgs = validatePipelineArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsedArgs)) return parsedArgs;
 
   const startTime = Date.now();
@@ -1425,7 +1589,7 @@ export async function handleDryRun(
 ): Promise<CallToolResult> {
   const outputFormat = resolveOutputFormat(args, defaultOutputFormat);
   if (isToolErrorResult(outputFormat)) return outputFormat;
-  const parsed = validateDryRunArgs(args);
+  const parsed = validateDryRunArgs(args, inputPropertyLookup(upstream));
   if (isToolErrorResult(parsed)) return parsed;
 
   const items: Array<Record<string, unknown>> = [];
@@ -1563,7 +1727,14 @@ export async function handleCall(
   // Auto-wrap a flat call ({tool, foo, bar}) into {tool, arguments: {foo, bar}}.
   // Reserved meta keys (server, timeoutMs, cwd, forceReconnect, outputFormat)
   // stay at the top level; everything else lifts into arguments.
-  const liftedArgs = liftFlatArguments(args, CALL_RESERVED_KEYS, false);
+  const liftedArgs = liftFlatArguments(
+    args,
+    CALL_RESERVED_KEYS,
+    false,
+    "call",
+    inputPropertyLookup(upstream)(tool, server)
+  );
+  if (isToolErrorResult(liftedArgs)) return liftedArgs;
   const parsedArgs = validateArgumentsObject(liftedArgs.source, "arguments");
   if (parsedArgs !== undefined && !isRecord(parsedArgs)) return parsedArgs;
   const timeoutMs = validateTimeoutMs(args.timeoutMs, "timeoutMs");
@@ -1643,6 +1814,7 @@ interface SearchableTool {
   server: string;
   description?: string;
   inputFields: string[];
+  inputSchema?: Tool["inputSchema"];
 }
 
 function normalizeSearchText(value: string): string {
@@ -1687,6 +1859,7 @@ function getSearchableTools(upstream: UpstreamManager): SearchableTool[] {
         server,
         ...(tool.description ? { description: tool.description } : {}),
         inputFields: extractInputFields(tool.inputSchema),
+        inputSchema: tool.inputSchema,
       }))
       .sort((a, b) =>
         a.server.localeCompare(b.server) || a.name.localeCompare(b.name)
@@ -1784,6 +1957,13 @@ export function handleSearchTools(
       parsed.descriptionMaxLength > 0 ? parsed.descriptionMaxLength : undefined;
   }
 
+  if (parsed.includeSchema !== undefined && typeof parsed.includeSchema !== "boolean") {
+    return errorResult("invalid_arguments", "includeSchema must be a boolean", {
+      field: "includeSchema",
+    });
+  }
+  const includeSchema = parsed.includeSchema === true;
+
   const query = typeof parsed.query === "string" ? parsed.query : "";
   const allTools = getSearchableTools(upstream);
   const serverTools = server
@@ -1831,6 +2011,7 @@ export function handleSearchTools(
         ? { description: truncate(tool.description) }
         : {}),
       ...(tool.inputFields.length > 0 ? { inputFields: tool.inputFields } : {}),
+      ...(includeSchema && tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
     })),
   }, { outputFormat });
 }
@@ -1859,8 +2040,11 @@ export async function handleRecipeRun(
   if (isToolErrorResult(outputFormat)) return outputFormat;
 
   switch (expanded.recipe.mode) {
-    case "call":
-      return handleCall(upstream, cache, expanded.args, context, outputFormat);
+    case "call": {
+      // `mode` only selects the dry-run shape; it is not a call argument.
+      const { mode: _mode, ...callArgs } = expanded.args;
+      return handleCall(upstream, cache, callArgs, context, outputFormat);
+    }
     case "parallel":
       return handleParallel(
         upstream,
@@ -2102,7 +2286,7 @@ export function handleStatus(
     recommendations.push({
       when: "Find the right downstream tool by task or keyword",
       use: "callmux_search_tools",
-      note: "Search tool names, descriptions, servers, and input field hints.",
+      note: "Search tool names, descriptions, servers, and input field hints; includeSchema:true returns types, required fields, and enums.",
     });
     recommendations.push({
       when: "Single downstream call in meta-only mode",
@@ -2124,7 +2308,7 @@ export function handleStatus(
     {
       when: "Same tool repeated with different arguments",
       use: "callmux_batch",
-      note: "Fan out one tool across many input items.",
+      note: "Fan out one tool across many input items. Use detail:\"brief\" to keep only failures inline.",
     },
     {
       when: "Later call depends on earlier output",

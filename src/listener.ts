@@ -21,6 +21,7 @@ import type { CallCache } from "./cache.js";
 import {
   handleParallel,
   handleBatch,
+  type ResultRetainer,
   handlePipeline,
   handleCall,
   handleSearchTools,
@@ -2129,6 +2130,8 @@ export class CallmuxListener {
       // can't retrieve it later via callmux_get_result (undefined = unowned when
       // unauthenticated; see responseOwnerKey).
       const responseOwner = this.responseOwnerKey(principal);
+      const retainResult: ResultRetainer = (tool, stored) =>
+        this.responseStore.store(tool, stored, responseOwner)?.ref;
 
       let result: CallToolResult;
       switch (name) {
@@ -2142,7 +2145,8 @@ export class CallmuxListener {
               args,
               maxConcurrency,
               toolContext,
-              config.outputFormat
+              config.outputFormat,
+              retainResult
             ),
             this.outputFormatFor(args),
             responseOwner
@@ -2158,7 +2162,8 @@ export class CallmuxListener {
               args,
               maxConcurrency,
               toolContext,
-              config.outputFormat
+              config.outputFormat,
+              retainResult
             ),
             this.outputFormatFor(args),
             responseOwner
