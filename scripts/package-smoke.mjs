@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -21,11 +21,16 @@ function run(command, args, cwd, capture = false) {
 }
 
 try {
-  // npm pack must build everything itself; no build or test compilation first.
-  run("npm", ["pack", "--pack-destination", scratch], root);
-  const archives = (await readdir(scratch)).filter((path) => path.endsWith(".tgz"));
-  assert.equal(archives.length, 1);
-  const archive = join(scratch, archives[0]);
+  let archive;
+  if (process.argv[2]) {
+    archive = resolve(process.argv[2]);
+  } else {
+    // npm pack must build everything itself; no build or test compilation first.
+    run("npm", ["pack", "--pack-destination", scratch], root);
+    const archives = (await readdir(scratch)).filter((path) => path.endsWith(".tgz"));
+    assert.equal(archives.length, 1);
+    archive = join(scratch, archives[0]);
+  }
   const paths = run("tar", ["-tzf", archive], root, true).trim().split("\n")
     .map((path) => path.replace(/^package\//, "")).sort();
   for (const path of paths) {

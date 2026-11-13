@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate the release without publishing (must be true)
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'edimuj/callmux'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            dashboard/package-lock.json
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.19.1
+
+      - name: Verify release tag, main ancestry, and green CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main && "$DRY_RUN" == true ]] || {
+              echo 'Manual releases require main and dry_run=true' >&2
+              exit 1
+            }
+            tag="v$(node -p "require('./package.json').version")"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          node scripts/check-release.mjs "$tag"
+          echo "RELEASE_TARBALL=$RUNNER_TEMP/release/callmux-$(node -p "require('./package.json').version").tgz" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Pack the release archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --pack-destination "$RUNNER_TEMP/release"
+
+      - name: Smoke test the release archive
+        run: npm run test:package -- "$RELEASE_TARBALL"
+
+      - name: Publish to npm with provenance
+        if: github.event_name == 'push'
+        run: npm publish "$RELEASE_TARBALL" --provenance --access public
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes

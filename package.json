@@ -38,7 +38,7 @@
     "dev:dashboard": "npm --prefix dashboard run dev",
     "build:dashboard": "npm --prefix dashboard ci --no-audit --no-fund && npm --prefix dashboard run build && node scripts/copy-dashboard-asset.mjs",
     "check:public-surface": "node scripts/check-public-surface.mjs",
-    "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js",
+    "test": "tsc --project tsconfig.test.json && node --test dist-test/*.test.js scripts/*.test.mjs",
     "test:package": "node scripts/package-smoke.mjs",
     "test:dashboard": "npm run build && npm run build:dashboard && playwright test",
     "prepack": "npm run build && npm run build:dashboard"

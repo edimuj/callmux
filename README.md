@@ -354,6 +354,7 @@ The wizard detects existing MCP servers, lets you pick from a curated list or ad
 | [CLI Reference](docs/cli-reference.md) | Commands, flags, common workflows |
 | [Threat Model](docs/security/2026-04-30-enterprise-threat-model.md) | Security boundaries and controls |
 | [Release Profiles](docs/security/2026-04-30-release-profiles.md) | Dev/staging/prod hardening presets |
+| [Releasing](docs/releasing.md) | npm trusted publishing, dry runs, and version tags |
 
 ---
 
