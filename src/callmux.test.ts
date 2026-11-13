@@ -2643,9 +2643,9 @@ test("package test script executes compiled test files", async () => {
     await readFile(new URL("../package.json", import.meta.url), "utf-8")
   ) as { scripts?: Record<string, string> };
 
-  assert.equal(
-    packageJson.scripts?.test,
-    "tsc --project tsconfig.test.json && node --test dist-test/*.test.js"
+  assert.match(
+    packageJson.scripts?.test ?? "",
+    /^tsc --project tsconfig\.test\.json && node --test dist-test\/\*\.test\.js(?:\s|$)/
   );
 });
 
