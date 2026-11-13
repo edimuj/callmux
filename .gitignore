@@ -3,6 +3,8 @@ node_modules
 dist/
 dist-test/
 dashboard/dist/
+test-results/
+playwright-report/
 assets/dashboard.html
 *.tgz
 .DS_Store
