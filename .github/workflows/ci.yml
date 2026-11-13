@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ${{ github.event_name == 'pull_request' && fromJSON('[20, 22, 24]') || fromJSON('[24]') }}
+        node-version: [22, 24, 26]
     steps:
       - uses: actions/checkout@v6
 
@@ -55,7 +55,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
 
       - run: npm ci
 

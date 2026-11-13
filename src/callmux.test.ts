@@ -13606,8 +13606,8 @@ test("listener requires bearer auth for /mcp", async () => {
 
 test("listener scopes stdio downstream cwd per MCP session", async () => {
   const upstream = new UpstreamManager();
-  const rootA = await mkdtemp(join(tmpdir(), "callmux-cwd-a-"));
-  const rootB = await mkdtemp(join(tmpdir(), "callmux-cwd-b-"));
+  const rootA = await realpath(await mkdtemp(join(tmpdir(), "callmux-cwd-a-")));
+  const rootB = await realpath(await mkdtemp(join(tmpdir(), "callmux-cwd-b-")));
   const cache = new CallCache(60, undefined, {}, 100);
   let listener: CallmuxListener | undefined;
 
@@ -13749,7 +13749,7 @@ test("listener scopes stdio downstream cwd per MCP session", async () => {
 
 test("stdio bridge forwards calls to shared listener with cwd header", async () => {
   const upstream = new UpstreamManager();
-  const root = await mkdtemp(join(tmpdir(), "callmux-bridge-cwd-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "callmux-bridge-cwd-")));
   const cache = new CallCache(0, undefined, {}, 100);
   let listener: CallmuxListener | undefined;
   let bridgeClient: Client | undefined;
@@ -14396,8 +14396,8 @@ test("stdio bridge skips notification on reconnect when tools unchanged", async 
 
 test("stdio bridge preserves per-call cwd metadata for shared listener", async () => {
   const upstream = new UpstreamManager();
-  const rootA = await mkdtemp(join(tmpdir(), "callmux-bridge-meta-a-"));
-  const rootB = await mkdtemp(join(tmpdir(), "callmux-bridge-meta-b-"));
+  const rootA = await realpath(await mkdtemp(join(tmpdir(), "callmux-bridge-meta-a-")));
+  const rootB = await realpath(await mkdtemp(join(tmpdir(), "callmux-bridge-meta-b-")));
   const cache = new CallCache(0, undefined, {}, 100);
   let listener: CallmuxListener | undefined;
   let bridgeClient: Client | undefined;
