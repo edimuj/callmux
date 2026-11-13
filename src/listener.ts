@@ -21,6 +21,7 @@ import type { CallCache } from "./cache.js";
 import {
   handleParallel,
   handleBatch,
+  isBriefFanOut,
   type ResultRetainer,
   handlePipeline,
   handleCall,
@@ -2137,8 +2138,9 @@ export class CallmuxListener {
       switch (name) {
         case "callmux_parallel":
           target = { tool: name };
-          result = this.shieldResult(
+          result = this.shieldFanOut(
             target,
+            args,
             await handleParallel(
               upstream,
               cache,
@@ -2148,14 +2150,14 @@ export class CallmuxListener {
               config.outputFormat,
               retainResult
             ),
-            this.outputFormatFor(args),
             responseOwner
           );
           break;
         case "callmux_batch":
           target = { tool: name };
-          result = this.shieldResult(
+          result = this.shieldFanOut(
             target,
+            args,
             await handleBatch(
               upstream,
               cache,
@@ -2165,7 +2167,6 @@ export class CallmuxListener {
               config.outputFormat,
               retainResult
             ),
-            this.outputFormatFor(args),
             responseOwner
           );
           break;
@@ -2398,6 +2399,18 @@ export class CallmuxListener {
     }
 
     return { tool };
+  }
+
+  /** Brief fan-out output is final; only full output goes through the shield. */
+  private shieldFanOut(
+    target: ResponseShieldTarget,
+    args: unknown,
+    result: CallToolResult,
+    owner: string | undefined
+  ): CallToolResult {
+    return isBriefFanOut(args)
+      ? result
+      : this.shieldResult(target, result, this.outputFormatFor(args), owner);
   }
 
   private shieldResult(

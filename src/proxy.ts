@@ -12,6 +12,7 @@ import { META_TOOLS } from "./meta-tools.js";
 import {
   handleParallel,
   handleBatch,
+  isBriefFanOut,
   type ResultRetainer,
   handlePipeline,
   handleCall,
@@ -243,8 +244,9 @@ export class CallmuxProxy {
     // Meta-tools
     switch (name) {
       case "callmux_parallel":
-        return this.shieldResult(
-          { tool: name },
+        return this.shieldFanOut(
+          name,
+          args,
           await handleParallel(
             this.upstream,
             this.cache,
@@ -253,13 +255,13 @@ export class CallmuxProxy {
             context,
             this.config.outputFormat,
             this.retainResult
-          ),
-          this.outputFormatFor(args)
+          )
         );
 
       case "callmux_batch":
-        return this.shieldResult(
-          { tool: name },
+        return this.shieldFanOut(
+          name,
+          args,
           await handleBatch(
             this.upstream,
             this.cache,
@@ -268,8 +270,7 @@ export class CallmuxProxy {
             context,
             this.config.outputFormat,
             this.retainResult
-          ),
-          this.outputFormatFor(args)
+          )
         );
 
       case "callmux_pipeline":
@@ -470,6 +471,17 @@ export class CallmuxProxy {
 
   private readonly retainResult: ResultRetainer = (tool, result) =>
     this.responseStore.store(tool, result)?.ref;
+
+  private shieldFanOut(
+    name: string,
+    args: Record<string, unknown> | undefined,
+    result: CallToolResult
+  ): CallToolResult {
+    const outputFormat = this.outputFormatFor(args);
+    return isBriefFanOut(args)
+      ? this.finalizeOutputFormat(result, outputFormat)
+      : this.shieldResult({ tool: name }, result, outputFormat);
+  }
 
   private shieldResult(
     target: ResponseShieldTarget,

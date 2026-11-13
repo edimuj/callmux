@@ -18155,3 +18155,98 @@ test("listener brief batch refs are retrievable by the owning principal only", a
     await listener.close();
   }
 });
+
+/** 51 failing calls (beyond the default 50-item shield) around one success. */
+function manyFailuresWithOneSuccess(): Array<Record<string, unknown>> {
+  return [
+    ...Array.from({ length: 25 }, () => ({ tool: "missing_tool" })),
+    { tool: "get_item", arguments: { id: "ok" } },
+    ...Array.from({ length: 26 }, () => ({ tool: "missing_tool" })),
+  ];
+}
+
+function assertCompleteBriefFailures(result: CallToolResult): Record<string, unknown> {
+  const brief = result.structuredContent as {
+    _callmux?: unknown;
+    status: string;
+    detail: string;
+    succeeded: number;
+    failed: number;
+    failedIndexes: number[];
+    failures: Array<{ index: number }>;
+    omitted: { results: number; retrieval: { arguments: Record<string, unknown> } };
+  };
+  const expectedFailed = Array.from({ length: 52 }, (_, index) => index).filter((index) => index !== 25);
+  assert.equal(brief._callmux, undefined, "brief output must not be re-shielded");
+  assert.equal(brief.status, "partial");
+  assert.equal(brief.detail, "brief");
+  assert.equal(brief.succeeded, 1);
+  assert.equal(brief.failed, 51);
+  assert.deepEqual(brief.failedIndexes, expectedFailed);
+  assert.deepEqual(brief.failures.map((failure) => failure.index), expectedFailed);
+  assert.equal(brief.omitted.results, 1);
+  return brief.omitted.retrieval.arguments;
+}
+
+test("brief fan-out over MCP keeps all failures and its omitted ref with default and minimal stores", async () => {
+  for (const responseShield of [undefined, { maxStoredResults: 1 }]) {
+    const harness = await startProxyClient({
+      servers: {
+        items: fakeMcpServer("items", {
+          FAKE_MCP_TOOLS: JSON.stringify([{ name: "get_item", requiredId: true }]),
+        }),
+      },
+      cacheTtlSeconds: 0,
+      ...(responseShield ? { responseShield } : {}),
+    });
+    try {
+      const brief = await harness.call("callmux_parallel", { detail: "brief", calls: manyFailuresWithOneSuccess() });
+      const retrieval = assertCompleteBriefFailures(brief);
+      const page = await harness.call("callmux_get_result", { ...retrieval, offset: 25, limit: 1 });
+      assert.notEqual(page.isError, true, JSON.stringify(page.structuredContent));
+      const data = (page.structuredContent as { data: Array<{ result: unknown }> }).data;
+      assert.match(JSON.stringify(data[0].result), /"tool":"get_item"/);
+    } finally {
+      await harness.close();
+    }
+  }
+});
+
+test("listener brief batch with a one-entry store keeps all failures and its omitted ref", async () => {
+  const upstream = createMockUpstream([{ server: "items", tool: mockTool("get_item", "Get", ["id"]) }]);
+  (upstream as unknown as { callPrepared: (prepared: { resolvedArguments?: { id?: string } }) => Promise<CallToolResult> })
+    .callPrepared = async (prepared) =>
+      prepared.resolvedArguments?.id === "ok"
+        ? textResult(JSON.stringify({ id: "ok" }))
+        : { content: [{ type: "text", text: "not found" }], isError: true };
+  const listener = new CallmuxListener({
+    port: 0,
+    host: "127.0.0.1",
+    config: { servers: { items: { command: "ignored" } }, responseShield: { maxStoredResults: 1 } },
+    upstream: upstream as unknown as UpstreamManager,
+    cache: new CallCache(0, undefined, {}, 100),
+    allTools: [],
+    maxConcurrency: 10,
+  });
+  await listener.start();
+  const client = new Client({ name: "brief-listener", version: "1.0" }, { capabilities: {} });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${listenerPort(listener)}/mcp`)));
+    const items = Array.from({ length: 52 }, (_, index) => ({ id: index === 25 ? "ok" : `missing-${index}` }));
+    const brief = await client.callTool({
+      name: "callmux_batch",
+      arguments: { tool: "get_item", detail: "brief", items },
+    }) as CallToolResult;
+    const retrieval = assertCompleteBriefFailures(brief);
+    const page = await client.callTool({
+      name: "callmux_get_result",
+      arguments: { ...retrieval, offset: 25, limit: 1 },
+    }) as CallToolResult;
+    assert.notEqual(page.isError, true, JSON.stringify(page.structuredContent));
+    const data = (page.structuredContent as { data: Array<{ result: unknown }> }).data;
+    assert.deepEqual(data[0].result, { id: "ok" });
+  } finally {
+    await client.close().catch(() => undefined);
+    await listener.close();
+  }
+});

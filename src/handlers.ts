@@ -267,6 +267,15 @@ function resolveDetail(
   return "brief";
 }
 
+/**
+ * Brief fan-out output is already shaped and retained by the handler. Callers
+ * must not run the generic response shield over it: that would truncate the
+ * inline failures and could evict the summary's own omitted ref.
+ */
+export function isBriefFanOut(args: unknown): boolean {
+  return isRecord(args) && args.detail === "brief";
+}
+
 interface FanOutPayload extends Record<string, unknown> {
   results: Array<Record<string, unknown>>;
   failedIndexes: number[];
