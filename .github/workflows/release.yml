@@ -56,7 +56,17 @@ jobs:
             tag="$GITHUB_REF_NAME"
           fi
           node scripts/check-release.mjs "$tag"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           echo "RELEASE_TARBALL=$RUNNER_TEMP/release/callmux-$(node -p "require('./package.json').version").tgz" >> "$GITHUB_ENV"
+
+      - name: Generate and preview release notes (including dry runs)
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            node scripts/release-notes.mjs "$RELEASE_TAG" --dry-run > "$RUNNER_TEMP/release-notes.md"
+          else
+            node scripts/release-notes.mjs "$RELEASE_TAG" > "$RUNNER_TEMP/release-notes.md"
+          fi
+          cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       - run: npm ci
 
@@ -78,4 +88,4 @@ jobs:
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        run: gh release create "$RELEASE_TAG" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md"

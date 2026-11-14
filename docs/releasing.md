@@ -48,6 +48,33 @@ node scripts/check-release.mjs v0.0.0
 # exits nonzero: Release tag v0.0.0 does not match package.json version v<current-version>
 ```
 
+## Release notes
+
+The workflow groups conventional commits into Breaking (`!` or a `BREAKING CHANGE:` /
+`BREAKING-CHANGE:` footer), Features (`feat`), Fixes (`fix`), and Maintenance
+(`chore`, `ci`, `test`, `docs`, `deps`). Other commits appear under Other changes.
+It omits `chore(release)` commits and empty sections; no merged PRs are required.
+
+Preview an existing tag locally, optionally specifying its predecessor:
+
+```sh
+node scripts/release-notes.mjs v0.27.0 v0.26.1
+```
+
+For a prospective tag, add `--dry-run` to use HEAD. The manual workflow uses this
+mode and displays the notes in its summary before any publishing step.
+Without an explicit predecessor, the generator finds the nearest reachable
+version tag, excluding the target tag itself.
+
+Compatibility changes missing from commit metadata can be recorded in
+`scripts/release-notes.json`, keyed by release tag with a `breaking` array.
+The same generator can backfill an existing release:
+
+```sh
+node scripts/release-notes.mjs v0.27.0 > "$TMPDIR/release-notes.md"
+gh release edit v0.27.0 --notes-file "$TMPDIR/release-notes.md"
+```
+
 ## Reinstall the host manually
 
 After verifying the release, an operator can reinstall on `macmini2` with `npm install --global callmux@0.27.0`, then restart the relevant service and check `callmux --version`. CI does not connect to or restart hosts.

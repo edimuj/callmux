@@ -1,0 +1,5 @@
+{
+  "v0.27.0": {
+    "breaking": ["Node.js >=22.19.0 is now required (previously >=18.0.0)."]
+  }
+}
